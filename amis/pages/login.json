@@ -1,0 +1,399 @@
+{
+  "status": 0,
+  "msg": "",
+  "data": {
+    "pages": [
+      {
+        "label": "Home",
+        "url": "/",
+        "redirect": "/login"
+      },
+      {
+        "label": "功能导航",
+        "children": [
+          {
+            "label": "登录/注册",
+            "url": "login",
+            "schema": {
+              "type": "tabs",
+              "tabs": [
+                {
+                  "type": "tabs",
+                  "tabs": [
+                    {
+                      "title": "用户登录",
+                      "body": [
+                        {
+                          "type": "form",
+                          "mode": "normal",
+                          "api": "/amis/api/mock2/form/saveForm?waitSeconds=2",
+                          "title": "常规模式",
+                          "body": [
+                            {
+                              "type": "input-email",
+                              "name": "email",
+                              "required": true,
+                              "placeholder": "请输入邮箱",
+                              "label": "邮箱",
+                              "size": "full",
+                              "id": "u:629c605c1aba",
+                              "autoFill": {},
+                              "clearable": true,
+                              "onEvent": {
+                                "change": {
+                                  "weight": 0,
+                                  "actions": [
+                                    {
+                                      "componentId": "u:74bbabfb808a",
+                                      "actionType": "setValue",
+                                      "args": {
+                                        "value": "${email+\":\"+password}"
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            },
+                            {
+                              "type": "input-password",
+                              "name": "password",
+                              "label": "密码",
+                              "required": true,
+                              "placeholder": "请输入密码",
+                              "size": "full",
+                              "id": "u:680b064ad01e",
+                              "clearable": true,
+                              "onEvent": {
+                                "change": {
+                                  "weight": 0,
+                                  "actions": [
+                                    {
+                                      "componentId": "u:74bbabfb808a",
+                                      "actionType": "setValue",
+                                      "args": {
+                                        "value": "${email+\":\"+password}"
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            },
+                            {
+                              "type": "input-text",
+                              "label": "auth",
+                              "name": "authorization",
+                              "id": "u:74bbabfb808a",
+                              "hidden": true,
+                              "autoFill": {},
+                              "readOnlyOn": "${email+password}",
+                              "static": false
+                            },
+                            {
+                              "type": "checkbox",
+                              "name": "rememberMe",
+                              "label": "记住登录",
+                              "id": "u:acbfd4b91457"
+                            },
+                            {
+                              "type": "tpl",
+                              "id": "u:4bd799ae9a9c",
+                              "name": "Authorization",
+                              "data": "${name}:${password}"
+                            },
+                            {
+                              "type": "submit",
+                              "label": "登录",
+                              "id": "u:843d8ae22ab1",
+                              "onEvent": {
+                                "click": {
+                                  "weight": 0,
+                                  "actions": [
+                                    {
+                                      "outputVar": "responseResult",
+                                      "actionType": "ajax",
+                                      "args": {
+                                        "options": {},
+                                        "api": {
+                                          "url": "http://127.0.0.1:22222/auth/login",
+                                          "method": "post",
+                                          "requestAdaptor": "",
+                                          "adaptor": "",
+                                          "messages": {
+                                            "success": "登录成功",
+                                            "failed": "登录失败"
+                                          },
+                                          "dataType": "json",
+                                          "headers": {
+                                            "Authorization": "${authorization}"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          ],
+                          "id": "u:83f0fd99aa14"
+                        }
+                      ],
+                      "id": "u:ee4880c00289",
+                      "type": "page",
+                      "regions": ["body"],
+                      "pullRefresh": {
+                        "disabled": true
+                      },
+                      "css": {
+                        ".wizard-body": {
+                          "margin": "16px",
+                          "padding": "24px"
+                        }
+                      },
+                      "className": "h-full"
+                    },
+                    {
+                      "title": "用户注册",
+                      "body": [
+                        {
+                          "type": "tpl",
+                          "tpl": "",
+                          "wrapperComponent": "",
+                          "inline": false,
+                          "id": "u:3c7c4bdb6e7b"
+                        },
+                        {
+                          "type": "form",
+                          "title": "注册信息",
+                          "body": [
+                            {
+                              "label": "用户名",
+                              "type": "input-text",
+                              "name": "username",
+                              "id": "u:bbe469d5adce",
+                              "required": true
+                            },
+                            {
+                              "type": "input-email",
+                              "label": "邮箱地址",
+                              "name": "email",
+                              "id": "u:b98310cadbbe",
+                              "required": true
+                            },
+                            {
+                              "type": "input-text",
+                              "label": "电话号码",
+                              "name": "phone",
+                              "id": "u:737d27743ddd"
+                            },
+                            {
+                              "type": "group",
+                              "body": [
+                                {
+                                  "type": "input-password",
+                                  "label": "密码",
+                                  "name": "password",
+                                  "id": "u:3d6e23630494",
+                                  "showCounter": false,
+                                  "required": true
+                                },
+                                {
+                                  "type": "input-password",
+                                  "label": "再次输入密码",
+                                  "name": "password_try",
+                                  "id": "u:e4cd236667a1",
+                                  "showCounter": false,
+                                  "required": true
+                                }
+                              ],
+                              "id": "u:3e4450a6e8ea"
+                            },
+                            {
+                              "type": "group",
+                              "body": [
+                                {
+                                  "type": "image",
+                                  "id": "u:abfc0d971a46",
+                                  "enlargeAble": false,
+                                  "title": "验证码",
+                                  "imageMode": "thumb",
+                                  "thumbRatio": "16:9",
+                                  "className": "b-warning b-t b-b m-none p-none",
+                                  "imageClassName": "m-none p-none",
+                                  "thumbClassName": "m-none p-none",
+                                  "src": "http://127.0.0.1:22222/capt/image",
+                                  "hidden": false
+                                },
+                                {
+                                  "type": "input-text",
+                                  "label": "验证码",
+                                  "name": "code",
+                                  "id": "u:7d06e89cdc95",
+                                  "showCounter": false,
+                                  "required": true,
+                                  "validations": {},
+                                  "validationErrors": {},
+                                  "clearable": true
+                                }
+                              ],
+                              "id": "u:b9bd90113104"
+                            }
+                          ],
+                          "id": "u:699dfa39e705",
+                          "autoFocus": true,
+                          "preventEnterSubmit": true,
+                          "rules": [
+                            {
+                              "rule": "$password !== $password_try",
+                              "message": "两次输入的密码不一样"
+                            }
+                          ],
+                          "api": {
+                            "url": "http://127.0.0.1:22222/account",
+                            "method": "get"
+                          },
+                          "asyncApi": "http://127.0.0.1:22222/account",
+                          "onEvent": {
+                            "submit": {
+                              "weight": 0,
+                              "actions": [
+                                {
+                                  "actionType": "refresh"
+                                }
+                              ]
+                            }
+                          },
+                          "resetAfterSubmit": true
+                        }
+                      ],
+                      "id": "u:1a2b909a6d98"
+                    }
+                  ],
+                  "id": "u:fdc3fcef749a",
+                  "tabsMode": "chrome"
+                },
+                {
+                  "title": "用户注册",
+                  "body": [
+                    {
+                      "type": "tpl",
+                      "tpl": "",
+                      "wrapperComponent": "",
+                      "inline": false,
+                      "id": "u:3c7c4bdb6e7b"
+                    },
+                    {
+                      "type": "form",
+                      "title": "注册信息",
+                      "body": [
+                        {
+                          "label": "用户名",
+                          "type": "input-text",
+                          "name": "username",
+                          "id": "u:bbe469d5adce",
+                          "required": true
+                        },
+                        {
+                          "type": "input-email",
+                          "label": "邮箱地址",
+                          "name": "email",
+                          "id": "u:b98310cadbbe",
+                          "required": true
+                        },
+                        {
+                          "type": "input-text",
+                          "label": "电话号码",
+                          "name": "phone",
+                          "id": "u:737d27743ddd"
+                        },
+                        {
+                          "type": "group",
+                          "body": [
+                            {
+                              "type": "input-password",
+                              "label": "密码",
+                              "name": "password",
+                              "id": "u:3d6e23630494",
+                              "showCounter": false,
+                              "required": true
+                            },
+                            {
+                              "type": "input-password",
+                              "label": "再次输入密码",
+                              "name": "password_try",
+                              "id": "u:e4cd236667a1",
+                              "showCounter": false,
+                              "required": true
+                            }
+                          ],
+                          "id": "u:3e4450a6e8ea"
+                        },
+                        {
+                          "type": "group",
+                          "body": [
+                            {
+                              "type": "image",
+                              "id": "u:abfc0d971a46",
+                              "enlargeAble": false,
+                              "title": "验证码",
+                              "imageMode": "thumb",
+                              "thumbRatio": "16:9",
+                              "className": "b-warning b-t b-b m-none p-none",
+                              "imageClassName": "m-none p-none",
+                              "thumbClassName": "m-none p-none",
+                              "src": "http://127.0.0.1:22222/capt/image",
+                              "hidden": false
+                            },
+                            {
+                              "type": "input-text",
+                              "label": "验证码",
+                              "name": "code",
+                              "id": "u:7d06e89cdc95",
+                              "showCounter": false,
+                              "required": true,
+                              "validations": {},
+                              "validationErrors": {},
+                              "clearable": true
+                            }
+                          ],
+                          "id": "u:b9bd90113104"
+                        }
+                      ],
+                      "id": "u:699dfa39e705",
+                      "autoFocus": true,
+                      "preventEnterSubmit": true,
+                      "rules": [
+                        {
+                          "rule": "$password !== $password_try",
+                          "message": "两次输入的密码不一样"
+                        }
+                      ],
+                      "api": {
+                        "url": "http://127.0.0.1:22222/account",
+                        "method": "get"
+                      },
+                      "asyncApi": "http://127.0.0.1:22222/account",
+                      "onEvent": {
+                        "submit": {
+                          "weight": 0,
+                          "actions": [
+                            {
+                              "actionType": "refresh"
+                            }
+                          ]
+                        }
+                      },
+                      "resetAfterSubmit": true
+                    }
+                  ],
+                  "id": "u:1a2b909a6d98"
+                }
+              ],
+              "id": "u:fdc3fcef749a",
+              "tabsMode": "chrome"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

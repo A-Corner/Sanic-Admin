@@ -1,0 +1,125 @@
+{
+  "type": "page",
+  "title": "新增",
+  "body": [
+    {
+      "type": "form",
+      "title": "",
+      "redirect": "/user/crud/list",
+      "name": "sample-edit-form",
+      "api": {
+        "method": "put",
+        "url": "http://127.0.0.1:22222/refapi/account/0",
+        "requestAdaptor": "",
+        "adaptor": "",
+        "messages": {},
+        "dataType": "json"
+      },
+      "id": "u:7d74ed2aec13",
+      "body": [
+        {
+          "type": "input-text",
+          "name": "username",
+          "label": "用户名",
+          "required": true,
+          "inline": false,
+          "description": "",
+          "descriptionClassName": "help-block",
+          "placeholder": "",
+          "addOn": null,
+          "id": "u:90867794cd52",
+          "validateApi": {
+            "url": "http://127.0.0.1:22222/refapi/account/search?value=${username}&name=username",
+            "method": "get",
+            "requestAdaptor": "",
+            "adaptor": "",
+            "messages": {
+              "success": "用户名称已经存在"
+            },
+            "dataType": "json"
+          }
+        },
+        {
+          "type": "divider",
+          "id": "u:2004eee32e66"
+        },
+        {
+          "type": "input-email",
+          "name": "email",
+          "label": "E-Mail",
+          "required": true,
+          "id": "u:45b18455494b",
+          "validations": {},
+          "validationErrors": {}
+        },
+        {
+          "type": "divider",
+          "id": "u:59c5458ee59e"
+        },
+        {
+          "type": "input-text",
+          "name": "phone",
+          "label": "电话",
+          "required": true,
+          "id": "u:0373f1254ba0",
+          "validations": {
+            "isPhoneNumber": true
+          },
+          "validationErrors": {
+            "isPhoneNumber": "电话格式错误"
+          }
+        },
+        {
+          "type": "divider",
+          "id": "u:97b8608c40ea"
+        },
+        {
+          "type": "input-password",
+          "name": "password",
+          "label": "密码",
+          "id": "u:8fd0f2da830b",
+          "showCounter": false,
+          "validations": {},
+          "validationErrors": {}
+        },
+        {
+          "type": "input-password",
+          "label": "再一次输入密码",
+          "name": "password_a",
+          "id": "u:670216cce9be",
+          "showCounter": false,
+          "required": true,
+          "validations": {
+            "equalsField": "password"
+          },
+          "validationErrors": {
+            "equalsField": "两次密码不一致"
+          },
+          "validateOnChange": false
+        },
+        {
+          "type": "divider",
+          "id": "u:9f5cc2548aee"
+        }
+      ],
+      "rules": [],
+      "onEvent": {
+        "formItemValidateError": {
+          "weight": 0,
+          "actions": []
+        }
+      }
+    }
+  ],
+  "remark": null,
+  "toolbar": [
+    {
+      "type": "button",
+      "actionType": "link",
+      "link": "/crud/list",
+      "label": "返回列表",
+      "id": "u:6c19da6876d0"
+    }
+  ],
+  "id": "u:958b8538265c"
+}

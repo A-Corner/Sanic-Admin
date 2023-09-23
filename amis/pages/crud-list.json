@@ -1,0 +1,180 @@
+{
+  "type": "crud",
+  "api": {
+    "method": "get",
+    "url": "http://127.0.0.1:22222/refapi/account/0",
+    "messages": {},
+    "requestAdaptor": "",
+    "adaptor": "",
+    "dataType": "json",
+    "replaceData": true
+  },
+  "columns": [
+    {
+      "label": "用户名称",
+      "name": "username",
+      "id": "u:4d693c46eaea",
+      "type": "text"
+    },
+    {
+      "type": "text",
+      "label": "E-Mail",
+      "name": "email",
+      "id": "u:6f283af32382"
+    },
+    {
+      "type": "text",
+      "label": "电话",
+      "name": "phone",
+      "id": "u:f7c70a2622ee"
+    },
+    {
+      "type": "status",
+      "label": "状态",
+      "name": "disabled",
+      "id": "u:2e88d3da2d19"
+    },
+    {
+      "type": "status",
+      "label": "是否需要二次验证",
+      "name": "verified",
+      "id": "u:f5e75f6de061"
+    },
+    {
+      "type": "mapping",
+      "label": "角色",
+      "name": "roles",
+      "id": "u:65ed6884410d"
+    },
+    {
+      "type": "date",
+      "label": "创建日期",
+      "name": "date_created",
+      "id": "u:07bcfbf88b54"
+    },
+    {
+      "type": "date",
+      "label": "更新日期",
+      "name": "date_updated",
+      "id": "u:2caf1916a769"
+    },
+    {
+      "type": "operation",
+      "label": "操作",
+      "width": "",
+      "buttons": [
+        {
+          "type": "button-group",
+          "buttons": [
+            {
+              "type": "button",
+              "label": "查看",
+              "level": "primary",
+              "actionType": "link",
+              "link": "/crud/${id}",
+              "id": "u:322ef723c994"
+            },
+            {
+              "type": "button",
+              "label": "修改",
+              "level": "info",
+              "actionType": "link",
+              "link": "/crud/${id}/edit",
+              "id": "u:a96890fa800f"
+            },
+            {
+              "type": "button",
+              "label": "删除",
+              "level": "danger",
+              "actionType": "ajax",
+              "confirmText": "您确认要删除?",
+              "api": "delete:${API_HOST}/api/amis-mock/sample/$id",
+              "id": "u:f7e6cb4230aa"
+            }
+          ],
+          "id": "u:047574986e16"
+        }
+      ],
+      "placeholder": "-",
+      "fixed": "right",
+      "id": "u:75ed83d46e72"
+    }
+  ],
+  "bulkActions": [],
+  "filter": {
+    "title": "",
+    "mode": "inline",
+    "wrapWithPanel": false,
+    "submitText": "",
+    "className": "m-b-sm",
+    "id": "u:7100eb29d5ac",
+    "body": [
+      {
+        "type": "input-text",
+        "name": "keywords",
+        "placeholder": "通过关键字搜索",
+        "addOn": {
+          "label": "搜索",
+          "type": "submit",
+          "className": "btn-success",
+          "id": "u:e1f2cc8a308c"
+        },
+        "clearable": true,
+        "id": "u:a6d866a5d69d"
+      }
+    ]
+  },
+  "name": "sample",
+  "affixHeader": true,
+  "columnsTogglable": "auto",
+  "placeholder": "暂无数据",
+  "tableClassName": "table-db table-striped",
+  "headerClassName": "crud-table-header",
+  "footerClassName": "crud-table-footer",
+  "toolbarClassName": "crud-table-toolbar",
+  "combineNum": 0,
+  "bodyClassName": "panel-default",
+  "id": "u:167cefe5c024",
+  "messages": {},
+  "interval": 60000,
+  "footerToolbar": [
+    {
+      "type": "statistics"
+    },
+    {
+      "type": "pagination"
+    },
+    {
+      "type": "switch-per-page",
+      "tpl": "内容",
+      "wrapperComponent": "",
+      "id": "u:e451f0632e30"
+    }
+  ],
+  "alwaysShowPagination": true,
+  "autoFillHeight": false,
+  "headerToolbar": [
+    {
+      "type": "bulk-actions"
+    },
+    {
+      "type": "export-csv",
+      "tpl": "内容",
+      "wrapperComponent": "",
+      "id": "u:8b93843017db"
+    },
+    {
+      "type": "export-excel",
+      "tpl": "内容",
+      "wrapperComponent": "",
+      "id": "u:d893d46aa8b5"
+    },
+    {
+      "type": "filter-toggler",
+      "tpl": "内容",
+      "wrapperComponent": "",
+      "id": "u:2aeea350b559"
+    }
+  ],
+  "perPage": 15
+}

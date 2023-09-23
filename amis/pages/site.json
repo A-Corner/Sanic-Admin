@@ -1,0 +1,230 @@
+{
+  "status": 0,
+  "msg": "",
+  "data": {
+    "pages": [
+      {
+        "label": "Home",
+        "url": "/",
+        "redirect": "dcm"
+      },
+      {
+        "label": "数据中台",
+        "children": [
+          {
+            "label": "中控台",
+            "url": "dcm",
+            "icon": "fa fa-gauge",
+            "schemaApi": "get:./static/pages/dash_board.json"
+          }
+        ]
+      },
+      {
+        "label": "系统管理",
+        "children": [
+          {
+            "label": "权限管理",
+            "url": "sys_permission",
+            "icon": "fa fa-gear",
+            "redirect": "/user/crud/list",
+            "children": [
+              {
+                "label": "用户管理",
+                "url": "/user",
+                "redirect": "/user/crud/list",
+                "icon": "fa fa-user",
+                "children": [
+                  {
+                    "label": "详细信息",
+                    "url": "/user/crud/list",
+                    "icon": "fa fa-newspaper-o",
+                    "schemaApi": "get:./static/pages/crud-list.json"
+                  },
+                  {
+                    "label": "新增",
+                    "icon": "fa fa-plus",
+                    "url": "/user/crud/new",
+                    "schemaApi": "get:./static/pages/crud-new.json"
+                  },
+                  {
+                    "label": "查看",
+                    "url": "/user/crud/:id",
+                    "schemaApi": "get:./static/pages/crud-view.json"
+                  },
+                  {
+                    "label": "修改",
+                    "url": "/user/crud/:id/edit",
+                    "schemaApi": "get:./static/pages/crud-edit.json"
+                  }
+                ]
+              },
+              {
+                "label": "部门管理",
+                "url": "/dept",
+                "redirect": "/dept/crud/list",
+                "icon": "fa fa-store",
+                "children": [
+                  {
+                    "label": "详细信息",
+                    "url": "/dept/crud/list",
+                    "icon": "fa fa-newspaper-o",
+                    "schemaApi": "get:./static/pages/crud-list.json"
+                  },
+                  {
+                    "label": "新增",
+                    "icon": "fa fa-plus",
+                    "url": "/dept/crud/new",
+                    "schemaApi": "get:./static/pages/crud-new.json"
+                  },
+                  {
+                    "label": "查看",
+                    "url": "/dept/crud/:id",
+                    "schemaApi": "get:./static/pages/crud-view.json"
+                  },
+                  {
+                    "label": "修改",
+                    "url": "/dept/crud/:id/edit",
+                    "schemaApi": "get:./static/pages/crud-edit.json"
+                  }
+                ]
+              },
+              {
+                "label": "角色管理",
+                "url": "/role",
+                "redirect": "/role/crud/list",
+                "icon": "fa fa-face-grin-squint-tears",
+                "children": [
+                  {
+                    "label": "详细信息",
+                    "url": "/role/crud/list",
+                    "icon": "fa fa-newspaper-o",
+                    "schemaApi": "get:./static/pages/crud-list.json"
+                  },
+                  {
+                    "label": "新增",
+                    "icon": "fa fa-plus",
+                    "url": "/role/crud/new",
+                    "schemaApi": "get:./static/pages/crud-new.json"
+                  },
+                  {
+                    "label": "查看",
+                    "url": "/role/crud/:id",
+                    "schemaApi": "get:./static/pages/crud-view.json"
+                  },
+                  {
+                    "label": "修改",
+                    "url": "/user/crud/:id/edit",
+                    "schemaApi": "get:./static/pages/crud-edit.json"
+                  }
+                ]
+              },
+              {
+                "label": "权限配置",
+                "url": "/permission",
+                "redirect": "/permission/crud/list",
+                "icon": "fa fa-key",
+                "children": [
+                  {
+                    "label": "详细信息",
+                    "url": "/permission/crud/list",
+                    "icon": "fa fa-newspaper-o",
+                    "schemaApi": "get:./static/pages/crud-list.json"
+                  },
+                  {
+                    "label": "新增",
+                    "icon": "fa fa-plus",
+                    "url": "/permission/crud/new",
+                    "schemaApi": "get:./static/pages/crud-new.json"
+                  },
+                  {
+                    "label": "查看",
+                    "url": "/permission/crud/:id",
+                    "schemaApi": "get:./static/pages/crud-view.json"
+                  },
+                  {
+                    "label": "修改",
+                    "url": "/permission/crud/:id/edit",
+                    "schemaApi": "get:./static/pages/crud-edit.json"
+                  }
+                ]
+              },
+              {
+                "label": "菜单管理",
+                "url": "/menu",
+                "redirect": "/menu/crud/list",
+                "icon": "fa fa-ellipsis-vertical",
+                "children": [
+                  {
+                    "label": "详细信息",
+                    "url": "/menu/crud/list",
+                    "icon": "fa fa-newspaper-o",
+                    "schemaApi": "get:./static/pages/crud-list.json"
+                  },
+                  {
+                    "label": "新增",
+                    "icon": "fa fa-plus",
+                    "url": "/menu/crud/new",
+                    "schemaApi": "get:./static/pages/crud-new.json"
+                  },
+                  {
+                    "label": "查看",
+                    "url": "/menu/crud/:id",
+                    "schemaApi": "get:./static/pages/crud-view.json"
+                  },
+                  {
+                    "label": "修改",
+                    "url": "/menu/crud/:id/edit",
+                    "schemaApi": "get:./static/pages/crud-edit.json"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "页面B",
+            "badge": 3,
+            "badgeClassName": "bg-info",
+            "schema": {
+              "type": "page",
+              "title": "页面B",
+              "body": "页面B"
+            }
+          },
+          {
+            "label": "页面C",
+            "schema": {
+              "type": "page",
+              "title": "页面C",
+              "body": "页面C"
+            }
+          }
+        ]
+      },
+      {
+        "label": "业务管理",
+        "children": [
+          {
+            "label": "其他管理",
+            "schema": {
+              "type": "page",
+              "title": "其他管理",
+              "body": "页面C"
+            }
+          },
+          {
+            "label": "外部链接",
+            "link": "http://baidu.gitee.io/amis"
+          },
+          {
+            "label": "分部管理",
+            "schemaApi": "${API_HOST}/api/amis-mock/mock2/service/form?tpl=tpl3"
+          },
+          {
+            "label": "jsonp 返回示例",
+            "schemaApi": "jsonp:./pages/jsonp.js?callback=jsonpCallback"
+          }
+        ]
+      }
+    ]
+  }
+}

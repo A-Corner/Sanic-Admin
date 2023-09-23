@@ -1,0 +1,548 @@
+{
+  "type": "page",
+  "title": "Sanic -- Admin -- BashBoard",
+  "body": [
+    {
+      "type": "panel",
+      "title": "公告",
+      "body": [
+        {
+          "type": "tpl",
+          "tpl": "这里可以存放系统公告。。。。。",
+          "wrapperComponent": "",
+          "inline": false,
+          "id": "u:698b8e420ab4"
+        }
+      ],
+      "id": "u:3af41c860353"
+    },
+    {
+      "type": "tpl",
+      "tpl": "数据卡盘",
+      "wrapperComponent": "",
+      "inline": false,
+      "id": "u:919b38478258"
+    },
+    {
+      "type": "flex",
+      "className": "p-1",
+      "items": [
+        {
+          "type": "container",
+          "body": [
+            {
+              "type": "card",
+              "header": {
+                "title": "人员总数",
+                "subTitle": "统计日期：xxxx-xx-xx"
+              },
+              "body": [
+                {
+                  "type": "tpl",
+                  "tpl": "这里存放的是主要内容",
+                  "wrapperComponent": "",
+                  "inline": false,
+                  "id": "u:e0c75b2ce308"
+                }
+              ],
+              "actions": [
+                {
+                  "type": "button",
+                  "label": "详细信息",
+                  "actionType": "dialog",
+                  "dialog": {
+                    "title": "自行跳转",
+                    "body": "跳转到关联的表中，可以使用id或者url都可以，需要在type后面跟着定义才可以跳转"
+                  },
+                  "id": "u:4df95b333d70"
+                }
+              ],
+              "id": "u:6b8268eb8354"
+            }
+          ],
+          "size": "xs",
+          "style": {
+            "position": "static",
+            "display": "block",
+            "flex": "1 1 auto",
+            "flexGrow": 1,
+            "flexBasis": "auto"
+          },
+          "wrapperBody": false,
+          "isFixedHeight": false,
+          "isFixedWidth": false,
+          "id": "u:cab94eb7ea88"
+        },
+        {
+          "type": "container",
+          "body": [
+            {
+              "type": "card",
+              "header": {
+                "title": "关键数据统计",
+                "subTitle": "统计日期：xxxx-xx-xx"
+              },
+              "body": [
+                {
+                  "type": "tpl",
+                  "tpl": "这里存放的是主要内容",
+                  "wrapperComponent": "",
+                  "inline": false,
+                  "id": "u:e0c75b2ce308"
+                }
+              ],
+              "actions": [
+                {
+                  "type": "button",
+                  "label": "详细信息",
+                  "actionType": "dialog",
+                  "dialog": {
+                    "title": "自行跳转",
+                    "body": "跳转到关联的表中，可以使用id或者url都可以，需要在type后面跟着定义才可以跳转"
+                  },
+                  "id": "u:4df95b333d70"
+                }
+              ],
+              "id": "u:6b8268eb8354"
+            }
+          ],
+          "size": "xs",
+          "style": {
+            "position": "static",
+            "display": "block",
+            "flex": "1 1 auto",
+            "flexGrow": 1,
+            "flexBasis": "auto"
+          },
+          "wrapperBody": false,
+          "isFixedHeight": false,
+          "isFixedWidth": false,
+          "id": "u:cab94eb7ea88"
+        },
+        {
+          "type": "container",
+          "body": [
+            {
+              "type": "card",
+              "header": {
+                "title": "其他信息统计",
+                "subTitle": "统计日期：xxxx-xx-xx"
+              },
+              "body": [
+                {
+                  "type": "tpl",
+                  "tpl": "这里存放的是主要内容",
+                  "wrapperComponent": "",
+                  "inline": false,
+                  "id": "u:e0c75b2ce308"
+                }
+              ],
+              "actions": [
+                {
+                  "type": "button",
+                  "label": "详细信息",
+                  "actionType": "dialog",
+                  "dialog": {
+                    "title": "自行跳转",
+                    "body": "跳转到关联的表中，可以使用id或者url都可以，需要在type后面跟着定义才可以跳转"
+                  },
+                  "id": "u:4df95b333d70"
+                }
+              ],
+              "id": "u:6b8268eb8354"
+            }
+          ],
+          "size": "xs",
+          "style": {
+            "position": "static",
+            "display": "block",
+            "flex": "1 1 auto",
+            "flexGrow": 1,
+            "flexBasis": "auto"
+          },
+          "wrapperBody": false,
+          "isFixedHeight": false,
+          "isFixedWidth": false,
+          "id": "u:cab94eb7ea88"
+        }
+      ],
+      "style": {
+        "position": "relative"
+      },
+      "id": "u:d128f29a69d4"
+    },
+    {
+      "type": "flex",
+      "className": "p-1",
+      "items": [
+        {
+          "type": "container",
+          "body": [
+            {
+              "type": "chart",
+              "config": {
+                "xAxis": {
+                  "type": "category",
+                  "data": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                  "id": "u:bd3815f540fa"
+                },
+                "yAxis": {
+                  "type": "value",
+                  "id": "u:fa1caa094bb4"
+                },
+                "series": [
+                  {
+                    "data": [820, 932, 901, 934, 1290, 1330, 1320],
+                    "type": "line",
+                    "id": "u:5ba7375950d0"
+                  }
+                ]
+              },
+              "replaceChartOption": true,
+              "id": "u:dbbb87134492"
+            }
+          ],
+          "size": "xs",
+          "style": {
+            "position": "static",
+            "display": "block",
+            "flex": "1 1 auto",
+            "flexGrow": 1,
+            "flexBasis": "auto"
+          },
+          "wrapperBody": false,
+          "isFixedHeight": false,
+          "isFixedWidth": false,
+          "id": "u:20096ba855cc"
+        },
+        {
+          "type": "container",
+          "body": [
+            {
+              "type": "chart",
+              "config": {
+                "xAxis": {
+                  "type": "category",
+                  "data": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                  "id": "u:bd3815f540fa"
+                },
+                "yAxis": {
+                  "type": "value",
+                  "id": "u:fa1caa094bb4"
+                },
+                "series": [
+                  {
+                    "data": [820, 932, 901, 934, 1290, 1330, 1320],
+                    "type": "line",
+                    "id": "u:5ba7375950d0"
+                  }
+                ]
+              },
+              "replaceChartOption": true,
+              "id": "u:3a683df12639"
+            }
+          ],
+          "size": "xs",
+          "style": {
+            "position": "static",
+            "display": "block",
+            "flex": "1 1 auto",
+            "flexGrow": 1,
+            "flexBasis": "auto"
+          },
+          "wrapperBody": false,
+          "isFixedHeight": false,
+          "isFixedWidth": false,
+          "id": "u:7cce871771ae"
+        },
+        {
+          "type": "container",
+          "body": [
+            {
+              "type": "chart",
+              "config": {
+                "xAxis": {
+                  "type": "category",
+                  "data": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                  "id": "u:bd3815f540fa"
+                },
+                "yAxis": {
+                  "type": "value",
+                  "id": "u:fa1caa094bb4"
+                },
+                "series": [
+                  {
+                    "data": [820, 932, 901, 934, 1290, 1330, 1320],
+                    "type": "line",
+                    "id": "u:5ba7375950d0"
+                  }
+                ]
+              },
+              "replaceChartOption": true,
+              "id": "u:e1bfcb3bc9b0"
+            }
+          ],
+          "size": "xs",
+          "style": {
+            "position": "static",
+            "display": "block",
+            "flex": "1 1 auto",
+            "flexGrow": 1,
+            "flexBasis": "auto"
+          },
+          "wrapperBody": false,
+          "isFixedHeight": false,
+          "isFixedWidth": false,
+          "id": "u:bf479a760fe3"
+        }
+      ],
+      "style": {
+        "position": "relative"
+      },
+      "id": "u:172eeb63a4ad"
+    },
+    {
+      "type": "crud",
+      "syncLocation": false,
+      "api": {
+        "method": "get",
+        "url": ""
+      },
+      "bulkActions": [
+        {
+          "type": "button",
+          "level": "danger",
+          "label": "批量删除",
+          "actionType": "ajax",
+          "confirmText": "确定要删除？",
+          "api": "/xxx/batch-delete",
+          "id": "u:43804b1da021"
+        },
+        {
+          "type": "button",
+          "label": "批量编辑",
+          "actionType": "dialog",
+          "dialog": {
+            "title": "批量编辑",
+            "size": "md",
+            "body": {
+              "type": "form",
+              "api": "/xxx/bacth-edit",
+              "body": [
+                {
+                  "label": "字段1",
+                  "text": "字段1",
+                  "type": "input-text",
+                  "id": "u:ffa2f35fd5ca"
+                }
+              ],
+              "id": "u:706411fff6c9"
+            }
+          },
+          "id": "u:504180f15796"
+        }
+      ],
+      "itemActions": [],
+      "features": [
+        "create",
+        "filter",
+        "bulkDelete",
+        "bulkUpdate",
+        "update",
+        "view",
+        "delete"
+      ],
+      "filterColumnCount": 5,
+      "headerToolbar": [
+        {
+          "type": "bulk-actions",
+          "align": "left"
+        },
+        {
+          "type": "export-csv",
+          "align": "right",
+          "label": "新增",
+          "actionType": "dialog",
+          "level": "primary",
+          "dialog": {
+            "title": "新增",
+            "body": {
+              "type": "form",
+              "api": {
+                "method": "post",
+                "url": ""
+              },
+              "body": [
+                {
+                  "type": "input-text",
+                  "name": "id",
+                  "label": "ID",
+                  "id": "u:c10681bbd610"
+                },
+                {
+                  "type": "input-text",
+                  "name": "engine",
+                  "label": "渲染引擎",
+                  "id": "u:583bd3698274"
+                }
+              ],
+              "id": "u:a4b3bfa5e39c"
+            }
+          },
+          "id": "u:175705457f2c"
+        },
+        {
+          "type": "columns-toggler",
+          "tpl": "内容",
+          "wrapperComponent": "",
+          "id": "u:3f90a20649b7",
+          "align": "left"
+        },
+        {
+          "type": "filter-toggler",
+          "tpl": "内容",
+          "wrapperComponent": "",
+          "id": "u:b613d54bf4e1",
+          "align": "right"
+        }
+      ],
+      "id": "u:0dae163dfd59",
+      "perPageAvailable": [10],
+      "messages": {},
+      "mode": "table",
+      "columns": [
+        {
+          "name": "id",
+          "label": "ID",
+          "type": "text",
+          "id": "u:c2c9a675d16f"
+        },
+        {
+          "name": "engine",
+          "label": "渲染引擎",
+          "type": "text",
+          "id": "u:7f73f115906f"
+        },
+        {
+          "type": "operation",
+          "label": "操作",
+          "buttons": [
+            {
+              "label": "编辑",
+              "type": "button",
+              "actionType": "dialog",
+              "level": "link",
+              "dialog": {
+                "title": "编辑",
+                "body": {
+                  "type": "form",
+                  "api": "xxx/update",
+                  "body": [
+                    {
+                      "name": "id",
+                      "label": "ID",
+                      "type": "input-text",
+                      "id": "u:768d791512c2"
+                    },
+                    {
+                      "name": "engine",
+                      "label": "渲染引擎",
+                      "type": "input-text",
+                      "id": "u:1a8bf52e92ce"
+                    }
+                  ],
+                  "id": "u:c31fec497b58"
+                }
+              },
+              "id": "u:49d4cd27ca63"
+            },
+            {
+              "label": "查看",
+              "type": "button",
+              "actionType": "dialog",
+              "level": "link",
+              "dialog": {
+                "title": "查看详情",
+                "body": {
+                  "type": "form",
+                  "api": "xxx/update",
+                  "body": [
+                    {
+                      "name": "id",
+                      "label": "ID",
+                      "type": "static",
+                      "id": "u:b58e67ca94e4"
+                    },
+                    {
+                      "name": "engine",
+                      "label": "渲染引擎",
+                      "type": "static",
+                      "id": "u:a197e8deb64e"
+                    }
+                  ],
+                  "id": "u:081741cd6615"
+                }
+              },
+              "id": "u:75100879fe84"
+            },
+            {
+              "type": "button",
+              "label": "删除",
+              "actionType": "ajax",
+              "level": "link",
+              "className": "text-danger",
+              "confirmText": "确定要删除？",
+              "api": {
+                "method": "post",
+                "url": ""
+              },
+              "id": "u:5e6a983d8a5a"
+            }
+          ],
+          "id": "u:6a0fd5a8c80f"
+        }
+      ],
+      "footerToolbar": [
+        {
+          "type": "statistics"
+        },
+        {
+          "type": "pagination"
+        },
+        {
+          "type": "switch-per-page",
+          "tpl": "内容",
+          "wrapperComponent": "",
+          "id": "u:15e83c36fd06",
+          "align": "right"
+        }
+      ],
+      "hideQuickSaveBtn": false,
+      "autoFillHeight": true,
+      "showHeader": true,
+      "showFooter": true
+    },
+    {
+      "type": "nav",
+      "stacked": true,
+      "links": [
+        {
+          "label": "其他内容占位1。。。。。",
+          "to": "?id=1",
+          "id": "0"
+        },
+        {
+          "label": "其他内容占位2。。。。",
+          "to": "?id=2",
+          "id": "1"
+        }
+      ],
+      "id": "u:ef0a1b9b4054"
+    }
+  ],
+  "id": "u:eba7869d5953",
+  "asideResizor": false,
+  "pullRefresh": {
+    "disabled": true
+  }
+}
