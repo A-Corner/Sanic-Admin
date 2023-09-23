@@ -1,5 +1,3 @@
-以下是文档信息的英文翻译：
-
 # SA-Admin
 
 Built on **Sanic** and leveraging the low-code framework **AMIS** for the frontend, SA-Admin simplifies frontend configuration for backend developers. With the power and lightweight nature of Sanic, it allows the backend manager to cover a wider range and achieve stronger functionality.
