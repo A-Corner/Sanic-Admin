@@ -45,6 +45,7 @@ pypika-tortoise==0.1.6
 python-dateutil==2.8.2
 pytz==2023.3.post1
 PyYAML==6.0.1
+redis==5.0.1
 sanic==23.6.0
 Sanic-Cors==2.2.0
 sanic-ext==23.6.0
