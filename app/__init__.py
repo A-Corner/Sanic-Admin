@@ -10,6 +10,7 @@ from sanic import Sanic
 from sanic.log import logger
 from app.config import settings
 from app.middleware import register_all_middlewares
+from app.middleware.compression import configure_compression
 from app.auth.routes import auth_bp, capt_bp, two_step_bp, role_bp, account_bp
 from app.api import v1_bp
 from app.models import init_db, create_initial_admin
@@ -48,6 +49,13 @@ def create_app(config=None):
     
     # 注册中间件
     register_all_middlewares(app)
+    
+    # 配置响应压缩
+    configure_compression(
+        app,
+        min_length=app.config.get('COMPRESSION_MIN_LENGTH', 1024),
+        compression_level=app.config.get('COMPRESSION_LEVEL', 6)
+    )
     
     # 注册蓝图
     register_blueprints(app)
