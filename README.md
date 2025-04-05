@@ -1,142 +1,100 @@
-# SA-Admin
+# Sanic-Admin
 
-Built on **Sanic** and leveraging the low-code framework **AMIS** for the frontend, SA-Admin simplifies frontend configuration for backend developers. With the power and lightweight nature of Sanic, it allows the backend manager to cover a wider range and achieve stronger functionality.
+Sanic-Admin是一个基于Sanic框架的高性能、可扩展的后台管理系统。
 
-<img src="./Readme_image2.jpeg" alt="Readme_image1" style="zoom:25%;" />
+## 功能特点
 
-<img src="./Readme_image3.png" alt="Readme_image1" style="zoom: 25%;" />
+- 用户认证与授权管理
+- 权限控制系统
+- 角色管理
+- 系统设置
+- 操作日志记录
+- 用户资料管理
+- 安全策略设置
+- 高性能API设计
+- 自动化API文档生成
 
-<img src="./Readme_image4.png" alt="Readme_image1" style="zoom:25%;" />
+## API文档自动生成
 
-<img src="./Readme_image5.png" alt="Readme_image1" style="zoom:25%;" />
+Sanic-Admin集成了全面的API文档自动生成功能，基于OpenAPI 3.0规范，可以通过简单的装饰器注解自动生成API文档。
 
-## Installation
+### 功能介绍
 
-Currently, there is no PyPI installation method available. You can clone the repository to your local environment and run it directly:
+- **OpenAPI规范生成**：自动收集API路由信息，生成符合OpenAPI 3.0规范的API描述文档
+- **装饰器系统**：提供丰富的装饰器用于标记和注解API路由
+- **Swagger UI集成**：提供交互式API文档界面，方便开发和测试
+- **ReDoc支持**：提供另一种风格的API文档界面，适合阅读和参考
+- **模型文档生成**：从Pydantic和Tortoise ORM模型自动生成文档模式
+
+### 装饰器示例
 
 ```python
-python3 main.py
+from app.docs import api_tags, api_summary, api_response
+
+@app.route("/api/example/<id:int>")
+@api_tags("示例")
+@api_summary("获取示例详情")
+@api_response(model=ExampleResponse)
+async def get_example(request, id):
+    # 实现逻辑
+    ...
 ```
 
-This will run and debug the application.
+### 使用方法
 
-## Usage
+1. 在你的API路由上添加装饰器注解
+2. 运行应用程序，访问 `/swagger` 查看Swagger UI文档
+3. 访问 `/redoc` 查看ReDoc文档
 
-To use SA-Admin, you need to have a basic understanding of Sanic or Flask. The framework is loosely based on Django and uses the Tortoise ORM, Jinja2 templates, and the frontend is built with Baidu's low-code framework, AMIS. AMIS is a convenient frontend framework, but it may require some time to familiarize yourself with. With it, you can control the frontend pages directly using JSON.
+### 可用装饰器
 
-The code includes comments that you can refer to directly.
+- `api_tags`：指定API标签
+- `api_summary`：设置API摘要
+- `api_description`：设置API详细描述
+- `api_body`：指定请求体模型
+- `api_response`：定义响应模型
+- `api_response_list`：定义列表响应
+- `api_response_pagination`：定义分页响应
+- `api_param`：添加API参数
+- `api_paginated_params`：添加标准分页参数
+- `api_security`：指定安全要求
+- `api_exclude`：从文档中排除某个路由
 
-Specific usage:
+## 安装与配置
 
-1. Database Configuration
+### 安装依赖
 
-   Database configuration is in the `main.py` file. If you need to switch to a different database, it is recommended to change it to MySQL or PostgreSQL because Tortoise supports asynchronous calls to these two databases directly, and the speed is really impressive.
-
-   ```python
-   sa_config.TEST_DATABASE_URL = "sqlite://security_test_db.sqlite3"
-   ```
-
-2. Administrator Configuration
-
-   The initial password for the administrator is `SAdmin: SAdmin@123`. If you need to change it to your own password, please modify the parameter.
-
-   ```python
-   sa_config.INITIAL_ADMIN_PASSWORD = "SAdmin@123"  # Password used when creating the initial admin account
-   ```
-
-3. Configure the port and run the command
-
-   If necessary, you can change the port:
-
-   ```python
-   app.run(
-       host="127.0.0.1",
-       port=22222,
-       workers=1,
-       debug=True,
-       auto_reload=True
-   )
-   ```
-
-   Command Explanation:
-
-   - `workers=1`: This configures multi-task processing. However, in high-concurrency situations, due to the time-consuming switch between parallelism and asynchronous operations, it may be slower than a single instance. If needed, it is recommended to run multiple processes, but for now, it's better not to use `workers`. The choice depends on the actual scenario.
-
-   - `auto_reload=True`: This enables automatic reloading, which is very useful. You don't need to manually reload when you make code changes.
-
-4. Design the frontend AMIS using an editor
-
-   For the first time using AMIS, take some time to read the AMIS documentation and understand how to use its components. I spent three days reading the documentation and getting familiar with various components.
-
-   You can directly use the AMIS online editor for interface design:
-
-   AMIS Editor:
-
-   [https://aisuda.github.io/amis-editor-demo/#/hello-world](https://aisuda.github.io/amis-editor-demo/#/hello-world)
-
-   <img src="./Readme_image6.png" alt="Readme_image1" style="zoom:25%;" />
-
-5. Edit the frontend components and copy the code directly.
-
-   <img src="./Readme_image1.png" alt="Readme_image1" style="zoom:33%;" />
-
-6. In the frontend code area, create a JSON file and paste the code.
-
-7. Reference the newly created code in the main framework.
-
-   The main framework file is `./admin/pages/site.json`. To modify and reference it:
-
-   - Copy the entire main framework code.
-   - Go to the AMIS editor, create a new page, paste the code, and add a column according to your preferences.
-   - After editing, copy it back to `site.json`. Modify the `data` section to `"schema": {}`, which represents the content on the right side of the page.
-
-You can also refer to my approach by saving the content of the newly added page as a separate JSON file and referencing it using `schemaApi`. Please refer to the `site.json` file for details.
-
-Below is the JSON format for AMIS:
-
-```json
-{
-  "status": 0,  // Required item in the response
-  "msg": "",    // Required item in the response
-  "data": {     // JSON representing the elements of the page
-    "pages": [
-      {           // Title layer for the navigation bar
-        "label": "Home",
-        "url": "/",  // URL for this layer to facilitate navigation to other layers
-        "redirect": "/login"  // What page to navigate to when the page initializes
-      },
-      {
-        "label": "Function Navigation",  // This layer becomes the navigation bar
-        "children": [                   // Column layer for the navigation bar
-          {
-            "label": "Login/Register",
-            "url": "login",
-            "schema": {}  // The content here represents the content on the right side of the page
-          },
-          {
-            "label": "The number of items here represents the number of columns in the navigation bar",
-            "url": "login",
-            "schema": {}  // The content here represents the content on the right side of the page
-          }
-        ]
-      }
-    ]
-  }
-}
+```bash
+pip install -r requirements.txt
 ```
 
-## Final Notes
+### 运行开发服务器
 
-This is a simple admin management interface. Please modify it according to your specific needs. With AMIS's features, it can roughly meet 90% of the requirements for admin management interfaces. For the remaining 10%, you may need some assistance from a frontend UI.
+```bash
+python main.py
+```
 
-### Performance Notes
+### 访问API文档
 
-I tested it with ApiPost7, but the results were not as ideal as others have claimed. It might be due to the use of multiple workers. I wrote a 60-second asynchronous request test [./test/access_url.pu], and the approximate number of requests handled by one process is between 20,000 and 26,000, with no packet loss. The request rate is approximately 400 requests per second under Sanic's processing.
+启动服务器后，访问以下URL：
 
-When I ran three processes simultaneously, the number of simultaneous requests dropped to about 14,000, so I'm not sure if it's due to resource limitations on my laptop (Macbook14 M1) or something else. If you have sufficient resources, you can use my code or improve it and conduct further testing. On average, it's a stress load of about 2,300 requests per second, which I think is quite good for an admin dashboard.
+- Swagger UI: http://localhost:8000/swagger
+- ReDoc: http://localhost:8000/redoc
 
-<img src="./Readme_image7.png" alt="Readme_image7" style="zoom:33%;" />
+## 贡献指南
 
-When I ran ten processes, the number of simultaneous requests remained at around 14,000, with no errors.
+欢迎贡献代码、报告问题或提出改进建议。请遵循以下步骤：
 
-<img src="./Readme_image8.png" alt="Readme_image8" style="zoom:33%;" />
+1. Fork 项目仓库
+2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add some amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 创建Pull Request
+
+## 许可证
+
+遵循 MIT 许可证。详情参见 [LICENSE](LICENSE) 文件。
+
+## 联系方式
+
+如有问题或建议，请通过Issue Tracker提出。
