@@ -1,5 +1,13 @@
 # Sanic-Admin
 
+> **项目状态（请先阅读）**
+>
+> - 主线正在重构中，**尚不可用于生产环境**。当前代码可能无法启动，部分模块和测试尚不可运行，下文功能描述是设计目标，不代表已经验证可用。
+> - 前端方向：以 AMIS 为前端主线；`frontend/` 下的 Vue 前端为实验性，尚未完成。
+> - 默认管理员口令（`SAdmin@Sanic.com` / `SAdmin@123`）**仅用于本地开发**，任何部署前必须修改。
+> - JWT 签名私钥必须通过环境变量配置，不得使用仓库中提交的示例密钥。仓库历史中的示例私钥视为已泄露，请勿用于任何真实环境。
+> - 安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
+
 Sanic-Admin是一个基于Sanic框架的高性能、可扩展的后台管理系统。
 
 ## 功能特点
@@ -78,8 +86,8 @@ python main.py
 
 启动服务器后，访问以下URL：
 
-- Swagger UI: http://localhost:8000/swagger
-- ReDoc: http://localhost:8000/redoc
+- Swagger UI: http://localhost:22222/swagger
+- ReDoc: http://localhost:22222/redoc
 
 ## 贡献指南
 
@@ -93,7 +101,7 @@ python main.py
 
 ## 许可证
 
-遵循 MIT 许可证。详情参见 [LICENSE](LICENSE) 文件。
+本项目采用 Apache License 2.0 许可证（Apache-2.0）。详情参见 [LICENSE](LICENSE) 文件。
 
 ## 联系方式
 
