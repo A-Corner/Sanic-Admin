@@ -1,0 +1,8 @@
+-r requirements.txt
+pytest>=7.4,<9
+pytest-asyncio>=0.21,<0.24
+pytest-cov>=4.1
+# 与 Sanic 23.6 配套
+sanic-testing==23.6.0
+beautifulsoup4>=4.12
+ruff>=0.5

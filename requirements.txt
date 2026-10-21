@@ -1,66 +1,25 @@
-aiodns==3.0.0
-aiofiles==23.2.1
-aiohttp==3.8.5
-aiosignal==1.3.1
-aiosqlite==0.17.0
-amqp==5.1.1
-anyio==4.0.0
-argon2-cffi==23.1.0
-argon2-cffi-bindings==21.2.0
-async-timeout==4.0.3
-atlastk==0.13.3
-attrs==23.1.0
-billiard==4.1.0
-Brotli==1.1.0
-captcha==0.5.0
-celery==5.3.4
-certifi==2023.7.22
-cffi==1.15.1
-charset-normalizer==3.2.0
-click==8.1.7
-click-didyoumean==0.3.0
-click-plugins==1.1.1
-click-repl==0.3.0
-cryptography==41.0.4
-frozenlist==1.4.0
-h11==0.14.0
-html5tagger==1.3.0
-httpcore==0.18.0
-httptools==0.6.0
-httpx==0.25.0
-idna==3.4
-install==1.3.5
-iso8601==1.1.0
-Jinja2==3.1.2
-kombu==5.3.2
-MarkupSafe==2.1.3
-multidict==6.0.4
-packaging==23.1
-Pillow==10.0.1
-prompt-toolkit==3.0.39
-pycares==4.3.0
-pycparser==2.21
-PyJWT==2.8.0
-pypika-tortoise==0.1.6
-python-dateutil==2.8.2
-pytz==2023.3.post1
-PyYAML==6.0.1
-redis==5.0.1
+# 运行时直接依赖（传递依赖由 pip 解析；不再锁死整棵依赖树）
+# Sanic 大版本升级留给 SA-OSS-B6，本批保持 23.6 系列。
 sanic==23.6.0
-Sanic-Cors==2.2.0
+sanic-routing==23.6.0
 sanic-ext==23.6.0
 sanic-jinja2==2022.11.11
-sanic-routing==23.6.0
-six==1.16.0
-sniffio==1.3.0
-tortoise==0.1.1
+Jinja2>=3.1.2
 tortoise-orm==0.20.0
-tracerite==1.1.0
-typing_extensions==4.8.0
-tzdata==2023.3
-ujson==5.8.0
-uvloop==0.17.0
-vine==5.0.0
-wcwidth==0.2.6
-websockets==11.0.3
-yarl==1.9.2
+# Sanic 23.6 依赖的 websockets 在 14 起变更了 legacy 接口，先设上限
+websockets>=11.0.3,<14
+# uvloop 0.17 在 Python 3.12 无法编译，0.19 起提供 3.12 wheel
+uvloop>=0.19.0; sys_platform != "win32" and implementation_name == "cpython"
+pydantic>=2.5,<3
+argon2-cffi>=23.1.0
+PyJWT>=2.8.0
+# app/config.py 直接 import cryptography 生成/校验 RSA 密钥；选直接依赖而非 PyJWT[crypto]，
+# 因为代码本身直接使用它，不应依赖 PyJWT extra 的传递关系
+cryptography>=42
+captcha>=0.5.0
+# Pillow 10.0.x 无 Python 3.12 wheel，10.1 起支持
+Pillow>=10.1.0
+psutil>=5.9.0
+# 需要系统库 libmagic（macOS: brew install libmagic；Debian/Ubuntu: apt install libmagic1）
+python-magic>=0.4.27
+redis>=4.5.0,<6
