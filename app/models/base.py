@@ -7,7 +7,6 @@
 import datetime
 from tortoise import fields
 from tortoise.models import Model
-from app.services.exceptions import SecurityError
 
 class BaseModel(Model):
     """
@@ -18,15 +17,15 @@ class BaseModel(Model):
     
     Attributes:
         id (int): 模型的主键。
-        date_created (datetime): 记录在数据库中创建的时间。
-        date_updated (datetime): 记录在数据库中更新的时间。
+        created_at (datetime): 记录在数据库中创建的时间。
+        updated_at (datetime): 记录在数据库中更新的时间。
         deleted (bool): 记录是否被标记为删除。
     """
 
     id: int = fields.IntField(pk=True)
-    date_created: datetime.datetime = fields.DatetimeField(
+    created_at: datetime.datetime = fields.DatetimeField(
         auto_now_add=True, description="创建时间")
-    date_updated: datetime.datetime = fields.DatetimeField(
+    updated_at: datetime.datetime = fields.DatetimeField(
         auto_now=True, description="更新时间")
     deleted: bool = fields.BooleanField(default=False, description="删除标记")
 
@@ -54,22 +53,6 @@ class BaseModel(Model):
         raise NotImplementedError("子类必须实现此方法")
     
     @classmethod
-    async def get_or_none(cls, **kwargs):
-        """
-        获取单个记录，如果不存在则返回None
-        
-        Args:
-            **kwargs: 查询条件
-            
-        Returns:
-            模型实例或None
-        """
-        try:
-            return await cls.get(**kwargs)
-        except:
-            return None
-            
-    @classmethod
     async def safe_delete(cls, **kwargs):
         """
         安全删除记录(软删除)
@@ -80,7 +63,7 @@ class BaseModel(Model):
         Returns:
             被删除的记录数量
         """
-        obj = await cls.get(**kwargs)
+        obj = await cls.get_or_none(**kwargs)
         if obj:
             obj.deleted = True
             await obj.save()

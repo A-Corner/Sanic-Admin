@@ -29,12 +29,30 @@ class BaseError(Exception):
         }
 
 
+class SecurityError(BaseError):
+    """安全相关错误（认证、授权、会话、账户状态）的公共基类"""
+    status_code = 400
+    error_code = "SECURITY_ERROR"
+    message = "安全校验失败"
+
+    @property
+    def json(self) -> dict:
+        """JSON 可序列化的错误信息（与 to_dict 等价）"""
+        return self.to_dict()
+
+
 # 认证相关异常
-class AuthenticationError(BaseError):
+class AuthenticationError(SecurityError):
     """认证错误的基类"""
     status_code = 401
     error_code = "AUTHENTICATION_ERROR"
     message = "认证失败"
+
+
+class CredentialsError(AuthenticationError):
+    """凭据缺失或不正确"""
+    error_code = "CREDENTIALS_ERROR"
+    message = "凭据无效"
 
 
 class InvalidCredentialsError(AuthenticationError):
@@ -55,7 +73,57 @@ class AccountLockedError(AuthenticationError):
     message = "账户已被锁定，请联系管理员"
 
 
-class SessionExpiredError(AuthenticationError):
+class AccountError(AuthenticationError):
+    """账户状态错误的基类"""
+    error_code = "ACCOUNT_ERROR"
+    message = "账户状态异常"
+
+
+class DeletedError(AccountError):
+    """账户或资源已被删除"""
+    status_code = 410
+    error_code = "DELETED"
+    message = "已被删除"
+
+
+class DisabledError(AccountError):
+    """账户已被禁用"""
+    status_code = 403
+    error_code = "ACCOUNT_DISABLED"
+    message = "账户已被禁用"
+
+
+class UnverifiedError(AccountError):
+    """账户尚未验证"""
+    error_code = "ACCOUNT_UNVERIFIED"
+    message = "账户需要验证"
+
+
+class SessionError(AuthenticationError):
+    """会话错误的基类"""
+    error_code = "SESSION_ERROR"
+    message = "会话无效"
+
+
+class SessionNotFoundError(SessionError):
+    """找不到会话"""
+    error_code = "SESSION_NOT_FOUND"
+    message = "找不到对应的会话"
+
+
+class SessionValidationError(SessionError):
+    """会话校验失败（已禁用、已删除等）"""
+    error_code = "SESSION_INVALID"
+    message = "会话校验失败"
+
+
+class InvalidTokenError(SessionError):
+    """令牌无效（签名错误、格式错误等）"""
+    error_code = "INVALID_TOKEN"
+    message = "无效的令牌"
+
+
+class SessionExpiredError(SessionError):
     """会话过期"""
     error_code = "SESSION_EXPIRED"
     message = "会话已过期，请重新登录"
@@ -69,7 +137,7 @@ class TwoFactorRequiredError(AuthenticationError):
 
 
 # 授权相关异常
-class AuthorizationError(BaseError):
+class AuthorizationError(SecurityError):
     """授权错误的基类"""
     status_code = 403
     error_code = "AUTHORIZATION_ERROR"
@@ -89,7 +157,7 @@ class InsufficientPermissionsError(AuthorizationError):
 
 
 # 验证相关异常
-class VerificationError(BaseError):
+class VerificationError(SecurityError):
     """验证错误的基类"""
     status_code = 400
     error_code = "VERIFICATION_ERROR"
@@ -127,6 +195,12 @@ class ResourceNotFoundError(ResourceError):
     status_code = 404
     error_code = "RESOURCE_NOT_FOUND"
     message = "请求的资源不存在"
+
+
+class NotFoundError(ResourceNotFoundError):
+    """查询不到记录（模型层 get_via_* 等使用）"""
+    error_code = "NOT_FOUND"
+    message = "找不到请求的记录"
 
 
 class ResourceAlreadyExistsError(ResourceError):
