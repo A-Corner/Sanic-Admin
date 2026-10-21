@@ -82,8 +82,8 @@ def should_compress(request: Request, response: Response) -> bool:
     Returns:
         bool: 是否应该压缩
     """
-    # 检查响应大小
-    if len(response.body) < MIN_COMPRESS_LENGTH:
+    # 检查响应大小（流式/文件响应没有内存中的 body，不压缩）
+    if not response.body or len(response.body) < MIN_COMPRESS_LENGTH:
         return False
     
     # 检查Content-Type
@@ -209,6 +209,35 @@ async def compression_middleware(request: Request, response: Response) -> Respon
         return None
 
 
+def update_compression_options(
+    min_length: int = None,
+    compression_level: int = None,
+    exclude_paths: Optional[List[str]] = None,
+    compressible_types: Optional[Set[str]] = None
+) -> None:
+    """
+    更新压缩参数（只改配置，不注册中间件，可重复调用）
+
+    Raises:
+        re.error: exclude_paths 中含不合法的正则时抛出，此时不修改任何配置
+    """
+    global MIN_COMPRESS_LENGTH, DEFAULT_COMPRESSION_LEVEL
+    global EXCLUDED_PATHS, EXCLUDED_PATHS_REGEX
+    global COMPRESSIBLE_CONTENT_TYPES
+
+    compiled = [re.compile(pattern) for pattern in exclude_paths] if exclude_paths else None
+
+    if min_length is not None:
+        MIN_COMPRESS_LENGTH = min_length
+    if compression_level is not None:
+        DEFAULT_COMPRESSION_LEVEL = compression_level
+    if compiled is not None:
+        EXCLUDED_PATHS = list(exclude_paths)
+        EXCLUDED_PATHS_REGEX = compiled
+    if compressible_types:
+        COMPRESSIBLE_CONTENT_TYPES = set(compressible_types)
+
+
 def configure_compression(
     app: Sanic,
     min_length: int = MIN_COMPRESS_LENGTH,
@@ -217,8 +246,8 @@ def configure_compression(
     compressible_types: Optional[Set[str]] = None
 ) -> None:
     """
-    配置并注册响应压缩中间件
-    
+    配置并向应用注册响应压缩中间件（每个应用只注册一次；运行期调参请用 update_compression_options）
+
     Args:
         app: Sanic应用实例
         min_length: 最小压缩阈值
@@ -226,24 +255,12 @@ def configure_compression(
         exclude_paths: 排除的URL路径模式
         compressible_types: 可压缩的内容类型
     """
-    global MIN_COMPRESS_LENGTH, DEFAULT_COMPRESSION_LEVEL
-    global EXCLUDED_PATHS, EXCLUDED_PATHS_REGEX
-    global COMPRESSIBLE_CONTENT_TYPES
-    
-    # 更新配置
-    MIN_COMPRESS_LENGTH = min_length
-    DEFAULT_COMPRESSION_LEVEL = compression_level
-    
-    if exclude_paths:
-        EXCLUDED_PATHS = exclude_paths
-        EXCLUDED_PATHS_REGEX = [re.compile(pattern) for pattern in EXCLUDED_PATHS]
-    
-    if compressible_types:
-        COMPRESSIBLE_CONTENT_TYPES = compressible_types
-    
-    # 注册中间件
-    app.middleware('response')(compression_middleware)
-    
+    update_compression_options(min_length, compression_level, exclude_paths, compressible_types)
+
+    if not getattr(app.ctx, "_compression_registered", False):
+        app.middleware('response')(compression_middleware)
+        app.ctx._compression_registered = True
+
     logger.info(f"已启用响应压缩中间件 (最小阈值: {min_length}字节, 压缩级别: {compression_level})")
 
 
