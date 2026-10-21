@@ -76,7 +76,11 @@ def _env_secret(var: str, env: str, generator, description: str) -> str:
         "环境变量 %s 未设置，已为 %s 环境生成临时%s（进程重启后失效，请勿用于生产）",
         var, env, description,
     )
-    return generator()
+    value = generator()
+    # 写回环境变量：Sanic 会再启动 worker 子进程重新 import 本模块，
+    # 共享同一份临时密钥，避免各进程各生成一份（导致会话签名不一致、口令重复打印）
+    os.environ[var] = value
+    return value
 
 
 def _generate_rsa_private_pem() -> str:
