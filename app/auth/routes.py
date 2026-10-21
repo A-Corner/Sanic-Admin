@@ -5,6 +5,7 @@
 认证路由模块，定义所有认证相关的路由
 """
 from sanic import Blueprint
+from app.config import settings
 from app.models import CaptchaSession, AuthenticationSession
 from app.services.utils import json
 from app.auth.authentication import (
@@ -90,7 +91,8 @@ async def on_login(request):
     """
     使用电子邮件和密码登录
     """
-    two_factor_authentication = request.args.get("two-factor-authentication") == "true"
+    # 是否启用二次验证只由服务端配置决定，忽略客户端参数
+    two_factor_authentication = bool(getattr(settings, "REQUIRE_TWO_FACTOR", False))
     authentication_session = await login(
         request, require_second_factor=two_factor_authentication
     )

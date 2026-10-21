@@ -15,6 +15,7 @@ import secrets
 from sanic.request import Request
 from app.models import (
     Account,
+    AuthenticationSession,
     CaptchaSession,
     TwoStepSession,
     VerificationToken,
@@ -203,4 +204,6 @@ async def reset_password(token: str, new_password: str):
     account.set_password(new_password)
     await account.save(update_fields=["password"])
     await verification_token.delete()
+    # 口令已变更：作废该账户全部既有登录会话
+    await AuthenticationSession.filter(bearer=account, disabled=False).update(disabled=True)
     return account

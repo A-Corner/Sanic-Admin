@@ -33,6 +33,25 @@ def get_session_token(request: Request, cookie_name: str = "session", header=Non
     return request.token
 
 
+MIN_PASSWORD_LENGTH = 8
+MAX_PASSWORD_LENGTH = 128
+
+
+def _text_field(value, name: str, max_len: int, required: bool = True, min_len: int = 1):
+    """校验请求字段必须是字符串且长度在范围内；不合法抛出 ValidationError(400)。"""
+    if value is None or value == "":
+        if required:
+            raise ValidationError(f"{name}是必填项")
+        return None
+    if not isinstance(value, str):
+        raise ValidationError(f"{name}必须是字符串")
+    if len(value) < min_len:
+        raise ValidationError(f"{name}长度不能少于 {min_len} 位")
+    if len(value) > max_len:
+        raise ValidationError(f"{name}长度不能超过 {max_len} 位")
+    return value
+
+
 async def register(request: Request):
     """
     注册新账户（新账户总是未验证、未禁用，状态由服务端决定，不接受客户端指定）
@@ -47,13 +66,11 @@ async def register(request: Request):
         ValidationError: 如果提供的凭据不完整
         ResourceAlreadyExistsError: 如果邮箱/用户名/手机号已被注册
     """
-    username = get_request_value(request, "username")
-    email = get_request_value(request, "email")
-    password = get_request_value(request, "password")
-    phone = get_request_value(request, "phone")
-
-    if not username or not email or not password:
-        raise ValidationError("用户名、电子邮件和密码是必填项")
+    username = _text_field(get_request_value(request, "username"), "用户名", 32)
+    email = _text_field(get_request_value(request, "email"), "电子邮件", 255)
+    password = _text_field(get_request_value(request, "password"), "口令",
+                           MAX_PASSWORD_LENGTH, min_len=MIN_PASSWORD_LENGTH)
+    phone = _text_field(get_request_value(request, "phone"), "手机号", 14, required=False)
 
     if await Account.filter(email=email).exists():
         raise ResourceAlreadyExistsError("该邮箱已被注册")
@@ -131,12 +148,12 @@ async def login(request: Request, require_second_factor: bool = False):
         CredentialsError: 凭据缺失或不正确（账户不存在与口令错误不作区分，避免账户枚举）
         UnverifiedError / DisabledError / DeletedError: 账户状态不可用
     """
-    username = get_request_value(request, "username")
-    email = get_request_value(request, "email")
-    password = get_request_value(request, "password")
-
-    if not password or (not username and not email):
-        raise CredentialsError("必须提供用户名/邮箱和密码")
+    username = _text_field(get_request_value(request, "username"), "用户名", 32, required=False)
+    email = _text_field(get_request_value(request, "email"), "电子邮件", 255, required=False)
+    password = _text_field(get_request_value(request, "password"), "口令",
+                           MAX_PASSWORD_LENGTH, min_len=MIN_PASSWORD_LENGTH)
+    if not username and not email:
+        raise ValidationError("必须提供用户名或邮箱")
 
     try:
         if email:
@@ -146,6 +163,8 @@ async def login(request: Request, require_second_factor: bool = False):
         else:
             raise CredentialsError("不支持通过用户名登录")
     except NotFoundError:
+        # 与口令错误同等耗时，避免通过响应时间枚举账户
+        Account.verify_dummy_password(password)
         raise CredentialsError("用户名或密码错误")
 
     if not account.verify_password(password):

@@ -17,6 +17,7 @@ from sanic.response import HTTPResponse, raw
 from captcha.image import ImageCaptcha
 from app.models.base import BaseModel
 from tortoise import fields
+from tortoise.expressions import F
 from app.config import BaseConfig
 from app.services.utils import get_ip, get_code, get_expiration_date, utcnow, ensure_aware
 from app.services.exceptions import (
@@ -277,14 +278,16 @@ class VerificationSession(Session):
         校验提交的验证码（不区分大小写，常数时间比较），限制尝试次数。
 
         Raises:
-            RateLimitExceededError: 尝试次数用尽，会话已作废
+            RateLimitExceededError: 尝试次数用尽
             TokenInvalidError: 验证码不正确
         """
-        if self.attempts >= VERIFICATION_MAX_ATTEMPTS:
-            await self.disable()
+        # 原子地"未达上限则计数加一"：并发请求下计数不丢失、也不会超过上限
+        updated = await type(self).filter(
+            id=self.id, attempts__lt=VERIFICATION_MAX_ATTEMPTS
+        ).update(attempts=F("attempts") + 1)
+        if not updated:
+            # 不禁用会话：达到上限后的所有请求稳定返回 429，会话随有效期自然过期
             raise RateLimitExceededError("验证码尝试次数过多，请重新获取")
-        self.attempts += 1
-        await self.save(update_fields=["attempts"])
         expected = self.code.upper().encode()
         given = str(submitted or "").upper().encode()
         if not secrets.compare_digest(expected, given):

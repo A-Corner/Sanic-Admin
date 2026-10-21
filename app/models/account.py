@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 # 口令哈希工具（Argon2id，盐由库自动生成并编码进哈希串）
 password_hasher = PasswordHasher()
+# 账户不存在时用于等成本校验的哑哈希（防止通过响应时间枚举账户）
+_DUMMY_HASH = password_hasher.hash("dummy-password-for-timing-equalization")
 
 
 class Account(BaseModel):
@@ -101,6 +103,14 @@ class Account(BaseModel):
             return password_hasher.verify(self.password, raw_password)
         except (VerifyMismatchError, InvalidHashError, VerificationError):
             return False
+
+    @staticmethod
+    def verify_dummy_password(raw_password: str) -> None:
+        """对哑哈希执行一次与真实校验同等成本的 argon2 校验，结果丢弃。"""
+        try:
+            password_hasher.verify(_DUMMY_HASH, raw_password)
+        except (VerifyMismatchError, InvalidHashError, VerificationError):
+            pass
 
     def validate(self) -> None:
         """
