@@ -21,14 +21,16 @@ async def authenticate_request(request: Request) -> None:
     if auth_header and auth_header.startswith('Bearer '):
         session_id = auth_header.split('Bearer ', 1)[1]
 
-    if not session_id and request.cookies and 'session_id' in request.cookies:
-        session_id = request.cookies.get('session_id')
+    if not session_id and request.cookies:
+        # Cookie 名以会话模型实际下发的为准（Session.encode 使用 cookie_name）
+        from app.models import AuthenticationSession
+        session_id = request.cookies.get(AuthenticationSession.cookie_name)
 
     if not session_id:
         return
 
     try:
-        # 延迟导入：app.models 由后续批次（B1b）补齐，缺失时只影响认证，不影响启动
+        # 延迟导入，避免中间件包与模型包循环依赖
         from app.models import Session
 
         session = await Session.get_valid_session(session_id)

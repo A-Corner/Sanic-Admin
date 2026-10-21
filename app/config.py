@@ -228,6 +228,11 @@ class DefaultConfig:
     REDIS_PASSWORD = None
     REDIS_SOCKET_TIMEOUT = 3
 
+    # API 文档路由（/swagger、/swagger.json、/redoc、/docs/*）；production 默认关闭
+    ENABLE_API_DOCS = True
+    # 登录是否要求二次验证（环境变量 REQUIRE_TWO_FACTOR=true 开启）
+    REQUIRE_TWO_FACTOR = False
+
     USE_CACHE = True
     ROUTE_CACHE_ENABLED = True
     ROUTE_CACHE_TIMEOUT = 60
@@ -262,6 +267,7 @@ class ProductionConfig(DefaultConfig):
     DEBUG = False
     # 生产环境默认不允许任何跨域来源，必须通过 CORS_ALLOWED_ORIGINS 显式配置（逗号分隔）
     CORS_ALLOWED_ORIGINS = []
+    ENABLE_API_DOCS = False
     DB_NAME = "sanic_admin_prod"
     CACHE_TYPE = "redis"
 
@@ -271,6 +277,22 @@ _CONFIG_CLASSES = {
     "testing": TestingConfig,
     "production": ProductionConfig,
 }
+
+
+_TRUE_VALUES = ("1", "true", "yes", "on")
+_FALSE_VALUES = ("0", "false", "no", "off", "")
+
+
+def _bool_env(var: str, default: bool) -> bool:
+    raw = os.getenv(var)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    raise ConfigError(f"环境变量 {var} 必须为布尔值（true/false），当前值: {raw!r}")
 
 
 def _int_env(var: str, default: int) -> int:
@@ -323,6 +345,8 @@ def get_config(name: Optional[str] = None):
     cfg.MAIL_USERNAME = os.getenv("MAIL_USERNAME", cfg.MAIL_USERNAME)
     cfg.MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", cfg.MAIL_PASSWORD)
     cfg.MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", cfg.MAIL_DEFAULT_SENDER)
+    cfg.ENABLE_API_DOCS = _bool_env("ENABLE_API_DOCS", cfg.ENABLE_API_DOCS)
+    cfg.REQUIRE_TWO_FACTOR = _bool_env("REQUIRE_TWO_FACTOR", cfg.REQUIRE_TWO_FACTOR)
     origins = os.getenv("CORS_ALLOWED_ORIGINS")
     if origins:
         cfg.CORS_ALLOWED_ORIGINS = [o.strip() for o in origins.split(",") if o.strip()]
@@ -358,6 +382,29 @@ def _generate_admin_password(env: str) -> str:
     return password
 
 
+MIN_ADMIN_PASSWORD_LENGTH = 8
+
+
+def _initial_admin_password(env: str) -> str:
+    """
+    初始管理员口令：显式提供（环境变量）时至少 8 位，否则抛 ConfigError；
+    缺失时 production 报错、development/testing 生成临时值。
+    """
+    explicit = os.getenv("INITIAL_ADMIN_PASSWORD")
+    if explicit and len(explicit) < MIN_ADMIN_PASSWORD_LENGTH:
+        raise ConfigError(f"INITIAL_ADMIN_PASSWORD 至少需要 {MIN_ADMIN_PASSWORD_LENGTH} 位")
+    return _env_secret(
+        "INITIAL_ADMIN_PASSWORD", env,
+        lambda: _generate_admin_password(env), "初始管理员口令",
+    )
+
+
+def _captcha_font() -> Optional[str]:
+    """验证码字体路径；文件不存在时返回 None（由 captcha 库使用自带字体）。"""
+    path = BASE_DIR / "frontend" / "static" / "fonts" / FONT_LIST[1]
+    return str(path) if path.is_file() else None
+
+
 class BaseConfig:
     """认证/会话模块使用的配置（密钥来自环境变量）"""
 
@@ -365,17 +412,14 @@ class BaseConfig:
 
     # 认证与权限配置
     INITIAL_ADMIN_EMAIL = os.getenv("INITIAL_ADMIN_EMAIL", "SAdmin@Sanic.com")
-    INITIAL_ADMIN_PASSWORD = _env_secret(
-        "INITIAL_ADMIN_PASSWORD", _ACTIVE_ENV,
-        lambda: _generate_admin_password(_ACTIVE_ENV), "初始管理员口令",
-    )
+    INITIAL_ADMIN_PASSWORD = _initial_admin_password(_ACTIVE_ENV)
     ALLOW_LOGIN_WITH_USERNAME = True
     SESSION_SECURE = _ACTIVE_ENV == "production"
     SESSION_ENCODING_ALGORITHM = "RS256"
     AUTHENTICATION_SESSION_EXPIRATION = 604800  # 7天
 
     # 验证码配置
-    CAPTCHA_FONT = f"frontend/static/fonts/{FONT_LIST[1]}"
+    CAPTCHA_FONT = _captcha_font()
 
     # 应用配置（与 settings 保持一致，兼容旧用法）
     HOST = settings.HOST
