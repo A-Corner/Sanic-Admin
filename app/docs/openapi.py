@@ -15,10 +15,13 @@ from sanic import Sanic
 from sanic.blueprints import Blueprint
 from sanic.router import Route
 from sanic.response import json as json_response
-from app.config import get_config
+from app.config import settings
 
 # OpenAPI规范版本
 OPENAPI_VERSION = "3.0.3"
+
+# 文档自身及静态资源路由不进入规范
+_SKIP_PREFIXES = ("/swagger", "/redoc", "/docs", "/static", "/uploads")
 
 # 全局API文档对象
 _api_spec: Dict[str, Any] = {}
@@ -36,7 +39,9 @@ def setup_openapi(app: Sanic, title: str = None, version: str = None,
         description: API描述
         base_path: API基础路径前缀
     """
-    config = get_config()
+    # 优先取应用实例的配置（create_app 已注入），其次取全局 settings，均缺省时用默认值
+    def _opt(name, default):
+        return app.config.get(name) or getattr(settings, name, None) or default
     
     # 初始化OpenAPI规范
     global _api_spec
@@ -44,12 +49,12 @@ def setup_openapi(app: Sanic, title: str = None, version: str = None,
         "openapi": OPENAPI_VERSION,
         "info": {
             "title": title or app.name or "Sanic-Admin API",
-            "version": version or config.API_VERSION or "1.0.0",
+            "version": version or _opt("API_VERSION", "1.0.0"),
             "description": description or "Sanic-Admin API文档",
         },
         "servers": [
             {
-                "url": base_path or config.API_BASE_URL or "/",
+                "url": base_path or _opt("API_BASE_URL", "/"),
                 "description": "API服务器"
             }
         ],
@@ -67,13 +72,10 @@ def setup_openapi(app: Sanic, title: str = None, version: str = None,
         "tags": []
     }
     
-    # 收集所有路由
-    for uri, route_obj in app.router.routes_all.items():
-        if isinstance(route_obj, list):
-            for route in route_obj:
-                _process_route(route, uri)
-        else:
-            _process_route(route_obj, uri)
+    # 收集所有路由：必须用 router.routes（每个 HTTP 方法一条），
+    # routes_all 按路径去重且键为元组，会丢失同路径的多方法处理函数
+    for route in app.router.routes:
+        _process_route(route, route.uri)
     
     # 为blueprint组织标签
     _organize_tags_by_blueprint(app)
@@ -82,10 +84,13 @@ def setup_openapi(app: Sanic, title: str = None, version: str = None,
 def _process_route(route: Route, uri: str) -> None:
     """处理单个路由，提取API信息并添加到OpenAPI规范中"""
     # 忽略内部路由和静态文件路由
-    if uri.startswith("/swagger") or uri.startswith("/static"):
+    if uri.startswith(_SKIP_PREFIXES):
         return
     
     handler = route.handler
+    # 蓝图/路由可能把处理函数包成 functools.partial，取回原函数以读取元数据
+    while hasattr(handler, "func"):
+        handler = handler.func
     
     # 尝试获取处理函数的文档字符串
     docstring = inspect.getdoc(handler) or ""

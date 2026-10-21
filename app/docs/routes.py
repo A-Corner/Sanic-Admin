@@ -12,10 +12,6 @@ from sanic.response import json, html, redirect
 from app.docs.openapi import openapi_json, get_openapi_spec
 from app.docs.swagger import get_redoc_html
 
-# 文档蓝图
-docs_bp = Blueprint("docs", url_prefix="/docs")
-
-
 def setup_doc_routes(app: Sanic, swagger_json_url: str = "/swagger.json") -> None:
     """
     设置API文档相关的路由
@@ -28,15 +24,20 @@ def setup_doc_routes(app: Sanic, swagger_json_url: str = "/swagger.json") -> Non
     if not swagger_json_url.startswith("/"):
         swagger_json_url = f"/{swagger_json_url}"
     
+    # 文档蓝图（每次调用新建，避免多次创建应用时在同一蓝图上重复注册路由）
+    docs_bp = Blueprint("docs", url_prefix="/docs")
+    
     # 注册OpenAPI JSON端点
     @app.route(swagger_json_url)
     async def swagger_json_handler(request):
         return openapi_json(request)
     
-    # 设置ReDoc文档页面
-    @docs_bp.route("/redoc")
+    # 设置ReDoc文档页面（/redoc 为顶层入口，/docs/redoc 保留兼容）
     async def redoc_handler(request):
         return html(get_redoc_html(swagger_json_url))
+    
+    app.add_route(redoc_handler, "/redoc", name="redoc_page")
+    docs_bp.add_route(redoc_handler, "/redoc", name="redoc_page")
     
     # 设置API文档首页
     @docs_bp.route("/")

@@ -30,8 +30,28 @@ from app.docs.decorators import (
     api_security
 )
 
+def setup_docs(app, swagger_url: str = "/swagger", swagger_json_url: str = "/swagger.json") -> None:
+    """
+    一次性接入 API 文档：Swagger UI(/swagger)、ReDoc(/redoc)、OpenAPI JSON(/swagger.json)。
+
+    应在所有蓝图注册之后调用；OpenAPI 规范在服务启动前（before_server_start）生成，
+    因此能收集到全部已注册的路由。若 api 蓝图因降级未注册，规范中只含已注册的路由。
+
+    sanic-ext 默认会在 /docs 下自动挂载另一套 OpenAPI，与本模块的 /docs/* 路由冲突，
+    此处关闭它（``OAS=False``），以本模块为唯一文档来源。
+    """
+    app.config.OAS = False
+    setup_swagger_ui(app, swagger_url=swagger_url, swagger_json_url=swagger_json_url)
+    setup_doc_routes(app, swagger_json_url=swagger_json_url)
+
+    @app.listener("before_server_start")
+    async def _build_openapi_spec(app, loop):
+        setup_openapi(app)
+
+
 __all__ = [
     # 设置函数
+    'setup_docs',
     'setup_openapi',
     'setup_swagger_ui',
     'setup_doc_routes',
