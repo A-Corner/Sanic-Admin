@@ -101,15 +101,43 @@ def _derive_public_pem(private_pem: str) -> str:
     ).decode()
 
 
+def _load_private_key(pem: str):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    try:
+        key = serialization.load_pem_private_key(pem.encode(), password=None)
+    except Exception as e:
+        raise ConfigError(f"JWT_PRIVATE_KEY 无法解析为 PEM 私钥（{type(e).__name__}）")
+    if not isinstance(key, rsa.RSAPrivateKey):
+        raise ConfigError("JWT_PRIVATE_KEY 必须是 RSA 私钥（RS256）")
+    return key
+
+
 def load_jwt_keys(env: str) -> Tuple[str, str]:
-    """返回 (私钥 PEM, 公钥 PEM)。"""
+    """
+    返回 (私钥 PEM, 公钥 PEM)，并校验私钥可解析、公钥可解析且与私钥配对；
+    任一失败统一抛 ConfigError。
+    """
+    from cryptography.hazmat.primitives import serialization
+
     private = os.getenv("JWT_PRIVATE_KEY")
     if private:
         private = private.replace("\\n", "\n")
     else:
         private = _env_secret("JWT_PRIVATE_KEY", env, _generate_rsa_private_pem, " JWT 签名私钥")
+    private_key = _load_private_key(private)
+
     public = os.getenv("JWT_PUBLIC_KEY")
-    public = public.replace("\\n", "\n") if public else _derive_public_pem(private)
+    if not public:
+        return private, _derive_public_pem(private)
+    public = public.replace("\\n", "\n")
+    try:
+        public_key = serialization.load_pem_public_key(public.encode())
+    except Exception as e:
+        raise ConfigError(f"JWT_PUBLIC_KEY 无法解析为 PEM 公钥（{type(e).__name__}）")
+    if public_key.public_numbers() != private_key.public_key().public_numbers():
+        raise ConfigError("JWT_PUBLIC_KEY 与 JWT_PRIVATE_KEY 不配对")
     return private, public
 
 
@@ -228,6 +256,8 @@ class ProductionConfig(DefaultConfig):
     """生产环境配置（全部来自环境变量）"""
     ENV = "production"
     DEBUG = False
+    # 生产环境默认不允许任何跨域来源，必须通过 CORS_ALLOWED_ORIGINS 显式配置（逗号分隔）
+    CORS_ALLOWED_ORIGINS = []
     DB_NAME = "sanic_admin_prod"
     CACHE_TYPE = "redis"
 
@@ -308,6 +338,22 @@ settings = get_config(_ACTIVE_ENV)
 config = settings
 
 
+def _generate_admin_password(env: str) -> str:
+    """生成临时初始管理员口令；仅 development 在控制台 stdout 打印一次（不进入 logger/日志文件）。"""
+    password = secrets.token_urlsafe(12)
+    if env == "development":
+        print(
+            "\n" + "=" * 64 + "\n"
+            "[开发环境] 已自动生成临时初始管理员口令（仅显示这一次，重启后失效）:\n"
+            f"    账号: {os.getenv('INITIAL_ADMIN_EMAIL', 'SAdmin@Sanic.com')}\n"
+            f"    口令: {password}\n"
+            "设置环境变量 INITIAL_ADMIN_PASSWORD 可固定口令。\n"
+            + "=" * 64 + "\n",
+            flush=True,
+        )
+    return password
+
+
 class BaseConfig:
     """认证/会话模块使用的配置（密钥来自环境变量）"""
 
@@ -317,7 +363,7 @@ class BaseConfig:
     INITIAL_ADMIN_EMAIL = os.getenv("INITIAL_ADMIN_EMAIL", "SAdmin@Sanic.com")
     INITIAL_ADMIN_PASSWORD = _env_secret(
         "INITIAL_ADMIN_PASSWORD", _ACTIVE_ENV,
-        lambda: secrets.token_urlsafe(12), "初始管理员口令",
+        lambda: _generate_admin_password(_ACTIVE_ENV), "初始管理员口令",
     )
     ALLOW_LOGIN_WITH_USERNAME = True
     SESSION_SECURE = _ACTIVE_ENV == "production"

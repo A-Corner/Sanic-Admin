@@ -50,6 +50,9 @@ def register_all_middlewares(app: Sanic) -> None:
         from app.api.resources.upload import FileDownloadCounterMiddleware
         app.middleware('request')(FileDownloadCounterMiddleware())
     except Exception as e:
+        if app.config.get("ENV") == "production":
+            from app.config import ConfigError
+            raise ConfigError(f"生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）: {e!r}") from e
         logger.warning(f"[降级] 文件下载计数中间件未启用（app.api.resources.upload 不可用，待 B1d 修复）: {e!r}")
 
     logger.info("所有中间件注册完成")

@@ -17,6 +17,7 @@ import logging
 from io import BytesIO
 from sanic import Sanic, Request
 from sanic.response import HTTPResponse as Response
+from app.middleware._headers import append_vary
 
 # 最小压缩阈值，小于此值的响应不会被压缩
 MIN_COMPRESS_LENGTH = 1024  # 1KB
@@ -143,7 +144,7 @@ def compress_response(response: Response, level: int = DEFAULT_COMPRESSION_LEVEL
     response.body = compressed_body
     response.headers['Content-Encoding'] = 'gzip'
     response.headers['Content-Length'] = str(compressed_size)
-    response.headers['Vary'] = 'Accept-Encoding'
+    append_vary(response.headers, 'Accept-Encoding')
     
     # 计算压缩率
     compression_ratio = (original_size - compressed_size) / original_size * 100 if original_size > 0 else 0

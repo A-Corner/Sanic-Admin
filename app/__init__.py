@@ -25,11 +25,16 @@ from app.middleware.compression import configure_compression
 __all__ = ["create_app", "ConfigError"]
 
 
-def _optional_import(module: str, feature: str, owner: str):
-    """导入可选模块；失败时记录 warning 并返回 None（不静默吞错）。"""
+def _optional_import(module: str, feature: str, owner: str, env: Optional[str] = None):
+    """
+    导入可选模块；development/testing 失败时记录 warning 并返回 None（不静默吞错），
+    production 失败时拒绝启动（抛 ConfigError）。
+    """
     try:
         return importlib.import_module(module)
     except Exception as e:
+        if env == "production":
+            raise ConfigError(f"生产环境拒绝降级启动：{feature} 不可用（导入 {module} 失败，待 {owner} 修复）: {e!r}") from e
         logger.warning(f"[降级] {feature} 未启用（导入 {module} 失败，待 {owner} 修复）: {e!r}")
         return None
 
@@ -85,8 +90,9 @@ def create_app(config: Optional[Any] = None) -> Sanic:
 
 
 def _register_listeners(app: Sanic) -> None:
-    models = _optional_import("app.models", "数据库初始化", "B1b (models)")
-    cache_pkg = _optional_import("app.cache", "缓存系统", "B1c (cache)")
+    env = app.config.get("ENV")
+    models = _optional_import("app.models", "数据库初始化", "B1b (models)", env)
+    cache_pkg = _optional_import("app.cache", "缓存系统", "B1c (cache)", env)
 
     @app.listener('before_server_start')
     async def setup_db(app, loop):
@@ -102,6 +108,8 @@ def _register_listeners(app: Sanic) -> None:
                 init_cache(app, cache_pkg)
                 logger.info("缓存系统初始化完成")
             except Exception as e:
+                if app.config.get("ENV") == "production":
+                    raise
                 logger.warning(f"[降级] 缓存初始化失败，待 B1c 修复: {e!r}")
 
         if models is not None:
@@ -137,20 +145,23 @@ def init_cache(app: Sanic, cache_pkg=None):
 
 def register_blueprints(app: Sanic) -> None:
     """注册所有蓝图；不可用的蓝图降级跳过并记录 warning。"""
-    auth_routes = _optional_import("app.auth.routes", "认证/角色/账户路由", "B1b (auth)")
+    env = app.config.get("ENV")
+    auth_routes = _optional_import("app.auth.routes", "认证/角色/账户路由", "B1b (auth)", env)
     if auth_routes is not None:
         for name in ("auth_bp", "capt_bp", "two_step_bp", "role_bp", "account_bp"):
             bp = getattr(auth_routes, name, None)
             if bp is None:
+                if env == "production":
+                    raise ConfigError(f"生产环境拒绝降级启动：app.auth.routes 缺少 {name}")
                 logger.warning(f"[降级] app.auth.routes 缺少 {name}，待 B1b 修复")
             else:
                 app.blueprint(bp)
 
-    api_pkg = _optional_import("app.api", "API v1 路由", "B1d (api)")
+    api_pkg = _optional_import("app.api", "API v1 路由", "B1d (api)", env)
     if api_pkg is not None and getattr(api_pkg, "v1_bp", None) is not None:
         app.blueprint(api_pkg.v1_bp)
         # 导入资源以确保路由注册
-        _optional_import("app.api.resources", "API 资源路由", "B1d (api)")
+        _optional_import("app.api.resources", "API 资源路由", "B1d (api)", env)
 
 
 async def create_initial_admin() -> None:

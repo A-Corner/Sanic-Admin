@@ -13,6 +13,8 @@ from functools import wraps
 
 from sanic import Request, Sanic, response
 
+from app.middleware._headers import append_vary
+
 
 def setup_security_middleware(app: Sanic) -> None:
     @app.middleware('response')
@@ -25,7 +27,8 @@ def setup_security_middleware(app: Sanic) -> None:
         elif origin and origin in allowed:
             headers['Access-Control-Allow-Origin'] = origin
             headers['Access-Control-Allow-Credentials'] = 'true'
-            headers['Vary'] = 'Origin'
+        if '*' not in allowed:
+            append_vary(resp.headers, 'Origin')  # 无论是否命中白名单，响应都随 Origin 变化
         if headers:
             headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
             headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
