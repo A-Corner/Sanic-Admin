@@ -1,5 +1,8 @@
 # SA-Admin
 
+> **项目状态**：主线正在重构，尚不可用于生产环境；前端以 AMIS 为主线，`frontend/` 下的 Vue 前端为实验性。默认管理员口令仅用于本地开发，部署前必须修改；JWT 签名私钥必须通过环境变量配置，仓库中提交的示例密钥视为已泄露。详见 [README.md](README.md)。
+> **许可证**：Apache-2.0，详见 [LICENSE](LICENSE)。
+
 依赖 Sanic 为基础，利用了低代码框架 AMIS 来实现前端，便捷的解决了后端人员配置前端的麻烦，也通过 Sanic 的强大和轻便使得后端管理器可以覆盖更大的范围实现更强的功能。
 
 ![Readme_image1](./Readme_image2.jpeg)

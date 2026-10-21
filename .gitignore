@@ -161,3 +161,13 @@ cython_debug/
 
 /.git
 /.vscode
+
+# Local databases, OS files, tooling artifacts (SA-OSS-B2)
+*.sqlite3
+*.sqlite3-*
+.DS_Store
+.egc/*.lock
+.egc/.egc-cache.sqlite
+.egc/*.bak*
+coverage.xml
+htmlcov/
