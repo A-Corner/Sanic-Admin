@@ -86,8 +86,8 @@ python main.py
 
 启动服务器后，访问以下URL：
 
-- Swagger UI: http://localhost:8000/swagger
-- ReDoc: http://localhost:8000/redoc
+- Swagger UI: http://localhost:22222/swagger
+- ReDoc: http://localhost:22222/redoc
 
 ## 贡献指南
 
