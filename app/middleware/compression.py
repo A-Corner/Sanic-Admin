@@ -15,7 +15,8 @@ from functools import wraps
 import re
 import logging
 from io import BytesIO
-from sanic import Sanic, Request, Response
+from sanic import Sanic, Request
+from sanic.response import HTTPResponse as Response
 
 # 最小压缩阈值，小于此值的响应不会被压缩
 MIN_COMPRESS_LENGTH = 1024  # 1KB
@@ -186,7 +187,7 @@ async def compression_middleware(request: Request, response: Response) -> Respon
         response: Sanic响应对象
         
     Returns:
-        Response: 处理后的响应对象
+        None: 响应被原地修改；返回响应对象会使 Sanic 跳过其余响应中间件（如 CORS 头）
     """
     # 增加请求总数统计
     _compression_stats["total_requests"] += 1
@@ -194,16 +195,17 @@ async def compression_middleware(request: Request, response: Response) -> Respon
     # 检查是否应该压缩
     if should_compress(request, response):
         try:
-            return compress_response(response)
+            compress_response(response)  # 原地修改 response
+            return None
         except Exception as e:
             logger.error(f"响应压缩失败: {str(e)}")
             # 出错时不压缩，返回原始响应
             _compression_stats["uncompressed_responses"] += 1
-            return response
+            return None
     else:
         # 不需要压缩时记录为未压缩
         _compression_stats["uncompressed_responses"] += 1
-        return response
+        return None
 
 
 def configure_compression(
