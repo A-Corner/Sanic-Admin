@@ -13,9 +13,13 @@ uvloop>=0.19.0; sys_platform != "win32" and implementation_name == "cpython"
 pydantic>=2.5,<3
 argon2-cffi>=23.1.0
 PyJWT>=2.8.0
+# app/config.py 直接 import cryptography 生成/校验 RSA 密钥；选直接依赖而非 PyJWT[crypto]，
+# 因为代码本身直接使用它，不应依赖 PyJWT extra 的传递关系
+cryptography>=42
 captcha>=0.5.0
 # Pillow 10.0.x 无 Python 3.12 wheel，10.1 起支持
 Pillow>=10.1.0
 psutil>=5.9.0
+# 需要系统库 libmagic（macOS: brew install libmagic；Debian/Ubuntu: apt install libmagic1）
 python-magic>=0.4.27
 redis>=4.5.0,<6
