@@ -14,7 +14,7 @@ from app.database.query_optimizer import (
     batch_fetch
 )
 from app.database.connection_pool import get_connection_pool, set_pool_options
-from app.database.query_analyzer import log_query, get_slow_queries, analyze_query_plan
+from app.database.query_analyzer import log_query, get_slow_queries, analyze_query_plan, validate_readonly_sql
 
 __all__ = [
     'optimize_query',
@@ -25,5 +25,6 @@ __all__ = [
     'set_pool_options',
     'log_query',
     'get_slow_queries',
-    'analyze_query_plan'
+    'analyze_query_plan',
+    'validate_readonly_sql'
 ] 

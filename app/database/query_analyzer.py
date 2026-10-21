@@ -246,17 +246,73 @@ async def get_slow_queries(limit: int = 20) -> List[Dict[str, Any]]:
         return logs[:limit]
 
 
+# 只读分析允许的语句：单条 SELECT，或以 WITH 开头的单条查询
+_READONLY_START_RE = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
+# 出现在语句中任意位置即拒绝的写入/DDL/管理类关键字（整词匹配，宁可误拒不可漏放）
+_FORBIDDEN_SQL_RE = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|REPLACE|MERGE|UPSERT|DROP|ALTER|CREATE|TRUNCATE|RENAME|"
+    r"GRANT|REVOKE|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX|ANALYZE|CALL|EXEC|EXECUTE|COPY|"
+    r"LOCK|SET|INTO|LOAD|HANDLER|DO)\b",
+    re.IGNORECASE,
+)
+
+
+# 纵深防御：有副作用或会读写文件/阻塞/外连的函数（后面跟左括号时拒绝）
+_FORBIDDEN_FUNC_RE = re.compile(
+    r"\b(load_extension|pg_sleep\w*|sleep|benchmark|lo_\w+|pg_read_\w+|pg_ls_\w+|pg_stat_file|"
+    r"nextval|setval|dblink\w*|load_file|get_lock|release_lock|set_config|"
+    r"pg_terminate_backend|pg_cancel_backend|pg_(?:try_)?advisory\w*|pg_notify|pg_reload_conf|writefile|readfile|edit|fts3_tokenizer)\s*\(",
+    re.IGNORECASE,
+)
+
+# 带引号/反引号/方括号的标识符后直接跟左括号（函数调用写法）可绕过上面的名称匹配，只读分析不需要，直接拒绝
+_QUOTED_CALL_RE = re.compile(r'["`\]]\s*\(')
+
+
+def validate_readonly_sql(sql: str) -> str:
+    """
+    校验待分析的 SQL 是否为单条只读查询，并返回规范化（去首尾空白与结尾分号）后的 SQL。
+
+    规则：非空；去掉结尾的一个分号后不得再含分号（禁止多语句）；不得含 SQL 注释标记；
+    必须以 SELECT/WITH 开头；不得包含写入/DDL/管理类关键字。
+
+    Raises:
+        ValueError: SQL 不满足只读分析的要求
+    """
+    if not isinstance(sql, str) or not sql.strip():
+        raise ValueError("SQL 不能为空")
+    normalized = sql.strip()
+    if normalized.endswith(";"):
+        normalized = normalized[:-1].rstrip()
+    if ";" in normalized:
+        raise ValueError("只允许分析单条语句")
+    if "--" in normalized or "/*" in normalized or "#" in normalized:
+        raise ValueError("SQL 中不允许包含注释")
+    if not _READONLY_START_RE.match(normalized):
+        raise ValueError("只允许分析 SELECT 查询")
+    forbidden = _FORBIDDEN_SQL_RE.search(normalized)
+    if forbidden:
+        raise ValueError(f"只读分析不允许包含关键字: {forbidden.group(1).upper()}")
+    if _QUOTED_CALL_RE.search(normalized):
+        raise ValueError("只读分析不允许带引号的标识符作为函数调用")
+    func = _FORBIDDEN_FUNC_RE.search(normalized)
+    if func:
+        raise ValueError("只读分析不允许调用有副作用的函数")
+    return normalized
+
+
 async def analyze_query_plan(
     sql: str,
     params: Optional[List[Any]] = None,
     conn_name: str = "default"
 ) -> Dict[str, Any]:
     """
-    分析查询执行计划
+    分析查询执行计划（只读，绝不执行传入的 SQL）
 
-    对于MySQL，使用EXPLAIN
-    对于PostgreSQL，使用EXPLAIN ANALYZE
-    对于SQLite，执行查询分析
+    仅接受单条 SELECT/WITH 查询（见 validate_readonly_sql），并只发出 EXPLAIN：
+    - MySQL：``EXPLAIN``
+    - PostgreSQL：``EXPLAIN (COSTS, VERBOSE, FORMAT JSON)``（不带 ANALYZE，ANALYZE 会真实执行语句）
+    - SQLite：``EXPLAIN QUERY PLAN``（不再实际执行查询，因此不再返回 duration）
 
     Args:
         sql: 要分析的SQL查询
@@ -264,18 +320,23 @@ async def analyze_query_plan(
         conn_name: 连接名称
 
     Returns:
-        Dict[str, Any]: 查询执行计划分析
+        Dict[str, Any]: 查询执行计划分析；校验失败或出错时含 error 字段
     """
+    try:
+        sql = validate_readonly_sql(sql)
+    except ValueError as e:
+        return {"error": f"拒绝分析: {e}"}
+
     if not Tortoise._inited:
         return {"error": "Tortoise ORM未初始化"}
-    
-    conn = Tortoise.get_connection(conn_name)
-    dialect = conn.capabilities.dialect
-    
+
+    dialect = None
     try:
+        conn = Tortoise.get_connection(conn_name)
+        dialect = conn.capabilities.dialect
+
         if dialect == "mysql":
-            explain_sql = f"EXPLAIN {sql}"
-            explain_result, _ = await conn.execute_query(explain_sql, params)
+            explain_result = await conn.execute_query_dict(f"EXPLAIN {sql}", params)
             
             # 尝试获取索引使用情况
             index_usage = []
@@ -296,11 +357,14 @@ async def analyze_query_plan(
             }
             
         elif dialect == "postgres":
-            explain_sql = f"EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT JSON) {sql}"
-            explain_result, _ = await conn.execute_query(explain_sql, params)
+            explain_result = await conn.execute_query_dict(
+                f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {sql}", params
+            )
             
             # PostgreSQL返回JSON格式的执行计划
             plan_json = explain_result[0]["QUERY PLAN"]
+            if isinstance(plan_json, str):
+                plan_json = json.loads(plan_json)
             
             return {
                 "dialect": "postgres",
@@ -309,19 +373,11 @@ async def analyze_query_plan(
             }
             
         elif dialect == "sqlite":
-            # SQLite没有内置的EXPLAIN ANALYZE，只有基础的EXPLAIN
-            explain_sql = f"EXPLAIN QUERY PLAN {sql}"
-            explain_result, _ = await conn.execute_query(explain_sql, params)
-            
-            # 执行实际查询并计时
-            start_time = time.time()
-            await conn.execute_query(sql, params)
-            duration = time.time() - start_time
+            explain_result = await conn.execute_query_dict(f"EXPLAIN QUERY PLAN {sql}", params)
             
             return {
                 "dialect": "sqlite",
                 "plan": explain_result,
-                "duration": duration,
                 "recommendations": _generate_sqlite_recommendations(explain_result)
             }
             
@@ -331,8 +387,10 @@ async def analyze_query_plan(
                 "error": f"不支持的数据库类型: {dialect}"
             }
     except Exception as e:
+        # 原始异常可能含 SQL 片段、库表结构或连接信息，只写服务端日志
+        logger.error("查询计划分析失败 (conn=%s, dialect=%s): %r", conn_name, dialect, e)
         return {
-            "error": f"查询计划分析失败: {str(e)}",
+            "error": "查询计划分析失败，请检查 SQL 与连接名称",
             "dialect": dialect
         }
 
@@ -379,10 +437,10 @@ def _generate_mysql_recommendations(explain_result: List[Dict[str, Any]]) -> Lis
 
 def _generate_postgres_recommendations(plan_json: List[Dict[str, Any]]) -> List[str]:
     """
-    根据PostgreSQL EXPLAIN ANALYZE结果生成优化建议
+    根据PostgreSQL EXPLAIN结果生成优化建议
 
     Args:
-        plan_json: PostgreSQL EXPLAIN ANALYZE的结果
+        plan_json: PostgreSQL EXPLAIN (FORMAT JSON) 的结果
 
     Returns:
         List[str]: 优化建议列表
@@ -414,7 +472,8 @@ def _generate_postgres_recommendations(plan_json: List[Dict[str, Any]]) -> List[
     
     # 从根节点开始分析
     if plan_json and len(plan_json) > 0:
-        analyze_node(plan_json[0])
+        root = plan_json[0]
+        analyze_node(root.get("Plan", root))
     
     return recommendations
 
