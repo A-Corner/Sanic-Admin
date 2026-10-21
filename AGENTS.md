@@ -380,9 +380,17 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 
   > **当前 production 仍起不来**，即使四个变量齐全——原因不是密钥，而是 §9 #3 的 B1d 缺陷：
   > `配置错误: 生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）`。
-  > 把该缺陷隔离掉（进程内打桩 `app.api` 与 `app.api.resources.upload`，不改任何文件）后，
-  > production 能正常起，`GET /health` 返回 **200** 且 `{"status":"ok","env":"production"}`。
-  > 也就是说 **密钥门禁本身是有效的**，唯一的阻塞是 B1d。
+  >
+  > **注意两次失败的退出点不同，含义也不同**：
+  > - **缺密钥时的 exit 1 发生在「配置校验阶段」，早于 API 导入阶段**。
+  >   它证明的是「**配置门禁有效**」，**不**证明「API 层可用」。
+  > - **四密钥齐备时的 exit 1 发生在「API 导入阶段」**（`app/__init__.py` 的
+  >   `_optional_import` 在 production 下把导入失败升级为 `ConfigError` 而非降级），
+  >   根因是 `BlueprintGroup` 没有 `add_blueprint`。
+  >
+  > **production 全链路启动在 m23 基线上未通过**，阻塞点为 B1d（§9 #3），
+  > 待 M1 合并（`Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`）后复验。
+  > 本文件不为此修改 `app/**`。
 - `JWT_PRIVATE_KEY` 是 **RS256 RSA 私钥 PEM**；只给私钥时公钥由私钥推导
   （`load_jwt_keys()`）。给公钥时必须与私钥配对，否则 `ConfigError`。
   PEM 里的换行可以写成字面量 `\n`。
@@ -491,7 +499,7 @@ curl http://127.0.0.1:22230/health
 |---|---|---|
 | compose 静态解析 | 把 `docker-compose.yml` + `.env.example` 复制到临时目录，`.env.example` 当作 `.env`，跑 `docker compose config` | **exit 0**，YAML 合法、变量插值正确（27 个变量全部解析出值，端口映射 `22230→22222`、三个 volume、healthcheck 均正确展开） |
 | Dockerfile 安全项自查 | 逐行读 | 见 §6.4 |
-| production fail-closed | 本机 production 配置 + 环境变量注入实跑 | 缺任一密钥 → exit 1 + `配置错误: …`（§5.1 表）；四密钥齐全 → 仍因 B1d 缺陷 exit 1，隔离该缺陷后 → `/health` 返回 200 `env=production` |
+| production fail-closed | 本机 production 配置 + 环境变量注入实跑 | 缺任一密钥 → exit 1 + `配置错误: …`（§5.1 表）。**该退出在配置校验阶段，早于 API 导入阶段**，只证明配置门禁有效。四密钥齐备 → **仍 exit 1**，根因为 `BlueprintGroup.add_blueprint` 缺失（§9 #3）。**production 全链路启动未通过，待 M1 合并后复验** |
 
 ### 6.4 Dockerfile 安全项自查（逐条结论 + 依据行号）
 
@@ -663,7 +671,7 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 |---|---|---|---|
 | 1 | `app.models.permission` 模块缺失 | `app/models/` 下只有 account/role/session/verification/profile/system_setting/operation_log/uploaded_file | 6 个测试模块收集失败（§3.2） |
 | 2 | `app.cache.backends` 模块缺失 | 实际结构是 `app/cache/{base,memory,redis}.py` | `tests/test_cache.py` 收集失败 |
-| 3 | `BlueprintGroup.add_blueprint` 不存在 | `app/api/__init__.py:22,33,38` 用了该方法，Sanic 23.6 的 `BlueprintGroup` 没有 | **整个 `/api/v1` 资源层降级不可用**；`app.api` 导入失败连带 `FileDownloadCounterMiddleware` 降级 |
+| 3 | `BlueprintGroup.add_blueprint` 不存在 | `app/api/__init__.py:22,33,38` 用了该方法。实测（干净 venv + `sanic==23.6.0`）：`Blueprint.group(Blueprint('t'))` → `type: BlueprintGroup`，`hasattr(bg, 'add_blueprint')` → **False**，公开方法只有 `append/blueprints/clear/extend/insert/pop/remove/…` | **整个 `/api/v1` 资源层降级不可用**；`app.api` 导入失败连带 `FileDownloadCounterMiddleware` 降级。M1 已用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 修复（实测该写法可用），待合并 |
 | 4 | `create_app()` 未调用 `setup_docs()` | `app/docs/__init__.py:33` 有现成实现，未接线 | `/swagger`、`/redoc`、`/swagger.json` 全部 404；`README.md` 的文档访问说明与现状不符 |
 | 5 | `tests/test_docs/` 里两个 `Sanic("test_app")` fixture 同名 | `test_openapi.py:48` 与 `test_swagger.py:20` | 4 个测试 ERROR（app registry 重名） |
 | 6 | `test_openapi_spec_generation` 断言尾斜杠 | 断言 `"/api/test/"`，实现给 `"/api/test"` | 1 个测试 FAIL |
@@ -671,7 +679,7 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 | 8 | `app/web/routes.py` 的 `register_web_blueprints()` 从未调用，且 `frontend/templates/` 不存在 | — | `/login`、`/index` 404 |
 | 9 | `frontend/` 缺 `.eslintrc` / `babel.config.js` | ESLint 用默认 espree 解析 ES Module | `npm run lint` exit 1，8 个 Parsing error |
 | 10 | `amis/index.html` 不存在 | `server.js` 兜底 `sendFile('index.html')` | `npm start` 后 `GET /` → 404 |
-| 11 | production 模式下当前**无法启动** | 实测 `SANIC_ENV=production` + 四变量齐全 → `main.py` exit 1：`生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）` | 由 #3 引起；#3 修好后应能起（隔离 #3 后实测：`/health` 返回 200 `env=production`） |
+| 11 | production 模式下当前**无法启动** | 实测 `SANIC_ENV=production` + 四变量齐全 → `main.py` exit 1：`生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）` | 由 #3 引起。**production 全链路启动在 m23 基线上未通过**，待 M1 合并后复验 |
 | 12 | `.gitignore` 未忽略 `uploads/` | `create_app()` 会创建该目录 | 上传测试文件可能被误提交 |
 | 13 | 真实 `docker compose up` 未能执行 | 本机 Docker daemon 无法启动（特权助手 `com.docker.vmnetd` 需 sudo 密码），也无 podman/nerdctl/lima 等替代运行时 | 容器行为只有静态解析 + 等价路径实测背书，无真实容器运行证据（§6.3） |
 
@@ -687,7 +695,8 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 - **`ruff check .` 通过**（exit 0）。
 - **`frontend/npm run lint` 失败**（exit 1，8 Parsing error，§9 #9）。
 - **`amis/npm start` 后 `GET /` 404**（§9 #10）。
-- **production 当前起不来**（§9 #11）。
+- **production 当前起不来**（§9 #11）——**全链路启动未通过**，阻塞点为 B1d，待 M1 合并后复验。
+  注意：缺密钥时的 exit 1 在**配置校验阶段**，只证明配置门禁有效，不证明 API 层可用。
 - **真实 `docker compose up` 未执行**（§6.3、§9 #13）——本机 Docker daemon 起不来，
   替代验证为 compose 静态解析 + Dockerfile 安全项自查 + production fail-closed 本机等价实测。
 
