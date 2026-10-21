@@ -15,7 +15,7 @@
             "label": "中控台",
             "url": "dcm",
             "icon": "fa fa-gauge",
-            "schemaApi": "get:./static/pages/dash_board.json"
+            "schemaApi": "get:pages/dash_board.json"
           }
         ]
       },
@@ -38,23 +38,23 @@
                     "label": "详细信息",
                     "url": "/user/crud/list",
                     "icon": "fa fa-newspaper-o",
-                    "schemaApi": "get:./static/pages/crud-list.json"
+                    "schemaApi": "get:pages/crud-list.json"
                   },
                   {
                     "label": "新增",
                     "icon": "fa fa-plus",
                     "url": "/user/crud/new",
-                    "schemaApi": "get:./static/pages/crud-new.json"
+                    "schemaApi": "get:pages/crud-new.json"
                   },
                   {
                     "label": "查看",
                     "url": "/user/crud/:id",
-                    "schemaApi": "get:./static/pages/crud-view.json"
+                    "schemaApi": "get:pages/crud-view.json"
                   },
                   {
                     "label": "修改",
                     "url": "/user/crud/:id/edit",
-                    "schemaApi": "get:./static/pages/crud-edit.json"
+                    "schemaApi": "get:pages/crud-edit.json"
                   }
                 ]
               },
@@ -68,23 +68,23 @@
                     "label": "详细信息",
                     "url": "/dept/crud/list",
                     "icon": "fa fa-newspaper-o",
-                    "schemaApi": "get:./static/pages/crud-list.json"
+                    "schemaApi": "get:pages/crud-list.json"
                   },
                   {
                     "label": "新增",
                     "icon": "fa fa-plus",
                     "url": "/dept/crud/new",
-                    "schemaApi": "get:./static/pages/crud-new.json"
+                    "schemaApi": "get:pages/crud-new.json"
                   },
                   {
                     "label": "查看",
                     "url": "/dept/crud/:id",
-                    "schemaApi": "get:./static/pages/crud-view.json"
+                    "schemaApi": "get:pages/crud-view.json"
                   },
                   {
                     "label": "修改",
                     "url": "/dept/crud/:id/edit",
-                    "schemaApi": "get:./static/pages/crud-edit.json"
+                    "schemaApi": "get:pages/crud-edit.json"
                   }
                 ]
               },
@@ -98,23 +98,23 @@
                     "label": "详细信息",
                     "url": "/role/crud/list",
                     "icon": "fa fa-newspaper-o",
-                    "schemaApi": "get:./static/pages/crud-list.json"
+                    "schemaApi": "get:pages/crud-list.json"
                   },
                   {
                     "label": "新增",
                     "icon": "fa fa-plus",
                     "url": "/role/crud/new",
-                    "schemaApi": "get:./static/pages/crud-new.json"
+                    "schemaApi": "get:pages/crud-new.json"
                   },
                   {
                     "label": "查看",
                     "url": "/role/crud/:id",
-                    "schemaApi": "get:./static/pages/crud-view.json"
+                    "schemaApi": "get:pages/crud-view.json"
                   },
                   {
                     "label": "修改",
                     "url": "/user/crud/:id/edit",
-                    "schemaApi": "get:./static/pages/crud-edit.json"
+                    "schemaApi": "get:pages/crud-edit.json"
                   }
                 ]
               },
@@ -128,23 +128,23 @@
                     "label": "详细信息",
                     "url": "/permission/crud/list",
                     "icon": "fa fa-newspaper-o",
-                    "schemaApi": "get:./static/pages/crud-list.json"
+                    "schemaApi": "get:pages/crud-list.json"
                   },
                   {
                     "label": "新增",
                     "icon": "fa fa-plus",
                     "url": "/permission/crud/new",
-                    "schemaApi": "get:./static/pages/crud-new.json"
+                    "schemaApi": "get:pages/crud-new.json"
                   },
                   {
                     "label": "查看",
                     "url": "/permission/crud/:id",
-                    "schemaApi": "get:./static/pages/crud-view.json"
+                    "schemaApi": "get:pages/crud-view.json"
                   },
                   {
                     "label": "修改",
                     "url": "/permission/crud/:id/edit",
-                    "schemaApi": "get:./static/pages/crud-edit.json"
+                    "schemaApi": "get:pages/crud-edit.json"
                   }
                 ]
               },
@@ -158,23 +158,23 @@
                     "label": "详细信息",
                     "url": "/menu/crud/list",
                     "icon": "fa fa-newspaper-o",
-                    "schemaApi": "get:./static/pages/crud-list.json"
+                    "schemaApi": "get:pages/crud-list.json"
                   },
                   {
                     "label": "新增",
                     "icon": "fa fa-plus",
                     "url": "/menu/crud/new",
-                    "schemaApi": "get:./static/pages/crud-new.json"
+                    "schemaApi": "get:pages/crud-new.json"
                   },
                   {
                     "label": "查看",
                     "url": "/menu/crud/:id",
-                    "schemaApi": "get:./static/pages/crud-view.json"
+                    "schemaApi": "get:pages/crud-view.json"
                   },
                   {
                     "label": "修改",
                     "url": "/menu/crud/:id/edit",
-                    "schemaApi": "get:./static/pages/crud-edit.json"
+                    "schemaApi": "get:pages/crud-edit.json"
                   }
                 ]
               }
@@ -221,7 +221,7 @@
           },
           {
             "label": "jsonp 返回示例",
-            "schemaApi": "jsonp:./pages/jsonp.js?callback=jsonpCallback"
+            "schemaApi": "jsonp:pages/jsonp.js?callback=jsonpCallback"
           }
         ]
       }

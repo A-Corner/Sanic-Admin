@@ -2,7 +2,7 @@
   "type": "crud",
   "api": {
     "method": "get",
-    "url": "http://127.0.0.1:22222/refapi/account/0",
+    "url": "/refapi/account/0",
     "messages": {},
     "requestAdaptor": "",
     "adaptor": "",

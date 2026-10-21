@@ -114,7 +114,7 @@
                                       "args": {
                                         "options": {},
                                         "api": {
-                                          "url": "http://127.0.0.1:22222/auth/login",
+                                          "url": "/auth/login",
                                           "method": "post",
                                           "requestAdaptor": "",
                                           "adaptor": "",
@@ -220,7 +220,7 @@
                                   "className": "b-warning b-t b-b m-none p-none",
                                   "imageClassName": "m-none p-none",
                                   "thumbClassName": "m-none p-none",
-                                  "src": "http://127.0.0.1:22222/capt/image",
+                                  "src": "/capt/image",
                                   "hidden": false
                                 },
                                 {
@@ -248,10 +248,10 @@
                             }
                           ],
                           "api": {
-                            "url": "http://127.0.0.1:22222/account",
+                            "url": "/account",
                             "method": "get"
                           },
-                          "asyncApi": "http://127.0.0.1:22222/account",
+                          "asyncApi": "/account",
                           "onEvent": {
                             "submit": {
                               "weight": 0,
@@ -340,7 +340,7 @@
                               "className": "b-warning b-t b-b m-none p-none",
                               "imageClassName": "m-none p-none",
                               "thumbClassName": "m-none p-none",
-                              "src": "http://127.0.0.1:22222/capt/image",
+                              "src": "/capt/image",
                               "hidden": false
                             },
                             {
@@ -368,10 +368,10 @@
                         }
                       ],
                       "api": {
-                        "url": "http://127.0.0.1:22222/account",
+                        "url": "/account",
                         "method": "get"
                       },
-                      "asyncApi": "http://127.0.0.1:22222/account",
+                      "asyncApi": "/account",
                       "onEvent": {
                         "submit": {
                           "weight": 0,

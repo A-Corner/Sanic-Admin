@@ -9,7 +9,7 @@
       "name": "sample-edit-form",
       "api": {
         "method": "put",
-        "url": "http://127.0.0.1:22222/refapi/account/0",
+        "url": "/refapi/account/0",
         "requestAdaptor": "",
         "adaptor": "",
         "messages": {},
@@ -29,7 +29,7 @@
           "addOn": null,
           "id": "u:90867794cd52",
           "validateApi": {
-            "url": "http://127.0.0.1:22222/refapi/account/search?value=${username}&name=username",
+            "url": "/refapi/account/search?value=${username}&name=username",
             "method": "get",
             "requestAdaptor": "",
             "adaptor": "",
