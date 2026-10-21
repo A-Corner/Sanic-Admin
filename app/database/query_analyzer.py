@@ -261,7 +261,7 @@ _FORBIDDEN_SQL_RE = re.compile(
 _FORBIDDEN_FUNC_RE = re.compile(
     r"\b(load_extension|pg_sleep\w*|sleep|benchmark|lo_\w+|pg_read_\w+|pg_ls_\w+|pg_stat_file|"
     r"nextval|setval|dblink\w*|load_file|get_lock|release_lock|set_config|"
-    r"pg_terminate_backend|pg_cancel_backend|pg_advisory_lock\w*|pg_notify|pg_reload_conf|writefile|readfile|edit|fts3_tokenizer)\s*\(",
+    r"pg_terminate_backend|pg_cancel_backend|pg_(?:try_)?advisory\w*|pg_notify|pg_reload_conf|writefile|readfile|edit|fts3_tokenizer)\s*\(",
     re.IGNORECASE,
 )
 
