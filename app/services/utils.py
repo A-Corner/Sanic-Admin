@@ -5,7 +5,7 @@
 工具函数模块，提供各种通用功能
 """
 import datetime
-import random
+import secrets
 import string
 from sanic.request import Request
 from sanic.response import json as json_response
@@ -40,7 +40,7 @@ def get_ip(request: Request) -> str:
 
 def get_code(length: int = 6) -> str:
     """
-    生成随机验证码
+    生成随机验证码（使用 secrets，密码学安全）
     
     Args:
         length: 验证码长度，默认为6
@@ -48,12 +48,50 @@ def get_code(length: int = 6) -> str:
     Returns:
         str: 随机验证码
     """
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+    alphabet = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def get_request_value(request: Request, key: str) -> Optional[Any]:
+    """
+    从表单或 JSON 请求体中读取参数（表单优先）。
+
+    请求体不是合法 JSON 时不抛异常，返回 None。
+
+    Args:
+        request: Sanic请求对象
+        key: 参数名
+
+    Returns:
+        参数值，不存在则为 None
+    """
+    value = request.form.get(key) if request.form else None
+    if value is not None:
+        return value
+    try:
+        body = request.json
+    except Exception:  # 非 JSON 请求体
+        return None
+    if isinstance(body, dict):
+        return body.get(key)
+    return None
+
+
+def utcnow() -> datetime.datetime:
+    """当前 UTC 时间（带时区）。Tortoise 读出的时间字段为带时区的 UTC，比较须保持一致。"""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def ensure_aware(dt: datetime.datetime) -> datetime.datetime:
+    """把 naive 时间视为 UTC，返回带时区的时间，便于与 utcnow() 比较。"""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
 
 
 def get_expiration_date(seconds: int) -> datetime.datetime:
     """
-    获取未来的过期时间
+    获取未来的过期时间（带时区的 UTC）
     
     Args:
         seconds: 从现在起多少秒后过期
@@ -61,7 +99,7 @@ def get_expiration_date(seconds: int) -> datetime.datetime:
     Returns:
         datetime: 过期时间
     """
-    return datetime.datetime.now() + datetime.timedelta(seconds=seconds)
+    return utcnow() + datetime.timedelta(seconds=seconds)
 
 
 def json(

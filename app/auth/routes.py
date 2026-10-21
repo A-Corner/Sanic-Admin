@@ -4,9 +4,8 @@
 """
 认证路由模块，定义所有认证相关的路由
 """
-from argon2 import PasswordHasher
 from sanic import Blueprint
-from app.models import Account, CaptchaSession, AuthenticationSession
+from app.models import CaptchaSession, AuthenticationSession
 from app.services.utils import json
 from app.auth.authentication import (
     login,
@@ -14,18 +13,12 @@ from app.auth.authentication import (
     requires_authentication,
     logout,
     fulfill_second_factor,
-)
-from app.auth.authorization import (
-    assign_role,
-    check_permissions,
-    check_roles,
+    get_session_token,
 )
 from app.auth.verification import (
     request_two_step_verification,
-    requires_two_step_verification,
     verify_account,
     request_captcha,
-    requires_captcha,
 )
 
 
@@ -37,8 +30,13 @@ role_bp = Blueprint('roles', url_prefix='/roles')
 account_bp = Blueprint('account', url_prefix='/account')
 
 
-# 密码哈希工具
-password_hasher = PasswordHasher()
+def _delivery_code(request, code: str):
+    """
+    验证码只应通过邮件/短信/图片送达用户本人，不能出现在 API 响应里。
+    本项目尚未接入投递渠道：仅 DEBUG/测试环境把验证码放进响应体，方便联调；
+    其他环境不返回（客户端拿不到验证码，相关流程需先接入投递渠道）。
+    """
+    return code if request.app.config.get("DEBUG") else None
 
 
 # 认证路由
@@ -62,22 +60,14 @@ async def on_register(request):
     """
     使用电子邮件和密码注册账户
     """
-    account = await register(
-        request,
-        verified=request.form.get("verified") == "true",
-        disabled=request.form.get("disabled") == "true",
+    account = await register(request)
+
+    two_step_session = await request_two_step_verification(request, account)
+    response = json(
+        "注册成功! 需要验证。",
+        _delivery_code(request, two_step_session.code)
     )
-    
-    if not account.verified:
-        two_step_session = await request_two_step_verification(request, account)
-        response = json(
-            "注册成功! 需要验证。",
-            two_step_session.code
-        )
-        two_step_session.encode(response)
-    else:
-        response = json("注册成功!", account.json)
-    
+    two_step_session.encode(response)
     return response
 
 
@@ -111,7 +101,7 @@ async def on_login(request):
         )
         response = json(
             "登录成功! 需要两步验证。",
-            two_step_session.code,
+            _delivery_code(request, two_step_session.code),
         )
         two_step_session.encode(response)
     else:
@@ -148,7 +138,7 @@ async def on_logout(request):
 
 # 获取关联认证会话路由
 @auth_bp.post("/associated")
-@requires_authentication
+@requires_authentication()
 async def on_get_associated_authentication_sessions(request):
     """
     获取与已登录账户关联的认证会话
@@ -169,7 +159,7 @@ async def on_captcha_request(request):
     请求验证码
     """
     captcha_session = await request_captcha(request)
-    response = json("验证码请求成功!", captcha_session.code)
+    response = json("验证码请求成功!", _delivery_code(request, captcha_session.code))
     captcha_session.encode(response)
     return response
 
@@ -181,10 +171,6 @@ async def on_captcha_image(request):
     请求验证码图像
     """
     captcha_session = await CaptchaSession.decode(
-        request.cookies.get("session") or request.token
+        get_session_token(request, CaptchaSession.cookie_name, CaptchaSession.header_name)
     )
-    
-    if not captcha_session:
-        return json("无效的验证码会话", status=400)
-    
     return await captcha_session.generate_image()

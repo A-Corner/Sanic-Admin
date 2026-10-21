@@ -5,11 +5,11 @@
 验证令牌模型模块，提供用于账户激活、密码重置和二步验证的令牌功能
 """
 
-import datetime
 import json
 from tortoise import fields
 from tortoise.exceptions import DoesNotExist
 from app.models.base import BaseModel
+from app.services.utils import utcnow, ensure_aware
 
 
 class VerificationToken(BaseModel):
@@ -22,7 +22,6 @@ class VerificationToken(BaseModel):
     token = fields.CharField(max_length=128, unique=True, description="验证令牌")
     token_type = fields.CharField(max_length=32, description="令牌类型，如 'activation', 'password_reset', 'two_factor'")
     expires_at = fields.DatetimeField(description="过期时间")
-    created_at = fields.DatetimeField(auto_now_add=True, description="创建时间")
     used = fields.BooleanField(default=False, description="是否已使用")
     _data = fields.TextField(null=True, description="附加数据，存储为JSON格式", source_field="data")
     
@@ -70,7 +69,7 @@ class VerificationToken(BaseModel):
         Returns:
             bool: 如果令牌已过期则返回True
         """
-        return self.expires_at < datetime.datetime.now()
+        return ensure_aware(self.expires_at) < utcnow()
     
     @classmethod
     async def find_valid_token(cls, token: str, token_type: str):
@@ -112,6 +111,6 @@ class VerificationToken(BaseModel):
         Returns:
             int: 清理的令牌数量
         """
-        now = datetime.datetime.now()
+        now = utcnow()
         deleted_count = await cls.filter(expires_at__lt=now).delete()
         return deleted_count 

@@ -2,331 +2,205 @@
 # -*- coding: utf-8 -*-
 
 """
-验证模块，提供账户激活和二步验证功能
-"""
+验证模块，提供账户验证、两步验证、图形验证码，以及基于令牌的账户激活/密码重置
 
+两类机制：
+
+* 会话式（TwoStepSession / CaptchaSession）：验证码绑定在短期会话里，令牌经 Cookie / 请求头下发，
+  供注册验证、登录二次验证、验证码使用。
+* 令牌式（VerificationToken）：一次性随机令牌，供账户激活、密码重置（通过邮件等渠道投递）。
+"""
+import functools
 import secrets
-import datetime
 from sanic.request import Request
-from app.models import Account, VerificationToken, TwoFactorMethod
+from app.models import (
+    Account,
+    CaptchaSession,
+    TwoStepSession,
+    VerificationToken,
+)
+from app.services.utils import get_expiration_date, get_request_value
 from app.services.exceptions import (
     VerificationError,
     TokenExpiredError,
-    TokenInvalidError
+    TokenInvalidError,
+    SessionNotFoundError,
 )
-from app.config import settings
+from app.auth.authentication import get_session_token, find_request
 
+
+# ---------------------------------------------------------------- 会话式验证
+
+async def request_two_step_verification(request: Request, account: Account) -> TwoStepSession:
+    """
+    为账户创建两步验证会话（验证码需通过邮件/短信等渠道送达用户，路由层负责投递）
+
+    Returns:
+        TwoStepSession: 新建的两步验证会话
+    """
+    return await TwoStepSession.create_from_request(request, bearer=account)
+
+
+async def _decode_two_step_session(request: Request) -> TwoStepSession:
+    token = (
+        get_request_value(request, "two_step_token")
+        or get_session_token(request, TwoStepSession.cookie_name, TwoStepSession.header_name)
+    )
+    if not token:
+        raise SessionNotFoundError("未找到二步验证会话令牌")
+    session = await TwoStepSession.decode(token)
+    await session.fetch_related("bearer")
+    return session
+
+
+async def verify_account(request: Request) -> TwoStepSession:
+    """
+    用两步验证码验证账户，成功后账户置为已验证。
+
+    Returns:
+        TwoStepSession: 已使用（已禁用）的两步验证会话，bearer 已加载
+
+    Raises:
+        VerificationError: 账户已验证
+        TokenInvalidError: 验证码不正确
+    """
+    session = await _decode_two_step_session(request)
+    account = session.bearer
+    if account is None:
+        raise SessionNotFoundError("验证会话未关联账户")
+    if account.verified:
+        raise VerificationError("账户已验证")
+
+    await session.check_code(get_request_value(request, "code"))
+
+    account.verified = True
+    await account.save(update_fields=["verified"])
+    await session.disable()
+    return session
+
+
+def requires_two_step_verification(func):
+    """
+    要求请求携带有效两步验证会话与正确验证码的装饰器；通过后会话作废，
+    并写入 ``request.ctx.two_step_session``。
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        request = find_request(args)
+        session = await _decode_two_step_session(request)
+        await session.check_code(get_request_value(request, "code"))
+        await session.disable()
+        request.ctx.two_step_session = session
+        return await func(*args, **kwargs)
+    return wrapper
+
+
+async def request_captcha(request: Request) -> CaptchaSession:
+    """
+    创建图形验证码会话
+
+    Returns:
+        CaptchaSession: 新建的验证码会话
+    """
+    return await CaptchaSession.create_from_request(request)
+
+
+def requires_captcha(func):
+    """
+    要求请求携带有效验证码会话与正确验证码（``code`` 参数）的装饰器；通过后会话作废，
+    并写入 ``request.ctx.captcha_session``。
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        request = find_request(args)
+        token = get_session_token(request, CaptchaSession.cookie_name, CaptchaSession.header_name)
+        if not token:
+            raise SessionNotFoundError("未找到验证码会话令牌")
+        session = await CaptchaSession.decode(token)
+        await session.check_code(get_request_value(request, "code"))
+        await session.disable()
+        request.ctx.captcha_session = session
+        return await func(*args, **kwargs)
+    return wrapper
+
+
+# ---------------------------------------------------------------- 令牌式验证
 
 async def generate_verification_token(account: Account, token_type: str, expiry_hours: int = 24):
     """
-    生成验证令牌
-    
+    生成验证令牌（同账户同类型的旧令牌作废）
+
     Args:
         account: 账户实例
-        token_type: 令牌类型，如 'activation', 'password_reset', 'two_factor'
+        token_type: 令牌类型，如 'activation', 'password_reset'
         expiry_hours: 令牌过期时间（小时）
-        
+
     Returns:
         VerificationToken: 生成的验证令牌实例
     """
-    # 删除该账户已有的同类型令牌
     await VerificationToken.filter(account_id=account.id, token_type=token_type).delete()
-    
-    # 生成令牌
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.datetime.now() + datetime.timedelta(hours=expiry_hours)
-    
-    # 创建令牌记录
-    verification_token = await VerificationToken.create(
+
+    return await VerificationToken.create(
         account=account,
-        token=token,
+        token=secrets.token_urlsafe(32),
         token_type=token_type,
-        expires_at=expires_at
+        expires_at=get_expiration_date(expiry_hours * 3600),
     )
-    
-    return verification_token
 
 
 async def validate_token(token: str, token_type: str):
     """
     验证令牌有效性
-    
-    Args:
-        token: 令牌字符串
-        token_type: 令牌类型
-        
-    Returns:
-        VerificationToken: 令牌实例
-        
+
     Raises:
         TokenInvalidError: 令牌无效
         TokenExpiredError: 令牌已过期
     """
-    # 查找令牌
-    verification_token = await VerificationToken.filter(token=token, token_type=token_type).first()
-    
+    verification_token = await VerificationToken.filter(
+        token=token, token_type=token_type, used=False
+    ).first()
     if not verification_token:
         raise TokenInvalidError("无效的验证令牌")
-    
-    # 检查令牌是否过期
-    if verification_token.expires_at < datetime.datetime.now():
-        # 删除过期令牌
+
+    if verification_token.is_expired:
         await verification_token.delete()
         raise TokenExpiredError("验证令牌已过期")
-    
+
     return verification_token
 
 
 async def activate_account(token: str):
     """
-    激活账户
-    
-    Args:
-        token: 激活令牌
-        
-    Returns:
-        Account: 激活的账户实例
-        
+    激活（验证）账户
+
     Raises:
-        TokenInvalidError: 令牌无效
-        TokenExpiredError: 令牌已过期
-        VerificationError: 验证错误
+        TokenInvalidError / TokenExpiredError: 令牌无效或过期
+        VerificationError: 账户已验证
     """
-    # 验证令牌
     verification_token = await validate_token(token, 'activation')
-    
-    # 获取账户
     account = await verification_token.account.get()
-    
-    if account.is_active:
-        # 删除已使用的令牌
+
+    if account.verified:
         await verification_token.delete()
-        raise VerificationError("账户已激活")
-    
-    # 激活账户
-    account.is_active = True
-    await account.save()
-    
-    # 删除已使用的令牌
+        raise VerificationError("账户已验证")
+
+    account.verified = True
+    await account.save(update_fields=["verified"])
     await verification_token.delete()
-    
     return account
 
 
 async def reset_password(token: str, new_password: str):
     """
     重置密码
-    
-    Args:
-        token: 重置密码令牌
-        new_password: 新密码
-        
-    Returns:
-        Account: 更新密码的账户实例
-        
+
     Raises:
-        TokenInvalidError: 令牌无效
-        TokenExpiredError: 令牌已过期
+        TokenInvalidError / TokenExpiredError: 令牌无效或过期
     """
-    # 验证令牌
     verification_token = await validate_token(token, 'password_reset')
-    
-    # 获取账户
     account = await verification_token.account.get()
-    
-    # 更新密码
+
     account.set_password(new_password)
-    await account.save()
-    
-    # 删除已使用的令牌
+    await account.save(update_fields=["password"])
     await verification_token.delete()
-    
     return account
-
-
-async def setup_two_factor(account: Account, method: TwoFactorMethod, details: str = None):
-    """
-    设置二步验证
-    
-    Args:
-        account: 账户实例
-        method: 二步验证方法（如 'sms', 'email', 'app'）
-        details: 方法详情（如电话号码、电子邮件地址）
-        
-    Returns:
-        bool: 设置成功返回True
-    """
-    # 更新账户二步验证设置
-    account.two_factor_method = method
-    
-    if details:
-        if method == TwoFactorMethod.SMS:
-            account.phone_number = details
-        elif method == TwoFactorMethod.EMAIL:
-            account.email = details
-    
-    account.two_factor_enabled = True
-    await account.save()
-    
-    return True
-
-
-async def disable_two_factor(account: Account):
-    """
-    禁用二步验证
-    
-    Args:
-        account: 账户实例
-        
-    Returns:
-        bool: 禁用成功返回True
-    """
-    account.two_factor_enabled = False
-    await account.save()
-    
-    return True
-
-
-async def generate_two_factor_code(account: Account):
-    """
-    生成二步验证码
-    
-    Args:
-        account: 账户实例
-        
-    Returns:
-        str: 验证码
-        VerificationToken: 验证令牌实例
-    """
-    # 生成6位随机数字验证码
-    code = ''.join(secrets.choice('0123456789') for _ in range(6))
-    
-    # 创建验证令牌，1小时有效期
-    verification_token = await generate_verification_token(account, 'two_factor', 1)
-    
-    # 保存验证码到令牌数据字段
-    verification_token.data = {'code': code}
-    await verification_token.save()
-    
-    return code, verification_token
-
-
-async def verify_two_factor_code(account: Account, code: str):
-    """
-    验证二步验证码
-    
-    Args:
-        account: 账户实例
-        code: 验证码
-        
-    Returns:
-        bool: 验证成功返回True
-        
-    Raises:
-        TokenInvalidError: 验证码无效
-        TokenExpiredError: 验证码已过期
-    """
-    # 查找该账户的二步验证令牌
-    verification_token = await VerificationToken.filter(
-        account_id=account.id,
-        token_type='two_factor'
-    ).first()
-    
-    if not verification_token:
-        raise TokenInvalidError("无效的验证码")
-    
-    # 检查令牌是否过期
-    if verification_token.expires_at < datetime.datetime.now():
-        # 删除过期令牌
-        await verification_token.delete()
-        raise TokenExpiredError("验证码已过期")
-    
-    # 验证码比对
-    if verification_token.data.get('code') != code:
-        raise TokenInvalidError("验证码错误")
-    
-    # 删除已使用的令牌
-    await verification_token.delete()
-    
-    return True
-
-
-async def get_captcha_image():
-    """
-    生成图形验证码
-    
-    Returns:
-        tuple: (验证码文本, 图像数据base64字符串)
-    """
-    from captcha.image import ImageCaptcha
-    import random
-    import string
-    import base64
-    from io import BytesIO
-    
-    # 生成随机验证码文本
-    chars = string.ascii_uppercase + string.digits
-    captcha_text = ''.join(random.choice(chars) for _ in range(4))
-    
-    # 生成图像
-    image = ImageCaptcha(width=160, height=60)
-    data = image.generate(captcha_text)
-    
-    # 转换为base64
-    buffer = BytesIO()
-    image.write(captcha_text, buffer, format='PNG')
-    buffer.seek(0)
-    img_str = base64.b64encode(buffer.getvalue()).decode()
-    
-    return captcha_text, f"data:image/png;base64,{img_str}"
-
-
-async def store_captcha(request: Request, captcha_text: str):
-    """
-    存储验证码到会话
-    
-    Args:
-        request: 请求对象
-        captcha_text: 验证码文本
-    """
-    if hasattr(request, 'session'):
-        request.session['captcha'] = captcha_text.upper()
-        request.session['captcha_time'] = datetime.datetime.now().timestamp()
-
-
-async def verify_captcha(request: Request, captcha_input: str):
-    """
-    验证用户输入的验证码
-    
-    Args:
-        request: 请求对象
-        captcha_input: 用户输入的验证码
-        
-    Returns:
-        bool: 验证成功返回True，失败返回False
-    """
-    if not hasattr(request, 'session'):
-        return False
-    
-    stored_captcha = request.session.get('captcha')
-    captcha_time = request.session.get('captcha_time')
-    
-    if not stored_captcha or not captcha_time:
-        return False
-    
-    # 检查验证码是否过期（5分钟有效期）
-    now = datetime.datetime.now().timestamp()
-    if now - captcha_time > 300:
-        # 清除过期验证码
-        del request.session['captcha']
-        del request.session['captcha_time']
-        return False
-    
-    # 验证码比对（不区分大小写）
-    is_valid = stored_captcha.upper() == captcha_input.upper()
-    
-    # 验证后清除验证码，防止重复使用
-    del request.session['captcha']
-    del request.session['captcha_time']
-    
-    return is_valid 
