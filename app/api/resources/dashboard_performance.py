@@ -9,7 +9,7 @@ from sanic.request import Request
 from sanic.views import HTTPMethodView
 from app.api import APIResponse, v1_bp, APIError
 from app.models import OperationLog
-from app.auth.authorization import check_permissions
+from app.auth.authorization import requires_permission
 from typing import Dict, Any, List, Optional, Tuple
 from tortoise.functions import Count, Avg, Min, Max
 from datetime import datetime, timedelta
@@ -27,6 +27,7 @@ class PerformanceResource(HTTPMethodView):
     提供系统和API性能数据
     """
     
+    @requires_permission("dashboard:read")
     async def get(self, request: Request):
         """
         获取性能指标数据
@@ -37,25 +38,21 @@ class PerformanceResource(HTTPMethodView):
         Returns:
             Response: Sanic响应，包含性能指标数据
         """
-        @check_permissions("dashboard", "read")
-        async def get_performance(request):
-            # 获取当前系统性能数据
-            system_performance = self._get_system_performance()
-            
-            # 获取API响应时间统计
-            api_performance = await self._get_api_performance()
-            
-            # 获取数据库查询性能
-            db_performance = await self._get_db_performance()
-            
-            # 返回性能指标数据
-            return APIResponse.success(data={
-                "system": system_performance,
-                "api": api_performance,
-                "database": db_performance
-            }, message="获取性能指标数据成功")
+        # 获取当前系统性能数据
+        system_performance = self._get_system_performance()
         
-        return await get_performance(request)
+        # 获取API响应时间统计
+        api_performance = await self._get_api_performance()
+        
+        # 获取数据库查询性能
+        db_performance = await self._get_db_performance()
+        
+        # 返回性能指标数据
+        return APIResponse.success(data={
+            "system": system_performance,
+            "api": api_performance,
+            "database": db_performance
+        }, message="获取性能指标数据成功")
     
     def _get_system_performance(self) -> Dict[str, Any]:
         """
@@ -357,6 +354,7 @@ class ExceptionsResource(HTTPMethodView):
     提供系统错误和异常统计
     """
     
+    @requires_permission("dashboard:read")
     async def get(self, request: Request):
         """
         获取异常统计数据
@@ -367,107 +365,103 @@ class ExceptionsResource(HTTPMethodView):
         Returns:
             Response: Sanic响应，包含异常统计数据
         """
-        @check_permissions("dashboard", "read")
-        async def get_exceptions(request):
-            # 获取时间范围参数
-            days = int(request.args.get('days', '30'))
-            if days <= 0:
-                days = 30
-            
-            # 计算时间范围
-            now = datetime.now()
-            start_date = now - timedelta(days=days)
-            
-            # 获取所有失败的操作日志
-            error_logs = await OperationLog.filter(
-                status__not="success",
-                created_at__gte=start_date
-            ).all()
-            
-            # 按错误类型统计
-            error_types = {}
-            for log in error_logs:
-                error_type = log.detail.get('error_type', 'unknown') if isinstance(log.detail, dict) else 'unknown'
-                
-                if error_type not in error_types:
-                    error_types[error_type] = 0
-                
-                error_types[error_type] += 1
-            
-            # 按资源类型和操作统计错误
-            resource_errors = {}
-            for log in error_logs:
-                resource_type = log.operation_type
-                operation = log.operation
-                
-                if resource_type not in resource_errors:
-                    resource_errors[resource_type] = {
-                        "total": 0,
-                        "operations": {}
-                    }
-                
-                resource_errors[resource_type]["total"] += 1
-                
-                op_key = operation
-                if op_key not in resource_errors[resource_type]["operations"]:
-                    resource_errors[resource_type]["operations"][op_key] = 0
-                
-                resource_errors[resource_type]["operations"][op_key] += 1
-            
-            # 统计每天的错误数量
-            daily_error_counts = []
-            for i in range(min(30, days)):
-                day_start = now - timedelta(days=i+1)
-                day_end = now - timedelta(days=i)
-                
-                error_count = await OperationLog.filter(
-                    status__not="success",
-                    created_at__gte=day_start,
-                    created_at__lt=day_end
-                ).count()
-                
-                # 同时统计总请求数以计算错误率
-                total_count = await OperationLog.filter(
-                    created_at__gte=day_start,
-                    created_at__lt=day_end
-                ).count()
-                
-                error_rate = error_count / total_count if total_count > 0 else 0
-                
-                daily_error_counts.append({
-                    "date": day_start.strftime("%Y-%m-%d"),
-                    "error_count": error_count,
-                    "total_count": total_count,
-                    "error_rate": error_rate
-                })
-            
-            # 翻转列表使日期按正序排列
-            daily_error_counts.reverse()
-            
-            # 获取最近的错误日志
-            recent_errors = []
-            for log in sorted(error_logs, key=lambda x: x.created_at, reverse=True)[:10]:
-                error_detail = log.detail if isinstance(log.detail, dict) else {}
-                recent_errors.append({
-                    "id": log.id,
-                    "timestamp": log.created_at,
-                    "resource_type": log.operation_type,
-                    "operation": log.operation,
-                    "account_name": log.account_name,
-                    "error_type": error_detail.get('error_type', 'unknown'),
-                    "error_message": error_detail.get('error_message', '')
-                })
-            
-            # 返回异常统计数据
-            return APIResponse.success(data={
-                "total_errors": len(error_logs),
-                "error_types": error_types,
-                "resource_errors": resource_errors,
-                "daily_error_counts": daily_error_counts,
-                "recent_errors": recent_errors
-            }, message="获取异常统计数据成功")
+        # 获取时间范围参数
+        days = int(request.args.get('days', '30'))
+        if days <= 0:
+            days = 30
         
-        return await get_exceptions(request)
+        # 计算时间范围
+        now = datetime.now()
+        start_date = now - timedelta(days=days)
+        
+        # 获取所有失败的操作日志
+        error_logs = await OperationLog.filter(
+            status__not="success",
+            created_at__gte=start_date
+        ).all()
+        
+        # 按错误类型统计
+        error_types = {}
+        for log in error_logs:
+            error_type = log.detail.get('error_type', 'unknown') if isinstance(log.detail, dict) else 'unknown'
+            
+            if error_type not in error_types:
+                error_types[error_type] = 0
+            
+            error_types[error_type] += 1
+        
+        # 按资源类型和操作统计错误
+        resource_errors = {}
+        for log in error_logs:
+            resource_type = log.operation_type
+            operation = log.operation
+            
+            if resource_type not in resource_errors:
+                resource_errors[resource_type] = {
+                    "total": 0,
+                    "operations": {}
+                }
+            
+            resource_errors[resource_type]["total"] += 1
+            
+            op_key = operation
+            if op_key not in resource_errors[resource_type]["operations"]:
+                resource_errors[resource_type]["operations"][op_key] = 0
+            
+            resource_errors[resource_type]["operations"][op_key] += 1
+        
+        # 统计每天的错误数量
+        daily_error_counts = []
+        for i in range(min(30, days)):
+            day_start = now - timedelta(days=i+1)
+            day_end = now - timedelta(days=i)
+            
+            error_count = await OperationLog.filter(
+                status__not="success",
+                created_at__gte=day_start,
+                created_at__lt=day_end
+            ).count()
+            
+            # 同时统计总请求数以计算错误率
+            total_count = await OperationLog.filter(
+                created_at__gte=day_start,
+                created_at__lt=day_end
+            ).count()
+            
+            error_rate = error_count / total_count if total_count > 0 else 0
+            
+            daily_error_counts.append({
+                "date": day_start.strftime("%Y-%m-%d"),
+                "error_count": error_count,
+                "total_count": total_count,
+                "error_rate": error_rate
+            })
+        
+        # 翻转列表使日期按正序排列
+        daily_error_counts.reverse()
+        
+        # 获取最近的错误日志
+        recent_errors = []
+        for log in sorted(error_logs, key=lambda x: x.created_at, reverse=True)[:10]:
+            error_detail = log.detail if isinstance(log.detail, dict) else {}
+            recent_errors.append({
+                "id": log.id,
+                "timestamp": log.created_at,
+                "resource_type": log.operation_type,
+                "operation": log.operation,
+                "account_name": log.account_name,
+                "error_type": error_detail.get('error_type', 'unknown'),
+                "error_message": error_detail.get('error_message', '')
+            })
+        
+        # 返回异常统计数据
+        return APIResponse.success(data={
+            "total_errors": len(error_logs),
+            "error_types": error_types,
+            "resource_errors": resource_errors,
+            "daily_error_counts": daily_error_counts,
+            "recent_errors": recent_errors
+        }, message="获取异常统计数据成功")
 
 
 class AlertsResource(HTTPMethodView):
@@ -484,6 +478,7 @@ class AlertsResource(HTTPMethodView):
     ERROR_RATE_WARNING_THRESHOLD = 0.05  # 错误率超过5%报警
     RESPONSE_TIME_WARNING_THRESHOLD = 1.0  # 平均响应时间超过1秒报警
     
+    @requires_permission("dashboard:read")
     async def get(self, request: Request):
         """
         获取资源使用预警数据
@@ -494,39 +489,35 @@ class AlertsResource(HTTPMethodView):
         Returns:
             Response: Sanic响应，包含资源使用预警数据
         """
-        @check_permissions("dashboard", "read")
-        async def get_alerts(request):
-            # 检测系统资源使用情况
-            system_alerts = self._check_system_resources()
-            
-            # 检测API性能问题
-            api_alerts = await self._check_api_performance()
-            
-            # 检测错误率
-            error_alerts = await self._check_error_rates()
-            
-            # 生成优化建议
-            optimization_suggestions = self._generate_optimization_suggestions(
-                system_alerts, api_alerts, error_alerts
-            )
-            
-            # 合并所有警报
-            all_alerts = system_alerts + api_alerts + error_alerts
-            
-            # 按严重程度排序
-            sorted_alerts = sorted(all_alerts, key=lambda x: x["severity"], reverse=True)
-            
-            # 返回预警数据
-            return APIResponse.success(data={
-                "alerts": sorted_alerts,
-                "alert_count": len(sorted_alerts),
-                "critical_count": sum(1 for alert in sorted_alerts if alert["severity"] == "critical"),
-                "warning_count": sum(1 for alert in sorted_alerts if alert["severity"] == "warning"),
-                "info_count": sum(1 for alert in sorted_alerts if alert["severity"] == "info"),
-                "optimization_suggestions": optimization_suggestions
-            }, message="获取资源使用预警数据成功")
+        # 检测系统资源使用情况
+        system_alerts = self._check_system_resources()
         
-        return await get_alerts(request)
+        # 检测API性能问题
+        api_alerts = await self._check_api_performance()
+        
+        # 检测错误率
+        error_alerts = await self._check_error_rates()
+        
+        # 生成优化建议
+        optimization_suggestions = self._generate_optimization_suggestions(
+            system_alerts, api_alerts, error_alerts
+        )
+        
+        # 合并所有警报
+        all_alerts = system_alerts + api_alerts + error_alerts
+        
+        # 按严重程度排序
+        sorted_alerts = sorted(all_alerts, key=lambda x: x["severity"], reverse=True)
+        
+        # 返回预警数据
+        return APIResponse.success(data={
+            "alerts": sorted_alerts,
+            "alert_count": len(sorted_alerts),
+            "critical_count": sum(1 for alert in sorted_alerts if alert["severity"] == "critical"),
+            "warning_count": sum(1 for alert in sorted_alerts if alert["severity"] == "warning"),
+            "info_count": sum(1 for alert in sorted_alerts if alert["severity"] == "info"),
+            "optimization_suggestions": optimization_suggestions
+        }, message="获取资源使用预警数据成功")
     
     def _check_system_resources(self) -> List[Dict[str, Any]]:
         """

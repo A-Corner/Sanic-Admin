@@ -2,458 +2,315 @@
 # -*- coding: utf-8 -*-
 
 """
-文件上传API资源模块，提供头像和附件上传功能
+文件上传 / 下载 API 资源模块
+
+安全要点：
+* 存储文件名完全由服务端生成（uuid + 由检测到的 MIME 推导出的扩展名），不使用客户端文件名；
+  客户端文件名只作为展示用元数据（取 basename 并清理控制字符）。
+* 分类（category）只接受固定白名单；最终路径在写入/读取/删除前都用 realpath 校验必须位于 UPLOAD_DIR 之内。
+* 文件内容用 libmagic 检测真实类型，只允许白名单类型；大小有上限。
+* 上传目录不对外静态托管：下载走需要鉴权的 ``GET /api/v1/files/<id>/download``，并强制
+  ``Content-Disposition: attachment`` 与 ``X-Content-Type-Options: nosniff``。
+权限：上传/列表/下载使用资源 ``file`` 的 upload/read 操作，删除使用 delete（他人文件需 manage）；
+头像是自助操作，登录即可（只接受图片）。
 """
 
 import os
+import re
 import uuid
-import time
-import imghdr
+from typing import Any, Dict, Optional
+
 import magic
+from sanic import response
+from sanic.log import logger
 from sanic.request import Request
 from sanic.views import HTTPMethodView
-from sanic.exceptions import InvalidUsage
+
 from app.api import APIResponse, v1_bp
-from app.auth.authentication import get_authenticated_account
-from app.auth.authorization import check_permissions
-from app.models import Account, Profile, UploadedFile
-from app.config import settings
-from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple
+from app.api.responses import APIError
+from app.auth.authentication import authenticate_request
+from app.auth.authorization import check_permissions, has_permission, requires_permission
+from app.models import Profile, UploadedFile
+
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2MB
+ALLOWED_CATEGORIES = ("general", "avatar", "document", "image", "archive")
+
+# MIME 白名单 -> 存储扩展名（扩展名只由这里决定，绝不取自客户端文件名）
+ALLOWED_TYPES: Dict[str, str] = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "application/msword": ".doc",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/zip": ".zip",
+}
+IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif"}
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+class UploadError(Exception):
+    """上传校验失败（用户可见的错误信息）。"""
+
+
+def get_upload_root() -> str:
+    """当前应用配置的上传目录（realpath）。"""
+    from sanic import Sanic
+    root = Sanic.get_app().config.UPLOAD_DIR
+    os.makedirs(root, exist_ok=True)
+    return os.path.realpath(root)
+
+
+def safe_upload_path(relative_path: str) -> str:
+    """
+    把相对上传目录的路径解析为绝对路径；解析后不在上传目录内（路径穿越、符号链接逃逸）则抛 ValueError。
+    """
+    root = get_upload_root()
+    if not relative_path or "\x00" in relative_path or os.path.isabs(relative_path):
+        raise ValueError("非法的文件路径")
+    full = os.path.realpath(os.path.join(root, relative_path))
+    if full != root and not full.startswith(root + os.sep):
+        raise ValueError("文件路径超出上传目录")
+    return full
+
+
+def sanitize_filename(name: Optional[str]) -> str:
+    """客户端文件名只用于展示：取 basename、去控制字符、限制长度。"""
+    name = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    name = _CONTROL_CHARS_RE.sub("", name).strip().strip(".")
+    return (name or "file")[:200]
+
+
+def _parse_positive_int(value, default: int, maximum: Optional[int] = None) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    number = max(1, number)
+    return min(number, maximum) if maximum else number
+
+
+async def store_upload(file, account, category: str, *, allowed: Optional[set] = None,
+                       max_size: int = MAX_FILE_SIZE) -> UploadedFile:
+    """校验并保存一个上传文件，返回数据库记录。校验失败抛 UploadError。"""
+    if category not in ALLOWED_CATEGORIES:
+        raise UploadError(f"不支持的文件分类，可选: {', '.join(ALLOWED_CATEGORIES)}")
+    body = file.body or b""
+    if not body:
+        raise UploadError("文件为空")
+    if len(body) > max_size:
+        raise UploadError(f"文件大小超过限制（最大 {max_size // (1024 * 1024)}MB）")
+
+    mime_type = magic.from_buffer(body, mime=True)
+    if mime_type not in ALLOWED_TYPES or (allowed is not None and mime_type not in allowed):
+        raise UploadError(f"不支持的文件类型: {mime_type}")
+
+    stored_filename = f"{uuid.uuid4().hex}{ALLOWED_TYPES[mime_type]}"
+    relative_path = f"{category}/{stored_filename}"
+    full_path = safe_upload_path(relative_path)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    with open(full_path, "xb") as fh:
+        fh.write(body)
+
+    try:
+        return await UploadedFile.create(
+            filename=sanitize_filename(file.name),
+            stored_filename=stored_filename,
+            file_path=relative_path,
+            file_type=mime_type,
+            file_size=len(body) / 1024,
+            category=category,
+            account_id=account.id,
+        )
+    except Exception:
+        os.remove(full_path)
+        raise
+
+
+def file_info(record: UploadedFile) -> Dict[str, Any]:
+    return {
+        "id": record.id,
+        "filename": record.filename,
+        "url": f"/api/v1/files/{record.id}/download",
+        "file_type": record.file_type,
+        "file_size": record.file_size,
+        "category": record.category,
+        "account_id": record.account_id,
+        "download_count": record.download_count,
+        "upload_time": record.created_at,
+    }
+
+
+def remove_stored_file(record: UploadedFile) -> None:
+    """删除物理文件；路径不合法或文件缺失只记录日志，不抛出。"""
+    try:
+        full = safe_upload_path(record.file_path)
+        if os.path.isfile(full):
+            os.remove(full)
+    except (ValueError, OSError) as exc:
+        logger.warning("删除上传文件失败 (id=%s): %r", record.id, exc)
 
 
 class FileUploadResource(HTTPMethodView):
-    """
-    文件上传资源
-    
-    提供通用文件上传功能
-    """
-    
-    # 允许的文件类型和最大文件大小
-    MAX_FILE_SIZE = 1024 * 1024 * 10  # 10MB
-    ALLOWED_TYPES = {
-        "image": ["image/jpeg", "image/png", "image/gif"],
-        "document": ["application/pdf", "application/msword", 
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    "application/vnd.ms-excel", 
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    "text/plain", "text/csv"],
-        "archive": ["application/zip", "application/x-rar-compressed"]
-    }
-    
+    """通用文件上传：``POST /api/v1/upload[/<category>]``"""
+
+    @requires_permission("file:upload")
     async def post(self, request: Request, category: str = "general"):
-        """
-        上传文件
-        
-        Args:
-            request: Sanic请求对象
-            category: 文件分类，默认为general
-            
-        Returns:
-            Response: Sanic响应
-        """
-        @check_permissions("file", "upload")
-        async def upload_file(request):
-            # 获取当前用户
-            account = await get_authenticated_account(request)
-            
-            # 检查请求中是否包含文件
-            if not request.files:
-                return APIResponse.error(
-                    message="请求中未包含文件",
-                    error_code="NO_FILE_UPLOADED",
-                    status_code=400
-                )
-            
-            uploaded_files = []
-            errors = []
-            
-            for file_name, file_object in request.files.items():
-                # 如果是多文件上传，file_object可能是列表
-                if isinstance(file_object, list):
-                    files = file_object
-                else:
-                    files = [file_object]
-                
-                for file in files:
-                    result = await self._process_file(file, account, category)
-                    if "error" in result:
-                        errors.append({
-                            "filename": file.name,
-                            "error": result["error"]
-                        })
-                    else:
-                        uploaded_files.append(result["file_data"])
-            
-            # 根据上传结果返回响应
-            if not uploaded_files and errors:
-                # 所有文件上传失败
-                return APIResponse.error(
-                    message="文件上传失败",
-                    error_code="UPLOAD_FAILED",
-                    data={"errors": errors},
-                    status_code=400
-                )
-            elif errors:
-                # 部分文件上传失败
-                return APIResponse.success(
-                    data={
-                        "files": uploaded_files,
-                        "errors": errors
-                    },
-                    message=f"成功上传{len(uploaded_files)}个文件，{len(errors)}个上传失败"
-                )
-            else:
-                # 所有文件上传成功
-                return APIResponse.created(
-                    data={"files": uploaded_files},
-                    message=f"成功上传{len(uploaded_files)}个文件"
-                )
-        
-        return await upload_file(request)
-    
-    async def _process_file(self, file, account, category: str) -> Dict[str, Any]:
-        """
-        处理上传的文件
-        
-        Args:
-            file: 上传的文件对象
-            account: 当前用户账户
-            category: 文件分类
-            
-        Returns:
-            Dict[str, Any]: 处理结果
-        """
-        # 检查文件大小
-        if len(file.body) > self.MAX_FILE_SIZE:
-            return {
-                "error": f"文件大小超过限制（最大{self.MAX_FILE_SIZE // (1024 * 1024)}MB）"
-            }
-        
-        # 使用python-magic库检测文件类型
-        mime_type = magic.from_buffer(file.body, mime=True)
-        
-        # 检查是否是允许的文件类型
-        allowed_mime_types = []
-        for types in self.ALLOWED_TYPES.values():
-            allowed_mime_types.extend(types)
-        
-        if mime_type not in allowed_mime_types:
-            return {
-                "error": f"不支持的文件类型: {mime_type}"
-            }
-        
-        # 确定文件分类
-        file_category = None
-        for cat, types in self.ALLOWED_TYPES.items():
-            if mime_type in types:
-                file_category = cat
-                break
-        
-        # 生成文件信息
-        original_filename = file.name
-        file_ext = os.path.splitext(original_filename)[1].lower()
-        if not file_ext and mime_type.startswith("image/"):
-            # 如果是图片但没有扩展名，添加适当的扩展名
-            img_type = imghdr.what(None, h=file.body)
-            if img_type:
-                file_ext = f".{img_type}"
-        
-        # 生成唯一文件名
-        timestamp = int(time.time())
-        unique_id = str(uuid.uuid4().hex)
-        new_filename = f"{timestamp}_{unique_id}{file_ext}"
-        
-        # 确定保存路径
-        upload_dir = os.path.join(settings.UPLOAD_DIR, file_category, category)
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        file_path = os.path.join(upload_dir, new_filename)
-        relative_path = os.path.join(file_category, category, new_filename)
-        
-        # 保存文件
-        with open(file_path, "wb") as f:
-            f.write(file.body)
-        
-        # 计算文件大小（KB）
-        file_size = len(file.body) / 1024
-        
-        # 创建数据库记录
-        uploaded_file = await UploadedFile.create(
-            filename=original_filename,
-            stored_filename=new_filename,
-            file_path=relative_path,
-            file_type=mime_type,
-            file_size=file_size,
-            category=category,
-            account_id=account.id
-        )
-        
-        # 生成URL
-        url = f"/uploads/{relative_path}"
-        
-        return {
-            "file_data": {
-                "id": uploaded_file.id,
-                "filename": original_filename,
-                "url": url,
-                "file_type": mime_type,
-                "file_size": file_size,
-                "category": category,
-                "upload_time": uploaded_file.created_at
-            }
-        }
+        account = request.ctx.authentication_session.bearer
+        if category not in ALLOWED_CATEGORIES:
+            return APIResponse.error(message=f"不支持的文件分类，可选: {', '.join(ALLOWED_CATEGORIES)}",
+                                     error_code=APIError.INVALID_PARAMETER, status_code=400)
+        if not request.files:
+            return APIResponse.error(message="请求中未包含文件", error_code="NO_FILE_UPLOADED",
+                                     status_code=400)
+
+        uploaded, errors = [], []
+        for _field, files in request.files.items():
+            for file in (files if isinstance(files, list) else [files]):
+                try:
+                    uploaded.append(file_info(await store_upload(file, account, category)))
+                except UploadError as exc:
+                    errors.append({"filename": sanitize_filename(file.name), "error": str(exc)})
+
+        if not uploaded:
+            return APIResponse.error(message="文件上传失败", error_code="UPLOAD_FAILED",
+                                     status_code=400, details={"errors": errors})
+        if errors:
+            return APIResponse.success(
+                data={"files": uploaded, "errors": errors},
+                message=f"成功上传{len(uploaded)}个文件，{len(errors)}个上传失败")
+        return APIResponse.created(data={"files": uploaded}, message=f"成功上传{len(uploaded)}个文件")
 
 
 class AvatarUploadResource:
-    """
-    头像上传资源
-    
-    提供用户头像上传功能
-    """
-    
+    """头像上传（自助操作，登录即可）：``POST /api/v1/upload/avatar``"""
+
     async def post(self, request: Request):
-        """
-        上传用户头像
-        
-        Args:
-            request: Sanic请求对象
-            
-        Returns:
-            Response: Sanic响应
-        """
-        @check_permissions("profile", "update")
-        async def upload_avatar(request):
-            # 获取当前用户
-            account = await get_authenticated_account(request)
-            
-            # 检查请求中是否包含文件
-            if not request.files or "avatar" not in request.files:
-                return APIResponse.error(
-                    message="请求中未包含头像文件",
-                    error_code="NO_AVATAR_UPLOADED",
-                    status_code=400
-                )
-            
-            avatar_file = request.files["avatar"][0]
-            
-            # 检查是否是图片
-            mime_type = magic.from_buffer(avatar_file.body, mime=True)
-            if not mime_type.startswith("image/"):
-                return APIResponse.error(
-                    message="上传的文件不是图片",
-                    error_code="NOT_IMAGE_FILE",
-                    status_code=400
-                )
-            
-            # 使用通用文件上传功能
-            upload_resource = FileUploadResource()
-            result = await upload_resource._process_file(avatar_file, account, "avatar")
-            
-            if "error" in result:
-                return APIResponse.error(
-                    message=f"头像上传失败: {result['error']}",
-                    error_code="AVATAR_UPLOAD_FAILED",
-                    status_code=400
-                )
-            
-            # 更新用户个人资料的头像字段
-            profile = await Profile.filter(account_id=account.id).first()
-            if not profile:
-                profile = await Profile.create(account_id=account.id)
-            
-            profile.avatar = result["file_data"]["url"]
-            await profile.save()
-            
-            return APIResponse.success(
-                data={
-                    "avatar_url": profile.avatar,
-                    "file_info": result["file_data"]
-                },
-                message="头像上传成功"
-            )
-        
-        return await upload_avatar(request)
+        session = await authenticate_request(request)
+        account = session.bearer
+        files = request.files.get("avatar") if request.files else None
+        if not files:
+            return APIResponse.error(message="请求中未包含头像文件", error_code="NO_AVATAR_UPLOADED",
+                                     status_code=400)
+        try:
+            record = await store_upload(files[0], account, "avatar",
+                                        allowed=IMAGE_TYPES, max_size=MAX_AVATAR_SIZE)
+        except UploadError as exc:
+            return APIResponse.error(message=f"头像上传失败: {exc}", error_code="AVATAR_UPLOAD_FAILED",
+                                     status_code=400)
+
+        profile = await Profile.filter(account_id=account.id).first()
+        if profile is None:
+            profile = await Profile.create(account_id=account.id)
+        old_avatar_id = _avatar_file_id(profile.avatar)
+        profile.avatar = file_info(record)["url"]
+        await profile.save()
+        if old_avatar_id:
+            old = await UploadedFile.get_or_none(id=old_avatar_id, account_id=account.id, category="avatar")
+            if old:
+                remove_stored_file(old)
+                await old.delete()
+        return APIResponse.success(data={"avatar_url": profile.avatar, "file_info": file_info(record)},
+                                   message="头像上传成功")
 
 
-class FileDownloadCounterMiddleware:
-    """
-    文件下载计数中间件
-    
-    用于记录文件下载次数
-    """
-    
-    async def __call__(self, request):
-        """
-        处理文件下载请求
-        
-        Args:
-            request: Sanic请求对象
-            
-        Returns:
-            Response: 处理后的响应
-        """
-        # 当前路径是否是下载路径
-        if request.path.startswith("/uploads/"):
-            try:
-                # 提取文件路径
-                file_path = request.path.replace("/uploads/", "", 1)
-                
-                # 查找对应的上传文件记录
-                uploaded_file = await UploadedFile.filter(file_path=file_path).first()
-                if uploaded_file:
-                    # 更新下载次数
-                    uploaded_file.download_count += 1
-                    await uploaded_file.save()
-            except Exception as e:
-                # 记录错误但不影响下载
-                print(f"Error counting download: {str(e)}")
-        
-        return False  # 继续处理请求
+def _avatar_file_id(avatar_url: Optional[str]) -> Optional[int]:
+    match = re.fullmatch(r"/api/v1/files/(\d+)/download", avatar_url or "")
+    return int(match.group(1)) if match else None
 
 
 class FileListResource:
-    """
-    文件列表资源
-    
-    提供文件列表查询功能
-    """
-    
+    """文件列表：``GET /api/v1/files``"""
+
+    @requires_permission("file:read")
     async def get(self, request: Request):
-        """
-        获取文件列表
-        
-        Args:
-            request: Sanic请求对象
-            
-        Returns:
-            Response: Sanic响应
-        """
-        @check_permissions("file", "read")
-        async def get_file_list(request):
-            # 获取当前用户
-            account = await get_authenticated_account(request)
-            
-            # 解析查询参数
-            page = int(request.args.get("page", "1"))
-            page_size = int(request.args.get("page_size", "20"))
-            category = request.args.get("category")
-            file_type = request.args.get("file_type")
-            only_mine = request.args.get("only_mine", "false").lower() == "true"
-            
-            # 构建查询
-            query = UploadedFile.all()
-            
-            # 筛选条件
-            if category:
-                query = query.filter(category=category)
-            if file_type:
-                query = query.filter(file_type__startswith=file_type)
-            if only_mine:
-                query = query.filter(account_id=account.id)
-            
-            # 计算总数
-            total = await query.count()
-            
-            # 分页
-            offset = (page - 1) * page_size
-            files = await query.order_by("-created_at").offset(offset).limit(page_size).all()
-            
-            # 格式化响应
-            items = []
-            for file in files:
-                url = f"/uploads/{file.file_path}"
-                items.append({
-                    "id": file.id,
-                    "filename": file.filename,
-                    "url": url,
-                    "file_type": file.file_type,
-                    "file_size": file.file_size,
-                    "category": file.category,
-                    "account_id": file.account_id,
-                    "download_count": file.download_count,
-                    "upload_time": file.created_at
-                })
-            
-            return APIResponse.list(
-                items=items,
-                total=total,
-                page=page,
-                page_size=page_size,
-                message="获取文件列表成功"
-            )
-        
-        return await get_file_list(request)
+        account = request.ctx.authentication_session.bearer
+        page = _parse_positive_int(request.args.get("page"), 1)
+        page_size = _parse_positive_int(request.args.get("page_size"), 20, maximum=100)
+        query = UploadedFile.filter(deleted=False)
+        if request.args.get("category"):
+            query = query.filter(category=request.args.get("category"))
+        if request.args.get("file_type"):
+            query = query.filter(file_type__startswith=request.args.get("file_type"))
+        if (request.args.get("only_mine") or "").lower() == "true":
+            query = query.filter(account_id=account.id)
+
+        total = await query.count()
+        files = await query.order_by("-created_at").offset((page - 1) * page_size).limit(page_size)
+        return APIResponse.list(items=[file_info(f) for f in files], total=total, page=page,
+                                page_size=page_size, message="获取文件列表成功")
+
+
+class FileDownloadResource:
+    """文件下载：``GET /api/v1/files/<id>/download``（需要登录；头像对所有登录用户可见）"""
+
+    async def get(self, request: Request, file_id: int):
+        session = await authenticate_request(request)
+        account = session.bearer
+        record = await UploadedFile.filter(id=file_id, deleted=False).first()
+        if record is None:
+            return APIResponse.error(message="文件不存在", error_code="FILE_NOT_FOUND", status_code=404)
+
+        allowed = (
+            record.category == "avatar"
+            or record.account_id == account.id
+            or await has_permission(account, "file", "read")
+        )
+        if not allowed:
+            return APIResponse.error(message="无权下载此文件", error_code=APIError.FORBIDDEN,
+                                     status_code=403)
+
+        try:
+            full_path = safe_upload_path(record.file_path)
+        except ValueError:
+            logger.error("上传记录路径越界 (id=%s)", record.id)
+            return APIResponse.error(message="文件不存在", error_code="FILE_NOT_FOUND", status_code=404)
+        if not os.path.isfile(full_path):
+            return APIResponse.error(message="文件不存在", error_code="FILE_NOT_FOUND", status_code=404)
+
+        record.download_count += 1
+        await record.save(update_fields=["download_count"])
+        return await response.file(
+            full_path,
+            filename=sanitize_filename(record.filename),
+            mime_type=record.file_type or "application/octet-stream",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+        )
 
 
 class FileDeleteResource:
-    """
-    文件删除资源
-    
-    提供文件删除功能
-    """
-    
+    """文件删除：``DELETE /api/v1/files/<id>``"""
+
+    @requires_permission("file:delete")
     async def delete(self, request: Request, file_id: int):
-        """
-        删除文件
-        
-        Args:
-            request: Sanic请求对象
-            file_id: 文件ID
-            
-        Returns:
-            Response: Sanic响应
-        """
-        @check_permissions("file", "delete")
-        async def delete_file(request, file_id):
-            # 获取当前用户
-            account = await get_authenticated_account(request)
-            
-            # 查找文件
-            file = await UploadedFile.filter(id=file_id).first()
-            if not file:
-                return APIResponse.error(
-                    message="文件不存在",
-                    error_code="FILE_NOT_FOUND",
-                    status_code=404
-                )
-            
-            # 检查权限
-            is_admin = await check_permissions("file", "manage", request=request, check_only=True)
-            if file.account_id != account.id and not is_admin:
-                return APIResponse.error(
-                    message="无权删除此文件",
-                    error_code="PERMISSION_DENIED",
-                    status_code=403
-                )
-            
-            # 删除物理文件
-            file_path = os.path.join(settings.UPLOAD_DIR, file.file_path)
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as e:
-                # 记录错误但继续删除数据库记录
-                print(f"Error deleting file {file_path}: {str(e)}")
-            
-            # 删除数据库记录
-            await file.delete()
-            
-            return APIResponse.success(
-                message="文件删除成功"
-            )
-        
-        return await delete_file(request, file_id)
+        account = request.ctx.authentication_session.bearer
+        record = await UploadedFile.filter(id=file_id, deleted=False).first()
+        if record is None:
+            return APIResponse.error(message="文件不存在", error_code="FILE_NOT_FOUND", status_code=404)
+        if record.account_id != account.id and not await check_permissions(
+                "file", "manage", request=request, check_only=True):
+            return APIResponse.error(message="无权删除此文件", error_code="PERMISSION_DENIED",
+                                     status_code=403)
+        remove_stored_file(record)
+        await record.delete()
+        return APIResponse.success(message="文件删除成功")
 
 
 # 注册路由
 file_upload_resource = FileUploadResource()
 avatar_upload_resource = AvatarUploadResource()
 file_list_resource = FileListResource()
+file_download_resource = FileDownloadResource()
 file_delete_resource = FileDeleteResource()
 
-v1_bp.add_route(file_upload_resource.as_view(), "/upload", methods=["POST"])
-v1_bp.add_route(file_upload_resource.as_view(), "/upload/<category:string>", methods=["POST"])
 v1_bp.add_route(avatar_upload_resource.post, "/upload/avatar", methods=["POST"])
+v1_bp.add_route(file_upload_resource.as_view(), "/upload", methods=["POST"])
+v1_bp.add_route(file_upload_resource.as_view(), "/upload/<category:str>", methods=["POST"])
 v1_bp.add_route(file_list_resource.get, "/files", methods=["GET"])
-v1_bp.add_route(file_delete_resource.delete, "/files/<file_id:int>", methods=["DELETE"]) 
+v1_bp.add_route(file_download_resource.get, "/files/<file_id:int>/download", methods=["GET"])
+v1_bp.add_route(file_delete_resource.delete, "/files/<file_id:int>", methods=["DELETE"])

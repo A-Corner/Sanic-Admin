@@ -8,9 +8,8 @@
 from sanic.request import Request
 from sanic.views import HTTPMethodView
 from app.api import APIResponse, v1_bp, APIError
-from app.models import Account, Role, OperationLog, File, SystemSetting
-from app.auth.authentication import get_authenticated_account
-from app.auth.authorization import check_permissions, check_roles
+from app.models import Account, Role, OperationLog
+from app.auth.authorization import requires_permission
 from typing import Dict, Any, List, Optional, Tuple
 from tortoise.functions import Count, Sum
 from tortoise.expressions import Q
@@ -24,6 +23,7 @@ class UserActivityResource(HTTPMethodView):
     提供用户登录频率和活跃时间段分析
     """
     
+    @requires_permission("dashboard:read")
     async def get(self, request: Request):
         """
         获取用户活跃度分析数据
@@ -34,90 +34,86 @@ class UserActivityResource(HTTPMethodView):
         Returns:
             Response: Sanic响应，包含用户活跃度分析数据
         """
-        @check_permissions("dashboard", "read")
-        async def get_user_activity(request):
-            # 获取时间范围参数
-            days = int(request.args.get('days', '30'))
-            if days <= 0:
-                days = 30
+        # 获取时间范围参数
+        days = int(request.args.get('days', '30'))
+        if days <= 0:
+            days = 30
+        
+        # 计算时间范围
+        now = datetime.now()
+        start_date = now - timedelta(days=days)
+        
+        # 获取登录操作日志
+        login_logs = await OperationLog.filter(
+            operation_type="auth",
+            operation="login",
+            status="success",
+            created_at__gte=start_date
+        ).all()
+        
+        # 按用户ID分组统计登录次数
+        login_frequency = {}
+        for log in login_logs:
+            if log.account_id not in login_frequency:
+                login_frequency[log.account_id] = {
+                    "account_id": log.account_id,
+                    "account_name": log.account_name,
+                    "login_count": 0,
+                    "last_login": None
+                }
             
-            # 计算时间范围
-            now = datetime.now()
-            start_date = now - timedelta(days=days)
+            login_frequency[log.account_id]["login_count"] += 1
             
-            # 获取登录操作日志
-            login_logs = await OperationLog.filter(
+            # 记录最后登录时间
+            if (login_frequency[log.account_id]["last_login"] is None or 
+                log.created_at > login_frequency[log.account_id]["last_login"]):
+                login_frequency[log.account_id]["last_login"] = log.created_at
+        
+        # 按登录次数排序
+        sorted_users = sorted(
+            login_frequency.values(), 
+            key=lambda x: x["login_count"], 
+            reverse=True
+        )
+        
+        # 获取活跃时间段分析
+        hour_distribution = await self._get_hour_distribution(login_logs)
+        
+        # 获取用户留存率
+        retention_rates = await self._calculate_retention(days)
+        
+        # 日活跃用户数趋势
+        daily_active_users = []
+        for i in range(min(30, days)):  # 最多显示30天
+            day_start = now - timedelta(days=i+1)
+            day_end = now - timedelta(days=i)
+            
+            # 获取当天有登录记录的不同用户数
+            unique_users = await OperationLog.filter(
                 operation_type="auth",
                 operation="login",
                 status="success",
-                created_at__gte=start_date
-            ).all()
+                created_at__gte=day_start,
+                created_at__lt=day_end
+            ).distinct().values_list('account_id', flat=True)
             
-            # 按用户ID分组统计登录次数
-            login_frequency = {}
-            for log in login_logs:
-                if log.account_id not in login_frequency:
-                    login_frequency[log.account_id] = {
-                        "account_id": log.account_id,
-                        "account_name": log.account_name,
-                        "login_count": 0,
-                        "last_login": None
-                    }
-                
-                login_frequency[log.account_id]["login_count"] += 1
-                
-                # 记录最后登录时间
-                if (login_frequency[log.account_id]["last_login"] is None or 
-                    log.created_at > login_frequency[log.account_id]["last_login"]):
-                    login_frequency[log.account_id]["last_login"] = log.created_at
-            
-            # 按登录次数排序
-            sorted_users = sorted(
-                login_frequency.values(), 
-                key=lambda x: x["login_count"], 
-                reverse=True
-            )
-            
-            # 获取活跃时间段分析
-            hour_distribution = await self._get_hour_distribution(login_logs)
-            
-            # 获取用户留存率
-            retention_rates = await self._calculate_retention(days)
-            
-            # 日活跃用户数趋势
-            daily_active_users = []
-            for i in range(min(30, days)):  # 最多显示30天
-                day_start = now - timedelta(days=i+1)
-                day_end = now - timedelta(days=i)
-                
-                # 获取当天有登录记录的不同用户数
-                unique_users = await OperationLog.filter(
-                    operation_type="auth",
-                    operation="login",
-                    status="success",
-                    created_at__gte=day_start,
-                    created_at__lt=day_end
-                ).distinct().values_list('account_id', flat=True)
-                
-                daily_active_users.append({
-                    "date": day_start.strftime("%Y-%m-%d"),
-                    "active_users": len(unique_users)
-                })
-            
-            # 翻转列表使日期按正序显示
-            daily_active_users.reverse()
-            
-            # 返回用户活跃度分析数据
-            return APIResponse.success(data={
-                "most_active_users": sorted_users[:10],  # 取前10个活跃用户
-                "hour_distribution": hour_distribution,
-                "retention_rates": retention_rates,
-                "daily_active_users": daily_active_users,
-                "total_login_count": sum(user["login_count"] for user in login_frequency.values()),
-                "unique_login_users": len(login_frequency)
-            }, message="获取用户活跃度分析数据成功")
+            daily_active_users.append({
+                "date": day_start.strftime("%Y-%m-%d"),
+                "active_users": len(unique_users)
+            })
         
-        return await get_user_activity(request)
+        # 翻转列表使日期按正序显示
+        daily_active_users.reverse()
+        
+        # 返回用户活跃度分析数据
+        return APIResponse.success(data={
+            "most_active_users": sorted_users[:10],  # 取前10个活跃用户
+            "hour_distribution": hour_distribution,
+            "retention_rates": retention_rates,
+            "daily_active_users": daily_active_users,
+            "total_login_count": sum(user["login_count"] for user in login_frequency.values()),
+            "unique_login_users": len(login_frequency)
+        }, message="获取用户活跃度分析数据成功")
     
     async def _get_hour_distribution(self, login_logs: List[OperationLog]) -> List[Dict[str, Any]]:
         """
@@ -198,6 +194,7 @@ class FeatureUsageResource(HTTPMethodView):
     提供API资源使用频率和趋势分析
     """
     
+    @requires_permission("dashboard:read")
     async def get(self, request: Request):
         """
         获取功能使用情况分析数据
@@ -208,68 +205,64 @@ class FeatureUsageResource(HTTPMethodView):
         Returns:
             Response: Sanic响应，包含功能使用情况分析数据
         """
-        @check_permissions("dashboard", "read")
-        async def get_feature_usage(request):
-            # 获取时间范围参数
-            days = int(request.args.get('days', '30'))
-            if days <= 0:
-                days = 30
-            
-            # 计算时间范围
-            now = datetime.now()
-            start_date = now - timedelta(days=days)
-            
-            # 按资源类型和操作统计API调用
-            api_usage = await OperationLog.filter(
-                created_at__gte=start_date
-            ).group_by("operation_type", "operation").annotate(
-                count=Count("id")
-            ).values("operation_type", "operation", "count")
-            
-            # 整理数据格式
-            feature_usage = {}
-            for item in api_usage:
-                resource_type = item["operation_type"]
-                operation = item["operation"]
-                count = item["count"]
-                
-                if resource_type not in feature_usage:
-                    feature_usage[resource_type] = {"total": 0, "operations": {}}
-                
-                feature_usage[resource_type]["total"] += count
-                feature_usage[resource_type]["operations"][operation] = count
-            
-            # 按资源类型统计成功率
-            success_rates = await self._calculate_success_rates(start_date)
-            
-            # 获取功能使用趋势
-            usage_trend = await self._get_usage_trend(days)
-            
-            # 获取最常用和最少用的功能
-            all_operations = []
-            for resource_type, data in feature_usage.items():
-                for operation, count in data["operations"].items():
-                    all_operations.append({
-                        "resource_type": resource_type,
-                        "operation": operation,
-                        "count": count
-                    })
-            
-            # 按使用频率排序
-            sorted_operations = sorted(all_operations, key=lambda x: x["count"], reverse=True)
-            most_used = sorted_operations[:10]  # 最常用的10个功能
-            least_used = sorted_operations[-10:] if len(sorted_operations) > 10 else []  # 最少用的10个功能
-            
-            # 返回功能使用情况分析数据
-            return APIResponse.success(data={
-                "feature_usage": feature_usage,
-                "success_rates": success_rates,
-                "usage_trend": usage_trend,
-                "most_used": most_used,
-                "least_used": least_used
-            }, message="获取功能使用情况分析数据成功")
+        # 获取时间范围参数
+        days = int(request.args.get('days', '30'))
+        if days <= 0:
+            days = 30
         
-        return await get_feature_usage(request)
+        # 计算时间范围
+        now = datetime.now()
+        start_date = now - timedelta(days=days)
+        
+        # 按资源类型和操作统计API调用
+        api_usage = await OperationLog.filter(
+            created_at__gte=start_date
+        ).group_by("operation_type", "operation").annotate(
+            count=Count("id")
+        ).values("operation_type", "operation", "count")
+        
+        # 整理数据格式
+        feature_usage = {}
+        for item in api_usage:
+            resource_type = item["operation_type"]
+            operation = item["operation"]
+            count = item["count"]
+            
+            if resource_type not in feature_usage:
+                feature_usage[resource_type] = {"total": 0, "operations": {}}
+            
+            feature_usage[resource_type]["total"] += count
+            feature_usage[resource_type]["operations"][operation] = count
+        
+        # 按资源类型统计成功率
+        success_rates = await self._calculate_success_rates(start_date)
+        
+        # 获取功能使用趋势
+        usage_trend = await self._get_usage_trend(days)
+        
+        # 获取最常用和最少用的功能
+        all_operations = []
+        for resource_type, data in feature_usage.items():
+            for operation, count in data["operations"].items():
+                all_operations.append({
+                    "resource_type": resource_type,
+                    "operation": operation,
+                    "count": count
+                })
+        
+        # 按使用频率排序
+        sorted_operations = sorted(all_operations, key=lambda x: x["count"], reverse=True)
+        most_used = sorted_operations[:10]  # 最常用的10个功能
+        least_used = sorted_operations[-10:] if len(sorted_operations) > 10 else []  # 最少用的10个功能
+        
+        # 返回功能使用情况分析数据
+        return APIResponse.success(data={
+            "feature_usage": feature_usage,
+            "success_rates": success_rates,
+            "usage_trend": usage_trend,
+            "most_used": most_used,
+            "least_used": least_used
+        }, message="获取功能使用情况分析数据成功")
     
     async def _calculate_success_rates(self, start_date: datetime) -> Dict[str, Any]:
         """
@@ -374,6 +367,7 @@ class PermissionAnalysisResource(HTTPMethodView):
     提供角色分布和权限使用情况分析
     """
     
+    @requires_permission("dashboard:read")
     async def get(self, request: Request):
         """
         获取角色权限分析数据
@@ -384,42 +378,38 @@ class PermissionAnalysisResource(HTTPMethodView):
         Returns:
             Response: Sanic响应，包含角色权限分析数据
         """
-        @check_permissions("dashboard", "read")
-        async def get_permission_analysis(request):
-            # 获取所有角色
-            roles = await Role.all()
-            
-            # 统计每个角色的用户数
-            role_distribution = []
-            for role in roles:
-                user_count = await role.accounts.all().count()
-                
-                # 获取角色权限数据
-                permissions = role.permissions
-                permission_count = self._count_permissions(permissions)
-                
-                role_distribution.append({
-                    "role_id": role.id,
-                    "role_name": role.name,
-                    "user_count": user_count,
-                    "permission_count": permission_count,
-                    "permissions": permissions
-                })
-            
-            # 获取权限使用情况
-            permission_usage = await self._analyze_permission_usage()
-            
-            # 权限冲突和冗余检测
-            permission_issues = self._detect_permission_issues(role_distribution)
-            
-            # 返回角色权限分析数据
-            return APIResponse.success(data={
-                "role_distribution": role_distribution,
-                "permission_usage": permission_usage,
-                "permission_issues": permission_issues
-            }, message="获取角色权限分析数据成功")
+        # 获取所有角色
+        roles = await Role.all()
         
-        return await get_permission_analysis(request)
+        # 统计每个角色的用户数
+        role_distribution = []
+        for role in roles:
+            user_count = await role.accounts.all().count()
+            
+            # 获取角色权限数据
+            permissions = role.permissions
+            permission_count = self._count_permissions(permissions)
+            
+            role_distribution.append({
+                "role_id": role.id,
+                "role_name": role.name,
+                "user_count": user_count,
+                "permission_count": permission_count,
+                "permissions": permissions
+            })
+        
+        # 获取权限使用情况
+        permission_usage = await self._analyze_permission_usage()
+        
+        # 权限冲突和冗余检测
+        permission_issues = self._detect_permission_issues(role_distribution)
+        
+        # 返回角色权限分析数据
+        return APIResponse.success(data={
+            "role_distribution": role_distribution,
+            "permission_usage": permission_usage,
+            "permission_issues": permission_issues
+        }, message="获取角色权限分析数据成功")
     
     def _count_permissions(self, permissions: Dict[str, Any]) -> int:
         """

@@ -114,14 +114,18 @@ def cached(timeout: Optional[int] = None, key_prefix: str = "route",
     """
     def decorator(f):
         @wraps(f)
-        async def decorated_function(request, *args, **kwargs):
+        async def decorated_function(*args, **kwargs):
+            # 兼容函数处理器 (request, ...) 与视图方法 (self, request, ...)
+            request = next((a for a in args if isinstance(a, Request)), None)
+            if request is None:
+                raise TypeError("cached 装饰的处理函数必须接收 Request 参数")
             # 如果缓存未启用或者请求方法不是GET，则不缓存
             if not config.ROUTE_CACHE_ENABLED or request.method != "GET":
-                return await f(request, *args, **kwargs)
+                return await f(*args, **kwargs)
             
             # 如果提供了unless函数并且函数返回True，则不缓存
             if unless and unless(request):
-                return await f(request, *args, **kwargs)
+                return await f(*args, **kwargs)
             
             # 获取缓存实例
             cache = get_cache()
@@ -146,7 +150,7 @@ def cached(timeout: Optional[int] = None, key_prefix: str = "route",
                 )
             
             # 执行原始处理程序
-            response = await f(request, *args, **kwargs)
+            response = await f(*args, **kwargs)
             
             # 缓存响应
             if isinstance(response, HTTPResponse):
