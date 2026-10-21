@@ -7,7 +7,7 @@
 ``get_cache()`` 按配置（``CACHE_TYPE``）返回进程内单例：
 * ``memory``：内存缓存；
 * ``redis``：Redis 缓存；Redis 不可达（连接被拒/超时）时记录 warning 并降级为内存缓存，
-  不会挂起，也不会让应用启动失败。
+  不会挂起。production 环境则拒绝降级，抛出 ConfigError。
 """
 
 import logging
@@ -34,6 +34,14 @@ def _default_cache_type() -> str:
         return "memory"
 
 
+def _is_production() -> bool:
+    try:
+        from app.config import config
+        return str(getattr(config, "ENV", "")).lower() == "production"
+    except ImportError:
+        return False
+
+
 def _get_memory() -> CacheBackend:
     cache = _instances.get("memory")
     if cache is None:
@@ -48,6 +56,9 @@ def _build_redis() -> CacheBackend:
         cache._redis.ping()
         return cache
     except Exception as exc:  # noqa: BLE001 - redis.RedisError / OSError / 配置缺失均降级
+        if _is_production():
+            from app.config import ConfigError
+            raise ConfigError(f"production 环境 Redis 缓存不可用，拒绝降级启动: {exc!r}") from exc
         logger.warning(f"[降级] Redis 缓存不可用，改用内存缓存: {exc!r}")
         return _get_memory()
 

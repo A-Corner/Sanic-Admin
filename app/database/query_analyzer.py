@@ -257,6 +257,15 @@ _FORBIDDEN_SQL_RE = re.compile(
 )
 
 
+# 纵深防御：有副作用或会读写文件/阻塞/外连的函数（后面跟左括号时拒绝）
+_FORBIDDEN_FUNC_RE = re.compile(
+    r"\b(load_extension|pg_sleep\w*|sleep|benchmark|lo_\w+|pg_read_\w+|pg_ls_\w+|pg_stat_file|"
+    r"nextval|setval|dblink\w*|load_file|get_lock|release_lock|set_config|"
+    r"pg_terminate_backend|pg_cancel_backend|writefile|readfile|edit|fts3_tokenizer)\s*\(",
+    re.IGNORECASE,
+)
+
+
 def validate_readonly_sql(sql: str) -> str:
     """
     校验待分析的 SQL 是否为单条只读查询，并返回规范化（去首尾空白与结尾分号）后的 SQL。
@@ -281,6 +290,9 @@ def validate_readonly_sql(sql: str) -> str:
     forbidden = _FORBIDDEN_SQL_RE.search(normalized)
     if forbidden:
         raise ValueError(f"只读分析不允许包含关键字: {forbidden.group(1).upper()}")
+    func = _FORBIDDEN_FUNC_RE.search(normalized)
+    if func:
+        raise ValueError("只读分析不允许调用有副作用的函数")
     return normalized
 
 
@@ -370,8 +382,10 @@ async def analyze_query_plan(
                 "error": f"不支持的数据库类型: {dialect}"
             }
     except Exception as e:
+        # 原始异常可能含 SQL 片段、库表结构或连接信息，只写服务端日志
+        logger.error("查询计划分析失败 (conn=%s, dialect=%s): %r", conn_name, dialect, e)
         return {
-            "error": f"查询计划分析失败: {str(e)}",
+            "error": "查询计划分析失败，请检查 SQL 与连接名称",
             "dialect": dialect
         }
 
