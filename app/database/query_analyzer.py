@@ -261,9 +261,12 @@ _FORBIDDEN_SQL_RE = re.compile(
 _FORBIDDEN_FUNC_RE = re.compile(
     r"\b(load_extension|pg_sleep\w*|sleep|benchmark|lo_\w+|pg_read_\w+|pg_ls_\w+|pg_stat_file|"
     r"nextval|setval|dblink\w*|load_file|get_lock|release_lock|set_config|"
-    r"pg_terminate_backend|pg_cancel_backend|writefile|readfile|edit|fts3_tokenizer)\s*\(",
+    r"pg_terminate_backend|pg_cancel_backend|pg_advisory_lock\w*|pg_notify|pg_reload_conf|writefile|readfile|edit|fts3_tokenizer)\s*\(",
     re.IGNORECASE,
 )
+
+# 带引号/反引号/方括号的标识符后直接跟左括号（函数调用写法）可绕过上面的名称匹配，只读分析不需要，直接拒绝
+_QUOTED_CALL_RE = re.compile(r'["`\]]\s*\(')
 
 
 def validate_readonly_sql(sql: str) -> str:
@@ -290,6 +293,8 @@ def validate_readonly_sql(sql: str) -> str:
     forbidden = _FORBIDDEN_SQL_RE.search(normalized)
     if forbidden:
         raise ValueError(f"只读分析不允许包含关键字: {forbidden.group(1).upper()}")
+    if _QUOTED_CALL_RE.search(normalized):
+        raise ValueError("只读分析不允许带引号的标识符作为函数调用")
     func = _FORBIDDEN_FUNC_RE.search(normalized)
     if func:
         raise ValueError("只读分析不允许调用有副作用的函数")
