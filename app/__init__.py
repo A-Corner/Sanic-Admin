@@ -6,8 +6,8 @@
 
 ``create_app(config)`` 契约：``config`` 可以是环境名（'development'/'testing'/'production'）、
 配置类/对象或字典；缺省时使用 ``SANIC_ENV``（默认 development）。
-依赖尚未修复的下游模块（models/auth/api/cache，见各 [降级] 日志）时，应用仍能启动，
-对应功能被禁用并输出 warning。
+``ENABLE_API_DOCS`` 控制 /swagger、/swagger.json、/redoc、/docs/* 文档路由：
+development/testing 默认开启，production 默认关闭。
 """
 
 import importlib
@@ -23,20 +23,6 @@ from app.middleware import register_all_middlewares
 from app.middleware.compression import configure_compression
 
 __all__ = ["create_app", "ConfigError"]
-
-
-def _optional_import(module: str, feature: str, owner: str, env: Optional[str] = None):
-    """
-    导入可选模块；development/testing 失败时记录 warning 并返回 None（不静默吞错），
-    production 失败时拒绝启动（抛 ConfigError）。
-    """
-    try:
-        return importlib.import_module(module)
-    except Exception as e:
-        if env == "production":
-            raise ConfigError(f"生产环境拒绝降级启动：{feature} 不可用（导入 {module} 失败，待 {owner} 修复）: {e!r}") from e
-        logger.warning(f"[降级] {feature} 未启用（导入 {module} 失败，待 {owner} 修复）: {e!r}")
-        return None
 
 
 def _resolve_config(config: Any) -> dict:
@@ -85,35 +71,27 @@ def create_app(config: Optional[Any] = None) -> Sanic:
         return json_response({"status": "ok", "env": app.config.get("ENV")})
 
     register_blueprints(app)
+    if app.config.get("ENABLE_API_DOCS"):
+        from app.docs import setup_docs
+        setup_docs(app)
     _register_listeners(app)
     return app
 
 
 def _register_listeners(app: Sanic) -> None:
-    env = app.config.get("ENV")
-    models = _optional_import("app.models", "数据库初始化", "B1b (models)", env)
-    cache_pkg = _optional_import("app.cache", "缓存系统", "B1c (cache)", env)
+    from app import models
+    cache_pkg = importlib.import_module("app.cache")
 
     @app.listener('before_server_start')
     async def setup_db(app, loop):
-        if models is not None and hasattr(models, "init_db"):
-            await models.init_db(app)
-            app.ctx.db_ready = True
-            logger.info("数据库连接初始化完成")
-        else:
-            logger.warning("[降级] 跳过数据库初始化（app.models.init_db 不可用）")
+        await models.init_db(app)
+        app.ctx.db_ready = True
+        logger.info("数据库连接初始化完成")
 
-        if cache_pkg is not None:
-            try:
-                init_cache(app, cache_pkg)
-                logger.info("缓存系统初始化完成")
-            except Exception as e:
-                if app.config.get("ENV") == "production":
-                    raise
-                logger.warning(f"[降级] 缓存初始化失败，待 B1c 修复: {e!r}")
+        init_cache(app, cache_pkg)
+        logger.info("缓存系统初始化完成")
 
-        if models is not None:
-            await create_initial_admin()
+        await create_initial_admin()
 
     @app.listener('after_server_stop')
     async def close_db(app, loop):
@@ -144,31 +122,20 @@ def init_cache(app: Sanic, cache_pkg=None):
 
 
 def register_blueprints(app: Sanic) -> None:
-    """注册所有蓝图；不可用的蓝图降级跳过并记录 warning。"""
-    env = app.config.get("ENV")
-    auth_routes = _optional_import("app.auth.routes", "认证/角色/账户路由", "B1b (auth)", env)
-    if auth_routes is not None:
-        for name in ("auth_bp", "capt_bp", "two_step_bp", "role_bp", "account_bp"):
-            bp = getattr(auth_routes, name, None)
-            if bp is None:
-                if env == "production":
-                    raise ConfigError(f"生产环境拒绝降级启动：app.auth.routes 缺少 {name}")
-                logger.warning(f"[降级] app.auth.routes 缺少 {name}，待 B1b 修复")
-            else:
-                app.blueprint(bp)
+    """注册认证路由与 API 蓝图组（/api/...）。"""
+    from app.auth import routes as auth_routes
+    from app.api import api_bp
 
-    api_pkg = _optional_import("app.api", "API v1 路由", "B1d (api)", env)
-    if api_pkg is not None and getattr(api_pkg, "v1_bp", None) is not None:
-        app.blueprint(api_pkg.v1_bp)
-        # 导入资源以确保路由注册
-        _optional_import("app.api.resources", "API 资源路由", "B1d (api)", env)
+    for name in ("auth_bp", "capt_bp", "two_step_bp", "role_bp", "account_bp"):
+        app.blueprint(getattr(auth_routes, name))
+    app.blueprint(api_bp)
 
 
 async def create_initial_admin() -> None:
-    """如果系统中没有管理员账户，则创建初始管理员（依赖 app.auth，失败时仅记录错误）"""
+    """如果系统中没有管理员账户，则创建初始管理员；失败只记录错误，不阻止启动。"""
     try:
         from app.auth.authentication import create_initial_admin_account
         await create_initial_admin_account()
         logger.info("初始管理员账户检查完成")
     except Exception as e:
-        logger.error(f"创建初始管理员账户时出错（待 B1b 修复）: {str(e)}")
+        logger.error(f"创建初始管理员账户时出错: {str(e)}")

@@ -23,7 +23,7 @@ from app.middleware.compression import (
     COMPRESSIBLE_CONTENT_TYPES
 )
 
-bp = Blueprint("compression", url_prefix="/api/compression")
+bp = Blueprint("compression", url_prefix="/compression")
 
 
 class CompressionStatsResource(BaseResource):

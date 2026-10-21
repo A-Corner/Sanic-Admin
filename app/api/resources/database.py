@@ -26,7 +26,7 @@ from app.database.connection_pool import (
     set_pool_options
 )
 
-bp = Blueprint("database", url_prefix="/api/database")
+bp = Blueprint("database", url_prefix="/database")
 
 
 class QueryLogsResource(BaseResource):

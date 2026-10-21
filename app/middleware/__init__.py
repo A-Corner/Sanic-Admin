@@ -45,14 +45,8 @@ def register_all_middlewares(app: Sanic) -> None:
     _setup_request_logging(app)
     app.middleware('request')(AuthMiddleware())
 
-    # 文件下载计数中间件属于 app.api.resources.upload（B1d 负责修复），缺失时降级
-    try:
-        from app.api.resources.upload import FileDownloadCounterMiddleware
-        app.middleware('request')(FileDownloadCounterMiddleware())
-    except Exception as e:
-        if app.config.get("ENV") == "production":
-            from app.config import ConfigError
-            raise ConfigError(f"生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）: {e!r}") from e
-        logger.warning(f"[降级] 文件下载计数中间件未启用（app.api.resources.upload 不可用，待 B1d 修复）: {e!r}")
+    # 文件下载计数中间件（/uploads/ 下载次数统计）
+    from app.api.resources.upload import FileDownloadCounterMiddleware
+    app.middleware('request')(FileDownloadCounterMiddleware())
 
     logger.info("所有中间件注册完成")

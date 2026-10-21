@@ -8,36 +8,19 @@ API包，包含所有API相关模块和蓝图
 from sanic import Blueprint
 from app.api.base import BaseResource, CRUDResource
 from app.api.responses import APIResponse, APIError
-import datetime
-import os
-from importlib import import_module
 
-# 创建主API蓝图
-api_bp = Blueprint.group('api', url_prefix='/api')
-
-# 创建API版本蓝图
+# API 版本蓝图：所有资源路由（/api/v1/...）都注册到它上面
 v1_bp = Blueprint('v1', url_prefix='/v1')
 
-# 将版本蓝图添加到主API蓝图
-api_bp.add_blueprint(v1_bp)
+# 自动导入资源模块，确保它们的路由注册到 v1_bp
+# （资源模块通过 ``from app.api import v1_bp`` 取得蓝图，因此必须在 v1_bp 定义之后导入）
+from app.api import resources  # noqa: E402,F401
+from app.api.resources import cache as _cache_resource  # noqa: E402,F401
+from app.api.resources.compression import bp as compression_bp  # noqa: E402
+from app.api.resources.database import bp as database_bp  # noqa: E402
 
-# 自动导入资源模块
-resource_dir = os.path.join(os.path.dirname(__file__), "resources")
-for filename in os.listdir(resource_dir):
-    if filename.endswith(".py") and not filename.startswith("__"):
-        module_name = filename[:-3]
-        module = import_module(f"app.api.resources.{module_name}")
-        
-        # 如果模块有Blueprint对象，则注册到主Blueprint组
-        if hasattr(module, "bp"):
-            api_bp.add_blueprint(getattr(module, "bp"))
-
-# 确保数据库API注册
-try:
-    from app.api.resources.database import bp as database_bp
-    api_bp.add_blueprint(database_bp)
-except ImportError:
-    pass
+# 主 API 蓝图组：/api/v1/...、/api/database/...、/api/compression/...
+api_bp = Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')
 
 # 导出常用类和函数
 __all__ = [
@@ -48,28 +31,3 @@ __all__ = [
     'api_bp',
     'v1_bp'
 ]
-
-
-def register_api_resources():
-    """
-    注册所有API资源
-    
-    此函数将在应用启动时调用，用于注册所有API资源路由
-    """
-    # 导入所有资源模块，确保它们注册到蓝图
-    from app.api.resources import account, role, permission
-    
-    # 可以在此添加API文档或统计信息
-    
-    # 注册API健康检查端点
-    @v1_bp.route('/health')
-    async def health_check(request):
-        """API健康检查端点"""
-        return APIResponse.success(
-            data={
-                "status": "ok",
-                "version": "1.0",
-                "timestamp": APIResponse.serialize(datetime.datetime.now())
-            },
-            message="API服务正常运行"
-        ) 
