@@ -293,12 +293,35 @@ class StringList(ValidationRule):
         return True
 
 
-def validate_request(rules: Dict[str, List[ValidationRule]], 
+#: 校验通过后，数据挂载在 ``request.ctx`` 上的属性名。
+#:
+#: **不能挂在 ``request`` 上**：Sanic 23.6 的 ``Request`` 定义了 ``__slots__``
+#: 且不含 ``validated_data``，给实例赋任意属性必然抛 AttributeError → 500。
+#: ``request.ctx`` 是 ``SimpleNamespace``（Sanic 官方支持的请求上下文），
+#: 挂属性安全；项目里 ``app/middleware/auth_middleware.py`` 往
+#: ``request.ctx.authentication_session`` 写会话也是同一套路。
+VALIDATED_DATA_ATTR = "validated_data"
+
+
+def get_validated_data(request: Request) -> Dict[str, Any]:
+    """
+    取出 ``validate_request`` 装饰器写入的校验结果。
+
+    Args:
+        request: 当前请求
+
+    Returns:
+        Dict[str, Any]: 校验通过的数据；未经过 ``validate_request`` 时返回空字典
+    """
+    return getattr(request.ctx, VALIDATED_DATA_ATTR, {}) or {}
+
+
+def validate_request(rules: Dict[str, List[ValidationRule]],
                     source: str = 'json',
                     allow_unknown: bool = True):
     """
     请求参数验证装饰器
-    
+
     用法示例:
     ```python
     @app.route('/api/user', methods=['POST'])
@@ -308,15 +331,19 @@ def validate_request(rules: Dict[str, List[ValidationRule]],
         'age': [Type(int), Range(min_=18)]
     })
     async def create_user(request):
-        # 参数已验证通过
-        pass
+        # 校验通过的数据从 request.ctx.validated_data 取
+        data = get_validated_data(request)
+        ...
     ```
-    
+
+    校验结果写入 ``request.ctx.validated_data``（**不是** ``request.validated_data``：
+    Sanic 的 ``Request`` 有 ``__slots__``，往实例上挂属性必然 AttributeError → 500）。
+
     Args:
         rules: 验证规则字典
         source: 参数来源，可选值: 'json', 'form', 'query', 'all'
         allow_unknown: 是否允许未知字段
-        
+
     Returns:
         装饰器函数
     """
@@ -325,7 +352,7 @@ def validate_request(rules: Dict[str, List[ValidationRule]],
         async def wrapper(request, *args, **kwargs):
             # 获取请求数据
             data = None
-            
+
             if source == 'json':
                 data = request.json or {}
             elif source == 'form':
@@ -341,32 +368,32 @@ def validate_request(rules: Dict[str, List[ValidationRule]],
                     data.update({key: request.form.get(key) for key in request.form.keys()})
                 if request.args:
                     data.update({key: request.args.get(key) for key in request.args.keys()})
-            
+
             if data is None:
                 data = {}
-            
+
             # 验证参数
             errors = {}
-            
+
             # 检查是否有未知字段
             if not allow_unknown:
                 unknown_fields = [field for field in data.keys() if field not in rules]
                 if unknown_fields:
                     errors['unknown_fields'] = f"不允许使用未知字段: {', '.join(unknown_fields)}"
-            
+
             # 应用验证规则
             for field, field_rules in rules.items():
                 field_value = data.get(field)
-                
+
                 for rule in field_rules:
                     result = rule.validate(field_value, field)
-                    
+
                     if result is not True:
                         if field not in errors:
                             errors[field] = []
                         errors[field].append(result)
                         break  # 一个字段的第一个错误就停止验证
-            
+
             # 如果有错误，返回错误响应
             if errors:
                 return APIResponse.error(
@@ -375,13 +402,14 @@ def validate_request(rules: Dict[str, List[ValidationRule]],
                     status_code=400,
                     details=errors
                 )
-            
+
             # 验证通过，继续处理请求
-            request.validated_data = data
+            # 数据挂在 request.ctx 上（Request 有 __slots__，不能挂实例属性）
+            setattr(request.ctx, VALIDATED_DATA_ATTR, data)
             return await handler(request, *args, **kwargs)
-        
+
         return wrapper
-    
+
     return decorator
 
 
