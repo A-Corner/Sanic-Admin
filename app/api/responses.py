@@ -9,6 +9,7 @@ from sanic.response import json
 from typing import Any, Dict, List, Optional, Union
 import datetime
 import decimal
+import math
 from tortoise.models import Model
 import json as json_lib
 
@@ -182,6 +183,14 @@ class APIResponse:
         
         支持Tortoise模型、日期时间、小数等特殊类型
         
+        非有限数值（``inf`` / ``-inf`` / ``nan``，含 ``Decimal`` 的 ``Infinity`` /
+        ``NaN``）统一转成 ``None``（JSON ``null``）。这些值**不是**标准 JSON
+        （RFC 8259 只允许 null/true/false/数字/字符串/数组/对象）：浏览器
+        ``JSON.parse()`` 会直接抛错，Go / Rust / Java 的严格解析器同样拒绝。
+        
+        本方法是全仓 API 响应的最后一道防线：无论内部哪处代码产生了 inf/nan，
+        都不会漏到客户端。
+        
         Args:
             data: 要序列化的数据
             
@@ -218,13 +227,36 @@ class APIResponse:
         if isinstance(data, datetime.timedelta):
             return str(data)
         
+        # 处理布尔值 —— 必须排在数值分支之前
+        # bool 是 int 的子类（isinstance(True, int) 为 True），若不先判定，
+        # 布尔值会被误当成数值处理。JSON 原生支持 true/false，原样返回。
+        if isinstance(data, bool):
+            return data
+        
+        # 处理浮点数：非有限值（inf / -inf / nan）转 None
+        if isinstance(data, float):
+            return data if math.isfinite(data) else None
+        
         # 处理小数
+        # 非有限值（Infinity / NaN）转 None；有限值沿用既有行为转 float。
         if isinstance(data, decimal.Decimal):
-            return float(data)
+            if not data.is_finite():
+                return None
+            converted = float(data)
+            return converted if math.isfinite(converted) else None
+        
+        # 处理整数（JSON 原生支持，原样返回）
+        if isinstance(data, int):
+            return data
         
         # 处理集合
         if isinstance(data, set):
             return [APIResponse.serialize(item) for item in data]
+        
+        # 处理元组：保持既有行为（返回元组而非列表），但逐元素清洗，
+        # 避免元组里的 inf/nan 绕过防线漏到客户端
+        if isinstance(data, tuple):
+            return tuple(APIResponse.serialize(item) for item in data)
         
         # 处理bytes
         if isinstance(data, bytes):
@@ -244,7 +276,12 @@ class APIResponse:
         Returns:
             str: JSON字符串
         """
-        return json_lib.dumps(APIResponse.serialize(data), ensure_ascii=False)
+        # allow_nan=False：Python 的 json 默认会输出 Infinity / NaN 这些**非标准**
+        # JSON 字面量。置为 False 后一旦出现非有限值就抛 ValueError，
+        # 保证本方法产出的永远是严格合法 JSON（RFC 8259）。
+        return json_lib.dumps(
+            APIResponse.serialize(data), ensure_ascii=False, allow_nan=False
+        )
 
 
 class APIError:
