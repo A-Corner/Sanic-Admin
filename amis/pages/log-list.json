@@ -1,0 +1,91 @@
+{
+  "type": "crud",
+  "id": "log-list",
+  "name": "log",
+  "syncLocation": false,
+  "api": {
+    "method": "get",
+    "url": "/api/v1/logs",
+    "dataType": "json",
+    "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: { items: payload.data.items, total: payload.data.pagination.total } }",
+    "requestAdaptor": "return { ...api, url: api.url + '&page_size=' + (api.query && api.query.perPage || api.query && api.query.page_size || 20), data: {} }"
+  },
+  "filter": {
+    "title": "",
+    "mode": "inline",
+    "wrapWithPanel": false,
+    "className": "m-b-sm",
+    "body": [
+      {
+        "type": "input-text",
+        "name": "keyword",
+        "label": "关键字",
+        "placeholder": "操作 / 账户 / IP",
+        "clearable": true
+      }
+    ]
+  },
+  "columns": [
+    {
+      "type": "text",
+      "label": "ID",
+      "name": "id",
+      "width": 60
+    },
+    {
+      "type": "text",
+      "label": "账户",
+      "name": "account_name",
+      "placeholder": "-"
+    },
+    {
+      "type": "text",
+      "label": "操作",
+      "name": "operation"
+    },
+    {
+      "type": "text",
+      "label": "类型",
+      "name": "operation_type"
+    },
+    {
+      "type": "text",
+      "label": "详情",
+      "name": "detail",
+      "placeholder": "-"
+    },
+    {
+      "type": "status",
+      "label": "状态",
+      "name": "status"
+    },
+    {
+      "type": "text",
+      "label": "IP",
+      "name": "ip_address",
+      "placeholder": "-"
+    },
+    {
+      "type": "date",
+      "label": "时间",
+      "name": "created_at"
+    }
+  ],
+  "bulkActions": [],
+  "headerToolbar": [
+    {
+      "type": "filter-toggler",
+      "align": "right"
+    }
+  ],
+  "footerToolbar": [
+    {
+      "type": "statistics"
+    },
+    {
+      "type": "pagination"
+    }
+  ],
+  "perPage": 20,
+  "alwaysShowPagination": true
+}

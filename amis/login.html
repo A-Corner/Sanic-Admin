@@ -84,7 +84,8 @@
         })
     </script>
     <script>
-        // API 基址：默认同源（由 server.js 反代或后端挂载本目录）；跨源部署需自行配置 CORS 与凭据
+        // 同源托管：页面与 API 同源，相对路径即可，无需 CORS 配置。
+        // 后端把本目录挂在 /amis 下，静态资源用 './'，API 用 '/' 起的绝对路径。
         const API_BASE = window.SANIC_API_BASE || '';
         const form = document.getElementById('login-form');
         const emailInput = form.querySelector('input[name="email"]');
@@ -114,7 +115,7 @@
                 });
                 if (response.ok) {
                     // 会话由后端通过 HttpOnly 的 session Cookie 下发，前端不保存口令或令牌
-                    window.location.href = 'index.html';
+                    window.location.href = './index.html';
                     return;
                 }
                 let msg = '登录失败（HTTP ' + response.status + '）';

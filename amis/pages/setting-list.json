@@ -1,0 +1,161 @@
+{
+  "type": "crud",
+  "id": "setting-list",
+  "name": "setting",
+  "syncLocation": false,
+  "api": {
+    "method": "get",
+    "url": "/api/v1/settings",
+    "dataType": "json",
+    "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: { items: payload.data.items, total: payload.data.pagination.total } }",
+    "requestAdaptor": "return { ...api, url: api.url + '&page_size=' + (api.query && api.query.perPage || api.query && api.query.page_size || 20), data: {} }"
+  },
+  "columns": [
+    {
+      "type": "text",
+      "label": "ID",
+      "name": "id",
+      "width": 60
+    },
+    {
+      "type": "text",
+      "label": "键",
+      "name": "key"
+    },
+    {
+      "type": "text",
+      "label": "值",
+      "name": "value"
+    },
+    {
+      "type": "text",
+      "label": "类型",
+      "name": "value_type"
+    },
+    {
+      "type": "text",
+      "label": "描述",
+      "name": "description",
+      "placeholder": "-"
+    },
+    {
+      "type": "status",
+      "label": "公开",
+      "name": "is_public"
+    },
+    {
+      "type": "operation",
+      "label": "操作",
+      "buttons": [
+        {
+          "type": "button",
+          "label": "编辑",
+          "level": "link",
+          "actionType": "dialog",
+          "dialog": {
+            "title": "编辑设置",
+            "body": {
+              "type": "form",
+              "initApi": "/api/v1/settings/key/${key}",
+              "dataType": "json",
+              "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }",
+              "api": {
+                "method": "put",
+                "url": "/api/v1/settings/key/${key}",
+                "dataType": "json",
+                "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+              },
+              "body": [
+                {
+                  "type": "input-text",
+                  "name": "value",
+                  "label": "值",
+                  "required": true
+                },
+                {
+                  "type": "input-text",
+                  "name": "description",
+                  "label": "描述"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "bulkActions": [],
+  "headerToolbar": [
+    {
+      "type": "button",
+      "label": "新增设置",
+      "level": "primary",
+      "actionType": "dialog",
+      "dialog": {
+        "title": "新增设置",
+        "body": {
+          "type": "form",
+          "api": {
+            "method": "post",
+            "url": "/api/v1/settings",
+            "dataType": "json",
+            "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+          },
+          "body": [
+            {
+              "type": "input-text",
+              "name": "key",
+              "label": "键",
+              "required": true,
+              "description": "只接受系统预注册的设置键"
+            },
+            {
+              "type": "input-text",
+              "name": "value",
+              "label": "值",
+              "required": true
+            },
+            {
+              "type": "select",
+              "name": "value_type",
+              "label": "类型",
+              "value": "string",
+              "options": [
+                {
+                  "label": "字符串",
+                  "value": "string"
+                },
+                {
+                  "label": "整数",
+                  "value": "int"
+                },
+                {
+                  "label": "浮点",
+                  "value": "float"
+                },
+                {
+                  "label": "布尔",
+                  "value": "bool"
+                },
+                {
+                  "label": "JSON",
+                  "value": "json"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "footerToolbar": [
+    {
+      "type": "statistics"
+    },
+    {
+      "type": "pagination"
+    }
+  ],
+  "perPage": 20,
+  "alwaysShowPagination": true
+}

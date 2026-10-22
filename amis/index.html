@@ -216,11 +216,14 @@
       }
 
       (async function () {
+        // 同源托管：页面与 API 同源，所以用相对路径即可，不带 CORS 问题。
+        // 后端把本目录挂在 /amis 下，故静态资源用 './'、页面 schema 用 'pages/'，
+        // API 用 '/' 起的绝对路径（后端路由都在根路径下）。
         const API_BASE = window.SANIC_API_BASE || '';
         try {
           const r = await fetch(API_BASE + '/auth/associated', { method: 'POST', credentials: 'same-origin' });
           if (r.status === 401) {
-            window.location.replace('login.html');
+            window.location.replace('./login.html');
             return;
           }
           if (!r.ok) {
@@ -237,7 +240,7 @@
         document.addEventListener('click', async (ev) => {
           if (ev.target && ev.target.id === 'logout-link') {
             try { await fetch(API_BASE + '/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch (e) {}
-            window.location.replace('login.html');
+            window.location.replace('./login.html');
           }
         });
       })();

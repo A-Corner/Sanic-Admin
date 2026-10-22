@@ -89,130 +89,19 @@ if str(REPO_ROOT) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
-# 1. 临时 shim：绕过 base commit 的 import 死因
+# 1. app 侧 import 卫生检查
 # ---------------------------------------------------------------------------
 #
-# 临时 shim，待 Lane A 删除 ``app/api/resources/__init__.py`` 里的
-# ``FileDownloadCounterMiddleware`` 导入后移除。
-# ---------------------------------------------------------------------------
-# 1. 临时 shim：绕过 app 侧"半成品 import 死引用"
-# ---------------------------------------------------------------------------
+# 这里**不做任何** import 补丁。app 侧的死引用（``app/api/resources/__init__.py``
+# import 了已删除的 ``FileDownloadCounterMiddleware``、或 import 了尚不存在的资源类）
+# 必须让 ``import app`` 真实地失败——conftest 里偷偷补占位类会掩盖"import 是否
+# 真的干净"这个问题，而且会留下**半初始化的 ``app.api`` 模块**：
+# ``app.api.v1_bp`` 与资源模块里持有的 ``v1_bp`` 会变成两个不同的对象，
+# 资源路由注册到"孤儿"蓝图上，表现为 ``/api/v1/accounts`` 恒 404（而不是 401/200），
+# 极难排查。
 #
-# 临时 shim —— **待 app 侧 import 清理完成后即可整段删除**。
-# 集成时建议移除：留着会掩盖"import 是否真的干净"这个问题。
-#
-# 背景：M1 的 API 资源正在被各 lane 重写，重写过程中
-# ``app/api/resources/__init__.py`` 偶尔会 import 一个**尚未存在**的符号
-# （已知案例：``FileDownloadCounterMiddleware``、``MyAccountPasswordResource``），
-# 于是 ``import app`` 直接 ImportError，整个测试套件无法收集。
-#
-# 注意：这里**不能**简单地 ``import app.api.resources.upload`` 之后再补属性 ——
-# 第一次 import 失败会让 ``sys.modules`` 里留下一个**半初始化的 ``app.api``
-# 模块**，导致 ``app.api.v1_bp`` 与资源模块里持有的 ``v1_bp`` **不是同一个
-# 对象**：资源路由注册到一个"孤儿"蓝图上，最终 ``/api/v1/accounts`` 这类路由
-# 在 app 路由表里根本不存在（表现为 404 而不是 401/200），而且这种错误极难排查。
-#
-# 所以这里用 ``meta_path`` finder 拦截 ``app.api.resources`` 包的导入：
-# 先按源码执行各资源模块，再把 ``__init__.py`` 里 import 不到的符号**补成占位类**，
-# 让 ``app.api`` 一次性、干净地完成导入，路由全部注册到同一个 ``v1_bp``。
-#
-# 该 shim 是**幂等且自失效**的：一旦 app 侧不再 import 这些缺失符号，
-# 它不会补任何东西，行为与"没有 shim"完全一致。
-import importlib.abc  # noqa: E402
-import importlib.util  # noqa: E402
-import types  # noqa: E402
-
-
-def _install_missing_symbol_shim() -> None:
-    """
-    让 ``app.api.resources`` 在其 ``__init__.py`` import 了尚不存在的符号时仍能导入。
-
-    做法：给 ``app.api.resources`` 及其子模块装一个 PEP 562 的模块级
-    ``__getattr__``——当 ``from app.api.resources.account import X`` 里的 ``X``
-    在 ``account`` 模块上找不到时，返回一个占位类而不是抛 ImportError。
-
-    为什么不用"捕获 ImportError 再重试"：``from X import Y`` 是去 **X 模块**上取
-    属性 Y，把 Y 塞进包 ``__init__`` 的命名空间没用。而模块级 ``__getattr__``
-    正是 Python 为这种"按需补符号"提供的标准机制。
-    """
-    package_dir = REPO_ROOT / "app" / "api" / "resources"
-    if not package_dir.is_dir():
-        return
-
-    masked: list[str] = []
-
-    class _Placeholder:
-        """占位实现：不改变任何行为，只让 import 能继续。"""
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __call__(self, *args, **kwargs):
-            return None
-
-        @classmethod
-        def as_view(cls, *args, **kwargs):
-            return cls
-
-    def _make_module_getattr(module_name: str):
-        def __getattr__(name: str):
-            # 只对"看起来像类名"的符号补占位，避免掩盖真正的拼写错误
-            if not name[:1].isupper():
-                raise AttributeError(name)
-            masked.append(f"{module_name}.{name}")
-            return type(name, (_Placeholder,), {})
-
-        return __getattr__
-
-    class _PatchedFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path=None, target=None):
-            if fullname != "app.api.resources" and not fullname.startswith(
-                "app.api.resources."
-            ):
-                return None
-            source_file = Path(fullname.replace(".", "/"))
-            candidates = [
-                package_dir / f"{fullname.rsplit('.', 1)[-1]}.py",
-                package_dir / fullname.rsplit(".", 1)[-1] / "__init__.py",
-            ]
-            target_file = next((c for c in candidates if c.is_file()), None)
-            if target_file is None:
-                return None
-
-            is_package = target_file.name == "__init__.py"
-
-            class _PatchedLoader(importlib.abc.Loader):
-                def create_module(self, spec):
-                    return None
-
-                def exec_module(self, module):
-                    source = target_file.read_text(encoding="utf-8")
-                    exec(compile(source, str(target_file), "exec"), module.__dict__)
-                    module.__dict__["__getattr__"] = _make_module_getattr(fullname)
-
-            return importlib.util.spec_from_file_location(
-                fullname,
-                target_file,
-                loader=_PatchedLoader(),
-                submodule_search_locations=[str(target_file.parent)] if is_package else None,
-            )
-
-    sys.meta_path.insert(0, _PatchedFinder())
-
-    # 记录被遮蔽的符号，便于在回件/日志里说明"哪些 app 侧 import 还不干净"
-    import atexit  # noqa: E402
-
-    def _report():
-        if masked:
-            print(
-                "[tests/conftest] 临时 shim 遮蔽了以下尚不存在的符号（app 侧未完成）: "
-                + ", ".join(sorted(set(masked)))
-            )
-
-    atexit.register(_report)
-
-
-_install_missing_symbol_shim()
+# 本迭代期间曾短暂使用过 meta_path shim 绕过该问题；app 侧 import 清理完成后
+# 已整段移除。若将来再出现同类问题，请修 app 侧，不要在这里加补丁。
 
 import httpx  # noqa: E402
 from httpx import ASGITransport  # noqa: E402

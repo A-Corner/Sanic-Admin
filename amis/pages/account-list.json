@@ -1,0 +1,251 @@
+{
+  "type": "crud",
+  "id": "account-list",
+  "name": "account",
+  "syncLocation": false,
+  "api": {
+    "method": "get",
+    "url": "/api/v1/accounts",
+    "dataType": "json",
+    "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: { items: payload.data.items, total: payload.data.pagination.total } }",
+    "requestAdaptor": "return { ...api, url: api.url + '&page_size=' + (api.query && api.query.perPage || api.query && api.query.page_size || 20), data: {} }"
+  },
+  "filter": {
+    "title": "",
+    "mode": "inline",
+    "wrapWithPanel": false,
+    "submitText": "",
+    "className": "m-b-sm",
+    "body": [
+      {
+        "type": "input-text",
+        "name": "keyword",
+        "label": "关键字",
+        "placeholder": "用户名 / 邮箱",
+        "clearable": true
+      }
+    ]
+  },
+  "columns": [
+    {
+      "type": "text",
+      "label": "ID",
+      "name": "id",
+      "width": 60
+    },
+    {
+      "type": "text",
+      "label": "用户名",
+      "name": "username"
+    },
+    {
+      "type": "text",
+      "label": "邮箱",
+      "name": "email"
+    },
+    {
+      "type": "text",
+      "label": "手机号",
+      "name": "phone",
+      "placeholder": "-"
+    },
+    {
+      "type": "status",
+      "label": "管理员",
+      "name": "is_admin"
+    },
+    {
+      "type": "status",
+      "label": "已验证",
+      "name": "verified"
+    },
+    {
+      "type": "status",
+      "label": "已禁用",
+      "name": "disabled"
+    },
+    {
+      "type": "date",
+      "label": "创建时间",
+      "name": "created_at"
+    },
+    {
+      "type": "operation",
+      "label": "操作",
+      "buttons": [
+        {
+          "type": "button",
+          "label": "详情",
+          "level": "link",
+          "actionType": "dialog",
+          "dialog": {
+            "title": "账户详情",
+            "body": {
+              "type": "form",
+              "initApi": "/api/v1/accounts/${id}",
+              "dataType": "json",
+              "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }",
+              "body": [
+                {
+                  "type": "static",
+                  "name": "id",
+                  "label": "ID"
+                },
+                {
+                  "type": "static",
+                  "name": "username",
+                  "label": "用户名"
+                },
+                {
+                  "type": "static",
+                  "name": "email",
+                  "label": "邮箱"
+                },
+                {
+                  "type": "static",
+                  "name": "phone",
+                  "label": "手机号"
+                },
+                {
+                  "type": "static",
+                  "name": "is_admin",
+                  "label": "管理员"
+                },
+                {
+                  "type": "static",
+                  "name": "verified",
+                  "label": "已验证"
+                },
+                {
+                  "type": "static",
+                  "name": "created_at",
+                  "label": "创建时间"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "button",
+          "label": "编辑",
+          "level": "link",
+          "actionType": "dialog",
+          "dialog": {
+            "title": "编辑账户",
+            "body": {
+              "type": "form",
+              "initApi": "/api/v1/accounts/${id}",
+              "dataType": "json",
+              "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }",
+              "api": {
+                "method": "put",
+                "url": "/api/v1/accounts/${id}",
+                "dataType": "json",
+                "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+              },
+              "body": [
+                {
+                  "type": "input-text",
+                  "name": "username",
+                  "label": "用户名",
+                  "required": true
+                },
+                {
+                  "type": "input-email",
+                  "name": "email",
+                  "label": "邮箱",
+                  "required": true
+                },
+                {
+                  "type": "input-text",
+                  "name": "phone",
+                  "label": "手机号"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "button",
+          "label": "删除",
+          "level": "danger",
+          "actionType": "ajax",
+          "confirmText": "确定要删除该账户吗？",
+          "api": {
+            "method": "delete",
+            "url": "/api/v1/accounts/${id}",
+            "dataType": "json",
+            "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+          }
+        }
+      ]
+    }
+  ],
+  "bulkActions": [],
+  "headerToolbar": [
+    {
+      "type": "button",
+      "label": "新增账户",
+      "level": "primary",
+      "actionType": "dialog",
+      "dialog": {
+        "title": "新增账户",
+        "body": {
+          "type": "form",
+          "api": {
+            "method": "post",
+            "url": "/api/v1/accounts",
+            "dataType": "json",
+            "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+          },
+          "body": [
+            {
+              "type": "input-text",
+              "name": "username",
+              "label": "用户名",
+              "required": true
+            },
+            {
+              "type": "input-email",
+              "name": "email",
+              "label": "邮箱",
+              "required": true
+            },
+            {
+              "type": "input-password",
+              "name": "password",
+              "label": "初始口令",
+              "required": true,
+              "description": "至少 8 位"
+            },
+            {
+              "type": "input-text",
+              "name": "phone",
+              "label": "手机号"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "filter-toggler",
+      "align": "right"
+    }
+  ],
+  "footerToolbar": [
+    {
+      "type": "statistics"
+    },
+    {
+      "type": "pagination"
+    }
+  ],
+  "perPage": 20,
+  "perPageAvailable": [
+    10,
+    20,
+    50,
+    100
+  ],
+  "alwaysShowPagination": true
+}
