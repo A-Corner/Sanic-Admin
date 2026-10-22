@@ -13,6 +13,7 @@ from app.auth.authorization import requires_permission
 from typing import Dict, Any, List, Optional, Tuple
 from tortoise.functions import Count, Avg, Min, Max
 from datetime import datetime, timedelta
+from app.services.utils import utcnow
 import time
 import psutil
 import os
@@ -136,7 +137,7 @@ class PerformanceResource(HTTPMethodView):
             Dict[str, Any]: API性能数据
         """
         # 获取操作日志中记录的响应时间数据
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=7)
         
         # 按资源类型统计平均响应时间
@@ -271,7 +272,7 @@ class PerformanceResource(HTTPMethodView):
             Dict[str, Any]: 数据库性能数据
         """
         # 假设在日志中存储了数据库查询时间
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=7)
         
         # 尝试从日志的detail字段中提取数据库查询时间
@@ -371,7 +372,7 @@ class ExceptionsResource(HTTPMethodView):
             days = 30
         
         # 计算时间范围
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=days)
         
         # 获取所有失败的操作日志
@@ -600,7 +601,7 @@ class AlertsResource(HTTPMethodView):
         alerts = []
         
         # 获取最近的API响应时间数据
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=1)  # 只检查最近一天的数据
         
         # 获取操作日志
@@ -664,7 +665,7 @@ class AlertsResource(HTTPMethodView):
         alerts = []
         
         # 获取最近的错误率数据
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=1)  # 只检查最近一天的数据
         
         # 获取总请求数
