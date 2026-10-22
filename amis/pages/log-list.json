@@ -8,7 +8,7 @@
     "url": "/api/v1/logs",
     "dataType": "json",
     "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: { items: payload.data.items, total: payload.data.pagination.total } }",
-    "requestAdaptor": "return { ...api, url: api.url + '&page_size=' + (api.query && api.query.perPage || api.query && api.query.page_size || 20), data: {} }"
+    "requestAdaptor": "return { ...api, url: api.url + '&page_size=' + (api.query && api.query.perPage || api.query && api.query.page_size || 20) }"
   },
   "filter": {
     "title": "",
