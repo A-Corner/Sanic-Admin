@@ -1,158 +1,220 @@
-# SA-Admin
+# Sanic-Admin（中文）
 
-依赖 Sanic 为基础，利用了低代码框架 AMIS 来实现前端，便捷的解决了后端人员配置前端的麻烦，也通过 Sanic 的强大和轻便使得后端管理器可以覆盖更大的范围实现更强的功能。
+> **完整文档请看英文版 [README.md](README.md)。** 本文件是精简版：只保留最常用的信息，特性清单、证据表和限制说明以英文版为准。
+>
+> **项目状态**：正在为 **v0.2.0** 重建，当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+>
+> **许可证**：Apache-2.0，见 [LICENSE](LICENSE)。
 
-![Readme_image1](./Readme_image2.jpeg)
+基于 **Sanic**（异步 Python Web 框架）+ **Tortoise ORM** 的后台管理框架，内置 **RBAC** 权限、**RS256 签名 JWT** 会话；管理界面采用 **AMIS** 低代码框架（由 JSON 页面定义驱动）。
 
-![Readme_image1](./Readme_image3.png)
+---
 
-![Readme_image1](./Readme_image4.png)
+## 特性
 
-![Readme_image1](./Readme_image5.png)
+- **认证与会话**：注册 / 验证 / 登录 / 登出 / 会话关联、图形验证码、两步验证流程；RS256 签名的 JWT 会话，同时通过 `HttpOnly` Cookie 和 `Authorization` 响应头下发。真实路由前缀为 `/auth`、`/capt`、`/two-step`、`/roles`、`/account`（`app/auth/routes.py:27-31`）。
+- **RBAC 权限**：角色模型携带 `{资源: [操作]}` 权限表；提供权限检查、角色检查、角色分配与回收；`is_admin` 账户拥有全部权限。
+- **管理 API**：账户、角色、个人资料、系统设置、操作日志、文件上传、仪表盘、缓存、只读 SQL 分析。这些是**类式 CRUD 资源**（继承 `app/api/base.py` 的 `CRUDResource`），不是独立的 `@bp.route` 蓝图装饰器。
+- **缓存**：内存 / Redis 双后端，共用一套接口；Redis 不可达时开发环境降级为内存，**生产环境拒绝降级启动**。
+- **安全基线**：生产环境缺少必需密钥时 **fail-closed**（直接退出，rc=1）；仓库内无密钥；SQL 分析只接受单条 `SELECT`/`WITH`；上传文件使用生成的文件名，不使用原始文件名拼路径。
+- **API 文档**：OpenAPI 3.0 生成器与 `@api_tags` / `@api_summary` / `@api_response` 等装饰器，由 `ENABLE_API_DOCS` 控制（开发环境开、生产环境关）。实测 `/swagger` 302 跳转后 200、`/redoc` 200、`/swagger.json` 200 且规范含 57 条 path（详见英文版 README）。
 
-## 安装
+**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.2.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；测试覆盖率 50%；若干 404/405 与静态公开文件的边界问题留到 v0.3。
 
+---
 
+## 快速开始
 
-​	暂时还没有处理成可以痛殴pypi安装的方式，可以直接克隆到本地，直接运行
+### 系统依赖
 
-```python
-python3 main.py
+**必须安装 libmagic**（`python-magic` 依赖它，用于上传文件的 MIME 识别）：
+
+- macOS：`brew install libmagic`
+- Debian / Ubuntu：`apt install libmagic1`
+- Alpine：`apk add libmagic`
+
+Python 版本：**3.10 – 3.12**（CI 在这三个版本上运行）。
+
+### 方式一：Docker 一键运行
+
+> **Docker 路径已真机跑通。** 镜像构建成功、容器启动、`/health` 返回 200、管理员经 HTTP 登录成功、可选 Redis profile 启动并返回 `PONG`。镜像以非 root 用户运行，内置 `libmagic`，**不含任何密钥**——所有密钥在运行时由 `.env` 注入。
+>
+> 有一处必须如实说明：上述测量是在**仅运行时打补丁**（未改动仓库任何文件）的情况下完成的。仓库中提交的镜像仍会停在第一个上游导入缺陷上，因此在未修复的代码树上执行 `docker compose up` 会因 `ConfigError` 退出。这些缺陷位于 `app/**`，另行跟踪；完整清单见 [Release Notes](docs/release/v0.2.0-release-notes.md)。
+>
+> `Dockerfile`、`docker-compose.yml`、`.env.example`、`.dockerignore` 都在本仓库中。GitHub Actions（`.github/workflows/docker.yml`）为该路径提供持续回归。
+
+```bash
+cp .env.example .env      # 把 .env 里所有占位符替换成真实值
+docker compose up -d --build
 ```
 
-就可以运行调试。
+访问 **http://localhost:22230**（宿主机映射端口；容器内为 22222）。Redis 是可选 profile：`CACHE_TYPE=redis` 时用 `docker compose --profile redis up -d` 启用。
 
+容器内固定 `SANIC_ENV=production`，因此密钥没通过 `.env` 真正提供时容器会直接拒绝启动——**「容器起来了」本身就是配置已正确提供的证据**。
 
+### 方式二：pip（已实测）
 
-## 使用
+```bash
+git clone https://github.com/<owner>/Sanic-Admin.git
+cd Sanic-Admin
 
-​		具体的使用，你需要有sanic或者flask的基础即可使用。大致的框架参考Djanog，使用的ORM是Tortoise，，使用的模版是Jinja2，前端框架是使用了百度的低代码框架Amis，这是一个十分便捷的前端框架，不过你需要一点时间去熟悉它，这样你就可以直接通过Json来控制前端的页面。
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 
-​		代码中都有使用注释，可以直接查看代码
-
-具体的使用：
-
- 1. 数据库配置
-
-    数据库的配置在main.py中,如果需要换别的数据库，建议修改成Mysql或者PostgreSQL,因为Tortoise是直接支持这2个数据库的异步调用的，速度真的没多说。
-
-    ```
-    sa_config.TEST_DATABASE_URL = "sqlite://security_test_db.sqlite3"
-    ```
-
-    
-
-    
-
- 2. 管理员配置
-
-    管理员的初始密码是 SAdmin ： SAdmin@123
-
-    如果需要修改成自己的密码，请修改参数
-
-    ```
-    sa_config.INITIAL_ADMIN_PASSWORD = "SAdmin@123"  # 创建初始管理员帐户时使用的密码
-    ```
-
-    
-
- 3. 配置端口，运行命令
-
-    如有需要请自行更改端口
-
-    ```
-        app.run(host="127.0.0.1",
-                port=22222,
-                workers=1,
-                debug=True,
-                auto_reload=True)
-    ```
-
-    命令说明：
-
-    ​	worker=1 , 这个是配置多任务处理的，但是在高并发的情况下，因为并行和异步切换的耗时，比单独的1个单实例更慢，所以如果有需要的，建议开多个进程，暂时别使用workers，但是具体还是需要根据实际场景。
-
-      auto_reload=True ，是自动重载，这个真心好用。修改了代码不用手动重载
-
- 4. 通过编辑器设计前端Amis
-
-​	对于第一次接触Amis，还是慢慢的去看下Amis的介绍和使用方法，我当时也用了3天去看文档和了解各个部件的使用
-
-然后就可以直接使用Amis的在线编辑来进行界面编辑了。
-
-Amis编辑器：
-
-https://aisuda.github.io/amis-editor-demo/#/hello-world
-
-![Readme_image1](./Readme_image6.png)
-
-5. 编辑好前端控件，直接点击代码部分复制。
-
-   ![Readme_image1](./Readme_image1.png)
-
-6. 去前端代码区，创建json文件，然后把代码复制进去。
-
-   7. 主框架对新建代码部分进行引用。
-
-      主框架文件是./admin/pages/site.json
-
-      修改和引用方法：
-
-      ​        直接把整个主框架代码复制，然后去Amis编辑器中，新建一个页面，粘贴进去，然后按照自己喜好，增加1个栏目
-
-      ，编辑好后，再次复制到site.json中。把data部分，修改成  "schema":{},  // 这里的内容是右侧页面的内容
-
-也可以直接参考我的做法，把新增加页面的内容另存为一个json文件，然后通过schemaApi去引用。具体请参考site.json文件的方法，
-
-下面是Amis的json格式。
-
-```
-{
-  "status": 0,	//返回必须项目
-  "msg": "",		//	返回必须项
-  "data": {			// 返回的就是页面元素的JSON
-    "pages": [
-      {	//	导航栏的标题层
-        "label": "Home",
-        "url": "/", // 代表这一层的url，方便其他层级跳转
-        "redirect": "/login" // 页面初始化的时候定位到什么页面
-      },
-      {
-        "label": "功能导航",		//	 这一层开始就是导航栏了
-        "children": [					//	  导航栏的栏目层
-          {
-            "label": "登录/注册",
-            "url": "login",
-          	"schema":{},  // 这里的内容是右侧页面的内容
-          },
-          {
-            "label": "这里有多少个，就代表导航栏有多少个栏目",
-            "url": "login",
-          	"schema":{},  // 这里的内容是右侧页面的内容
-          }
-        ]
-      }
-    ]
-  }
-}
+export INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'   # 管理员口令（不是邮箱）
+python main.py
 ```
 
+Windows PowerShell 用 `$env:INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'` 设置。
 
+服务监听 **http://127.0.0.1:22222**（`127.0.0.1` 与 `localhost` 是同一个地址）。
 
-## 最后说明：
+**管理员的两个值是两回事：**
 
-​       这是一个简单的Admin管理界面，请按照你的具体需求进行修改，根据amis的特性，大致可以满足admin管理界面的90%的需求的，其他的还需要前端ui进行协助。
+| | 值 | 来源 |
+|---|---|---|
+| **邮箱**（登录框里填的用户名） | `SAdmin@Sanic.com` | 默认值；可用 `INITIAL_ADMIN_EMAIL` 覆盖 |
+| **口令** | 你 `export` 的 `INITIAL_ADMIN_PASSWORD` | 若**没有** export，开发环境会在启动时随机生成并**只打印一次**： |
 
-###  性能说明：
+```text
+[开发环境] 已自动生成临时初始管理员口令（仅显示这一次，重启后失效）:
+    账号: SAdmin@Sanic.com
+    口令: 8VjvxJJhex3EAfzw
+设置环境变量 INITIAL_ADMIN_PASSWORD 可固定口令。
+```
 
-​        使用了ApiPost7进行测试，但是效果不想别人说的那么理想，估计是开了多个worker的问题，
+这段由 Sanic 的 **worker 子进程**打印，若把输出重定向到日志文件，请在文件里搜 `口令:`，否则容易
+在启动日志里漏掉。
 
-​        自己写了个60秒的异步请求测试[./test/access_url.pu]，大概的一个进程的访问量是20000～26000左右，返回结果是没有丢包的，大概请求的速率是400/S，在Sanic的处理下是完全没问题的。
+**请保留首次启动打印的那个口令。** 管理员账户只在不存在时创建，所以首次打印的口令一直有效；
+之后重启虽然会再打印一个随机口令，但**并不会生效**——因为账户已经存在了。
+要跨重启固定口令，请在首次启动前设置 `INITIAL_ADMIN_PASSWORD`。
 
-当我开了3个进程同时进行，数量维持也是24000左右，结果也是完全没有报错，
+**服务启动需要几秒**（实测 2–6 秒，等待 worker 进程起来）。看到下面两行即表示就绪：
 
-<img src="./Readme_image7.png" alt="Readme_image7" style="zoom:50%;" />
+```text
+[INFO] Goin' Fast @ http://127.0.0.1:22222
+[INFO] Starting worker [xxxxx]
+```
 
-当我开了10个进程，能同时处理的数量就下降到14000左右，不知道我是的手提电脑的资源限制「Macbook14 M1」还是怎样？如果有资源的你们可以使用我的代码，或者对其进行改进后再次进行测试。平均下来也是2300/S的压力负载，对于一个管理后台我觉得还是挺好的。
+管理界面入口在 **http://127.0.0.1:22222/amis/login.html**，用上面的邮箱与口令登录即可。
+管理界面由后端自己托管，与 API 同源，不涉及 CORS。
 
-<img src="./Readme_image8.png" alt="Readme_image8" style="zoom:50%;" />
+验证服务：
+
+```bash
+curl http://127.0.0.1:22222/health
+# {"status":"ok","env":"development"}
+```
+
+登录（管理员邮箱默认为 `SAdmin@Sanic.com`，可用 `INITIAL_ADMIN_EMAIL` 覆盖）：
+
+```bash
+curl -X POST http://127.0.0.1:22222/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"SAdmin@Sanic.com","password":"<你上面 export 的口令>"}' -c cookies.txt
+
+# 带 Cookie 访问受保护接口
+curl -X POST -b cookies.txt http://127.0.0.1:22222/auth
+```
+
+> 生产环境必须通过环境变量提供 `INITIAL_ADMIN_PASSWORD`，缺失时直接退出。
+
+运行测试：
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+> **当前测试状态**：`pytest` 报 **`95 passed`，0 失败，0 错误**（收集 95 个用例，约 90 秒；加 `--cov` 约 6 分钟）。`app/` 的覆盖率为 **50%**，用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
+
+---
+
+## 配置要点
+
+全部配置通过环境变量。权威来源是 **`app/config.py`**（每个变量都在那里读取），下表直接取自该文件。
+
+> 完整参考（每个变量、类型、默认值、各环境下的行为）见 **[docs/configuration.md](docs/configuration.md)**，内容直接对照 `app/config.py` 写成。下表是常用变量摘要。
+
+| 变量 | 说明 |
+|---|---|
+| `SANIC_ENV` | `development`（默认）/ `testing` / `production` |
+| `SECRET_KEY` | 应用密钥，可选——当前不参与任何签名或加密 |
+| `JWT_PRIVATE_KEY` | RS256 签名私钥 PEM，**生产环境必需**；公钥由私钥推导 |
+| `INITIAL_ADMIN_PASSWORD` | 初始管理员口令，**生产环境必需** |
+| `INITIAL_ADMIN_EMAIL` | 管理员邮箱，默认 `SAdmin@Sanic.com` |
+| `PASSWORD_SALT` | 口令盐，可选——口令哈希用 argon2 自带随机盐 |
+| `ENABLE_API_DOCS` | 是否挂载 Swagger / ReDoc 路由，**开发环境开、生产环境关** |
+| `REQUIRE_TWO_FACTOR` | 登录后是否要求二次验证，默认关 |
+| `DATABASE_URL` | Tortoise ORM 连接串；开发默认本地 SQLite，测试默认内存 SQLite |
+| `CACHE_TYPE` | `memory` 或 `redis`；生产默认 `redis` 且不可降级 |
+| `HOST` / `PORT` | 监听地址与端口，默认 `127.0.0.1` / `22222` |
+
+---
+
+## 部署
+
+有两项设置决定 production 实例能否启动。两者都是**失败即拒绝**（方向正确，但只配了四个密钥的人常在这里意外）。
+
+**1. Redis 必须可达，除非你主动关掉。** production 下 `CACHE_TYPE` 默认 `redis`，
+Redis 不可达时应用拒绝降级为内存缓存：
+
+```
+ConfigError: production 环境 Redis 缓存不可用，拒绝降级启动
+```
+
+要么给出可达的 Redis（设 `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD`），
+要么显式设 `CACHE_TYPE=memory`——内存缓存是进程内的，重启即失效，也不能横向扩展。
+
+**2. `DATABASE_URL` 必须设置，且默认是 MySQL。** 未设置 `DATABASE_URL` 时，
+应用会从 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` 拼出 MySQL 连接串。
+而 **`aiomysql` 不在 `requirements.txt` 里**，所以 MySQL 部署会先在导入阶段报
+`ModuleNotFoundError: No module named 'aiomysql'`，除非你自己装驱动。
+
+想用本地文件快速跑一个 production：
+
+```bash
+export DATABASE_URL='sqlite:///./sanic_admin_prod.sqlite3'
+export CACHE_TYPE=memory
+export JWT_PRIVATE_KEY="$(openssl genrsa 2048 | sed ':a;N;$!ba;s/\n/\\n/g')"
+export INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'
+python main.py
+```
+
+真正的启动门禁是 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD` 两个；
+`SECRET_KEY` 与 `PASSWORD_SALT` 可以填但当前用不到。
+
+---
+
+## 文档链接
+
+| 文档 | 内容 |
+|---|---|
+| [README.md](README.md) | **完整版 README（英文）**：特性证据表、已知限制、完整文档索引 |
+| [docs/configuration.md](docs/configuration.md) | 全部环境变量说明 |
+| [docs/architecture.md](docs/architecture.md) | 架构与模块划分 |
+| [docs/release/v0.2.0-release-notes.md](docs/release/v0.2.0-release-notes.md) | v0.2.0 Release Notes（草稿）：版本范围、逐项验证方式与已知限制 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南与 PR 流程 |
+| [SECURITY.md](SECURITY.md) | 安全漏洞私下报告渠道 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
+| [CHANGELOG.md](CHANGELOG.md) | 变更日志 |
+
+> v0.2.0 的版本范围、每一项功能的验证方式与已知限制，见 [Release Notes](docs/release/v0.2.0-release-notes.md)。上面的「配置」小节是摘要，完整的环境变量参考在 `docs/configuration.md`，内容直接对照 `app/config.py` 写成。
+
+---
+
+## 贡献
+
+请先阅读 **[CONTRIBUTING.md](CONTRIBUTING.md)**：开发环境搭建、分支与 PR 流程、代码风格、测试要求。安全问题**不要**在公开 Issue 中披露，请按 [SECURITY.md](SECURITY.md) 私下报告。
+
+---
+
+## 许可证
+
+**Apache License 2.0** —— 见 [LICENSE](LICENSE)。
+
+---
+
+致谢：[Sanic](https://github.com/sanic-org/sanic)、[Tortoise ORM](https://github.com/tortoise/tortoise-orm)、[AMIS](https://github.com/baidu/amis)。

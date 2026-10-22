@@ -161,3 +161,19 @@ cython_debug/
 
 /.git
 /.vscode
+
+# Local databases, OS files, tooling artifacts (SA-OSS-B2)
+*.sqlite3
+*.sqlite3-*
+.DS_Store
+.egc/*.lock
+.egc/.egc-cache.sqlite
+.egc/*.bak*
+coverage.xml
+htmlcov/
+
+# Internal governance documents (SA-OSS-M23, CPL 2026-10-22)
+# These describe release strategy, owner decisions and security handling detail.
+# They are internal-only and are deliberately kept out of the public repository.
+docs/oss-readiness/
+docs/release/*-iteration-plan.md

@@ -1,0 +1,38 @@
+{
+  "name": "sanic-admin-frontend",
+  "version": "1.0.0",
+  "description": "现代化管理系统前端界面",
+  "private": true,
+  "scripts": {
+    "serve": "vue-cli-service serve",
+    "build": "vue-cli-service build",
+    "lint": "vue-cli-service lint",
+    "test:unit": "vue-cli-service test:unit"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "core-js": "^3.34.0",
+    "element-plus": "^2.5.0",
+    "vue": "^3.3.0",
+    "vue-router": "^4.2.0",
+    "pinia": "^2.1.0",
+    "echarts": "^5.4.0",
+    "nprogress": "^0.2.0",
+    "js-cookie": "^3.0.5"
+  },
+  "devDependencies": {
+    "@vue/cli-plugin-babel": "~5.0.0",
+    "@vue/cli-plugin-eslint": "~5.0.0",
+    "@vue/cli-plugin-router": "~5.0.0",
+    "@vue/cli-plugin-unit-jest": "~5.0.0",
+    "@vue/cli-service": "~5.0.0",
+    "@vue/eslint-config-standard": "^8.0.0",
+    "@vue/test-utils": "^2.4.0",
+    "babel-eslint": "^10.1.0",
+    "eslint": "^8.50.0",
+    "eslint-plugin-vue": "^9.17.0",
+    "sass": "^1.69.0",
+    "sass-loader": "^13.3.0",
+    "jest": "^29.7.0"
+  }
+}

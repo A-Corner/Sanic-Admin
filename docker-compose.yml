@@ -1,0 +1,86 @@
+# ============================================================================
+# Sanic-Admin 一键运行编排
+#
+# 快速开始：
+#   cp .env.example .env      # 然后把里面所有 change-me-* 换成真实值
+#   docker compose up -d --build
+#   curl http://127.0.0.1:22230/health
+#
+# 说明：
+#   * 镜像内不含任何密钥，密钥一律由 .env 经 env_file 注入。
+#   * 容器内 SANIC_ENV=production（fail-closed：缺密钥直接非零退出）。
+#   * 宿主机端口：应用 22230，redis 22232（可按需修改下方 ports）。
+# ============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sanic-admin:latest
+    container_name: sanic-admin-app
+    restart: unless-stopped
+    # 密钥与全部环境变量来自 .env；.env 不存在时 compose 会报错提示，
+    # 这比让容器以缺密钥状态启动后崩溃更容易定位问题。
+    env_file:
+      - .env
+    environment:
+      # 覆盖 .env 中的同名项，保证容器内监听地址可用且跑生产配置。
+      SANIC_ENV: production
+      HOST: 0.0.0.0
+      PORT: 22222
+      # 容器内仓库位于 /app（Dockerfile 的 WORKDIR），管理界面目录随之内置。
+      # 固定写死而不依赖 .env：本地 pip 运行的路径与此不同。
+      AMIS_DIR: /app/amis
+    ports:
+      # 宿主机 22230 -> 容器 22222
+      - "22230:22222"
+    volumes:
+      # sqlite 数据库与上传文件持久化，避免容器重建丢数据
+      - app-data:/app/data
+      - app-uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:22222/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 可选 Redis：仅当 .env 里 CACHE_TYPE=redis 时需要。
+  #   docker compose --profile redis up -d
+  redis:
+    image: redis:7-alpine
+    container_name: sanic-admin-redis
+    restart: unless-stopped
+    profiles:
+      - redis
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      # 宿主机 22232 -> 容器 6379
+      - "22232:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  app-data:
+  app-uploads:
+  redis-data:

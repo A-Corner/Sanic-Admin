@@ -1,0 +1,72 @@
+# ============================================================================
+# Docker 构建上下文排除规则
+#
+# 目的：缩小构建上下文、避免把密钥和无关文件打进镜像。
+# 重点：.env 必须被排除——镜像内不得含任何密钥。
+# ============================================================================
+
+# 密钥与本地环境文件（绝对不能进镜像）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+secrets.*
+
+# 版本控制与 Git
+.git
+.gitignore
+.github
+.cursor
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.env.local
+
+# 本地数据库与运行时产物
+*.sqlite3
+*.sqlite3-journal
+*.db
+logs/
+uploads/
+data/
+
+# 前端 / amis 构建产物与依赖
+frontend/node_modules/
+frontend/dist/
+amis/node_modules/
+amis/dist/
+
+# 文档与图片资源（不参与运行时）
+*.md
+!README.md
+Readme_image*.png
+Readme_image*.jpeg
+LICENSE
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+docs/
+.spec-workflow/
+upgrade_schema.md
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

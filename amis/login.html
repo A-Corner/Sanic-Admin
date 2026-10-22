@@ -1,20 +1,20 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 
 <head>
     <meta charset="UTF-8">
-    <title>{% block title %}Login{% endblock %}</title>
-    <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/icons/favicon.ico') }}">
+    <title>登录 - Sanic Admin</title>
+    <link rel="icon" type="image/png" href="images/icons/favicon.ico">
     <link rel="stylesheet" type="text/css"
-        href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}">
+        href="vendor/bootstrap/css/bootstrap.min.css">
     <link rel="stylesheet" type="text/css"
-        href="{{ url_for('static', filename='fonts/font-awesome-4.7.0/css/font-awesome.min.css') }}">
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='vendor/animate/animate.css') }}">
+        href="fonts/font-awesome-4.7.0/css/font-awesome.min.css">
+    <link rel="stylesheet" type="text/css" href="vendor/animate/animate.css">
     <link rel="stylesheet" type="text/css"
-        href="{{ url_for('static', filename='vendor/css-hamburgers/hamburgers.min.css') }}">
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='vendor/select2/select2.min.css') }}">
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='css/util.css') }}">
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='css/main.css') }}">
+        href="vendor/css-hamburgers/hamburgers.min.css">
+    <link rel="stylesheet" type="text/css" href="vendor/select2/select2.min.css">
+    <link rel="stylesheet" type="text/css" href="css/util.css">
+    <link rel="stylesheet" type="text/css" href="css/main.css">
 </head>
 
 <body>
@@ -22,10 +22,10 @@
         <div class="container-login100">
             <div class="wrap-login100">
                 <div class="login100-pic js-tilt" data-tilt>
-                    <img src="{{ url_for('static', filename='images/img-01.png') }}" alt="IMG">
+                    <img src="images/img-01.png" alt="IMG">
                 </div>
 
-                <form class="login100-form validate-form" method="POST">
+                <form class="login100-form validate-form" id="login-form" novalidate>
                     <span class="login100-form-title">
                         用户 - 登录
                     </span>
@@ -46,8 +46,10 @@
                         </span>
                     </div>
 
+                    <div id="login-error" role="alert" class="text-center" style="color:#c80000;min-height:1.5em;margin-top:8px;display:none"></div>
+
                     <div class="container-login100-form-btn">
-                        <button class="login100-form-btn">
+                        <button type="submit" class="login100-form-btn">
                             登录
                         </button>
                     </div>
@@ -71,60 +73,67 @@
             </div>
         </div>
     </div>
-    <script src="{{ url_for('static', filename='vendor/jquery/jquery-3.2.1.min.js') }}"></script>
-    <script src="{{ url_for('static', filename='vendor/bootstrap/js/popper.js') }}"></script>
-    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.min.js') }}"></script>
-    <script src="{{ url_for('static', filename='vendor/select2/select2.min.js') }}"></script>
-    <script src="{{ url_for('static', filename='vendor/tilt/tilt.jquery.min.js') }}"></script>
+    <script src="vendor/jquery/jquery-3.2.1.min.js"></script>
+    <script src="vendor/bootstrap/js/popper.js"></script>
+    <script src="vendor/bootstrap/js/bootstrap.min.js"></script>
+    <script src="vendor/select2/select2.min.js"></script>
+    <script src="vendor/tilt/tilt.jquery.min.js"></script>
     <script>
         $('.js-tilt').tilt({
             scale: 1.1
         })
     </script>
     <script>
-        // 获取表单元素
-        const emailInput = document.querySelector('input[name="email"]');
-        const passwordInput = document.querySelector('input[name="pass"]');
-        const loginButton = document.querySelector('.login100-form-btn');
-        // 当点击登录按钮时触发的函数
-        loginButton.addEventListener('click', async () => {
-            // 阻止表单默认提交行为
+        // 同源托管：页面与 API 同源，相对路径即可，无需 CORS 配置。
+        // 后端把本目录挂在 /amis 下，静态资源用 './'，API 用 '/' 起的绝对路径。
+        const API_BASE = window.SANIC_API_BASE || '';
+        const form = document.getElementById('login-form');
+        const emailInput = form.querySelector('input[name="email"]');
+        const passwordInput = form.querySelector('input[name="pass"]');
+        const errorBox = document.getElementById('login-error');
+        const submitBtn = form.querySelector('button[type="submit"]');
+
+        function showError(msg) {
+            errorBox.textContent = msg;
+            errorBox.style.display = 'block';
+        }
+
+        form.addEventListener('submit', async (event) => {
             event.preventDefault();
-            // 创建要发送的数据对象
-            const auth_data = 'Basic ' + btoa(emailInput.value + ":" + passwordInput.value);
-            //alert(auth_data)
-            // 发送 POST 请求到后端 API
+            errorBox.style.display = 'none';
+            if (!emailInput.value.trim() || !passwordInput.value) {
+                showError('请输入邮箱和密码');
+                return;
+            }
+            submitBtn.disabled = true;
             try {
-                const response = await fetch('http://127.0.0.1:22222/auth/login', {
+                const response = await fetch(API_BASE + '/auth/login', {
                     method: 'POST',
-                    headers: {
-                        //'Content-Type': 'application/json', // 指定请求的数据格式为 JSON
-                        'Authorization': auth_data
-                    },
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: emailInput.value.trim(), password: passwordInput.value })
                 });
-                //alert(response.status)
-                if (response.status === 200) {
-                    // 登录成功，获取返回的 JSON 数据和用户信息
-                    const data = await response.json();
-                    alert('登录成功');
-                    // 将 token 存储为 Cookie
-                    document.cookie = `token=${data.token}; path=/`; // 设置 Cookie，其中 data.token 是您从服务器端获得的 token
-                    // 在登录成功后重定向到目标页面
-                    window.location.href = 'http://127.0.0.1:22222/index'; // 修改为您的目标页面 URL
-                } else {
-                    // 登录失败，您可以在此处处理登录失败的情况
-                    console.error('登录失败');
-                    alert('登录失败');
+                if (response.ok) {
+                    // 会话由后端通过 HttpOnly 的 session Cookie 下发，前端不保存口令或令牌
+                    window.location.href = './index.html';
+                    return;
                 }
+                let msg = '登录失败（HTTP ' + response.status + '）';
+                try {
+                    const body = await response.json();
+                    if (body && (body.message || body.msg)) msg = body.message || body.msg;
+                } catch (e) { /* 非 JSON 响应，使用默认提示 */ }
+                showError(msg);
             } catch (error) {
-                // 处理请求错误
                 console.error('请求错误', error);
-                alert.error('请求错误', error);
+                showError('无法连接后端服务，请确认服务已启动');
+            } finally {
+                submitBtn.disabled = false;
             }
         });
     </script>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="js/main.js"></script>
 </body>
 
 </html>
