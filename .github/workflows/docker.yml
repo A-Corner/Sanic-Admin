@@ -134,10 +134,22 @@ jobs:
           chmod 600 "$KEYDIR"/*
           echo "已生成测试用合成密钥（随机值 + 现场生成的 RSA 私钥），不写入仓库。"
 
-      - name: Build image
+      - name: Prepare compose override for CI
         run: |
           set -euo pipefail
-          ${{ steps.compose.outputs.cli }} build "$APP_SERVICE"
+          # compose 的 `environment:` 块优先级高于 `env_file:`，而 lane A 的
+          # docker-compose.yml 在 environment 里写死了 SANIC_ENV: production。
+          # 因此仅靠 .env 无法把环境切成 development，必须额外提供一个 override
+          # 文件（compose 多文件合并时后者覆盖前者）。
+          # 该 override 只改运行时环境变量，不影响 build；
+          # 后续所有 compose 调用统一使用同一组 -f 文件，保证语义一致。
+          cat > docker-compose.ci.yml <<'YAML'
+          services:
+            app:
+              environment:
+                SANIC_ENV: development
+          YAML
+          echo "已生成 docker-compose.ci.yml（SANIC_ENV=development 覆盖）"
 
       - name: Write CI .env (synthetic keys only)
         run: |
@@ -167,12 +179,23 @@ jobs:
           echo "--- .env 键名（值已隐去）---"
           sed -E 's/=.*/=<redacted>/' .env
 
+      - name: Build image
+        run: |
+          set -euo pipefail
+          # 注意：compose 会在解析 env_file 时要求 .env 已存在，
+          # 因此本步骤必须排在 "Write CI .env" 之后。
+          ${{ steps.compose.outputs.cli }} -f docker-compose.yml -f docker-compose.ci.yml build "$APP_SERVICE"
+
+          echo "--- 生效的 SANIC_ENV（compose 合并 environment 后）---"
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml config \
+            | grep -E 'SANIC_ENV|HOST:|PORT:' || true
+
       - name: Resolve published host port from compose
         id: port
         run: |
           set -euo pipefail
           # 从 compose 实际定义读出宿主机映射端口，避免把 22230 写死在 job 里。
-          PUBLISHED="$(${{ steps.compose.outputs.cli }} config --format json \
+          PUBLISHED="$(${{ steps.compose.outputs.cli }} -f docker-compose.yml -f docker-compose.ci.yml config --format json \
             | python3 -c '
           import json, sys
           cfg = json.load(sys.stdin)
@@ -183,7 +206,7 @@ jobs:
           ')"
           if [ -z "$PUBLISHED" ]; then
             echo "::error::无法从 compose 解析出宿主机映射端口"
-            ${{ steps.compose.outputs.cli }} config
+            ${{ steps.compose.outputs.cli }} -f docker-compose.yml -f docker-compose.ci.yml config
             exit 1
           fi
           echo "port=$PUBLISHED" >> "$GITHUB_OUTPUT"
@@ -194,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           CLI="${{ steps.compose.outputs.cli }}"
-          $CLI up -d --no-deps "$APP_SERVICE"
+          $CLI -f docker-compose.yml -f docker-compose.ci.yml up -d --no-deps "$APP_SERVICE"
 
           PORT="${{ steps.port.outputs.port }}"
           BASE="http://127.0.0.1:${PORT}"
@@ -218,9 +241,9 @@ jobs:
           if [ "$READY" != "1" ]; then
             echo "::error::${BASE}/health 在 60 秒内未返回 200，打印容器日志后失败"
             echo "--- docker compose logs ---"
-            $CLI logs --no-color || true
+            $CLI -f docker-compose.yml -f docker-compose.ci.yml logs --no-color || true
             echo "--- docker compose ps ---"
-            $CLI ps -a || true
+            $CLI -f docker-compose.yml -f docker-compose.ci.yml ps -a || true
             exit 1
           fi
 
@@ -261,7 +284,7 @@ jobs:
           cat /tmp/login.json; echo
           if [ "$CODE" != "200" ]; then
             echo "::error::登录期望 200，实际 ${CODE}"
-            ${{ steps.compose.outputs.cli }} logs --no-color --tail 100 || true
+            ${{ steps.compose.outputs.cli }} -f docker-compose.yml -f docker-compose.ci.yml logs --no-color --tail 100 || true
             exit 1
           fi
           grep -q '"status"[[:space:]]*:[[:space:]]*0' /tmp/login.json \
@@ -277,46 +300,57 @@ jobs:
           # 用一套不同的环境变量集合启动：SANIC_ENV=production 且移除 SECRET_KEY。
           # production 下缺少必需密钥必须让进程非零退出（app/config.py 的
           # _env_secret 对 production 抛 ConfigError，main.py 转成 sys.exit）。
-          mkdir -p failclosed
+          #
+          # 这里不复用主 compose 文件，而是另起一份自包含的 compose：
+          #   * 直接引用上面 build 出来的镜像，避免重复 build；
+          #   * 不发布宿主端口，避免与正在运行的 app 容器抢占 22230；
+          #   * container_name / project 名与主服务隔离，日志互不污染。
           KEYDIR="${{ steps.keys.outputs.KEYDIR }}"
+          IMAGE="$($CLI -f docker-compose.yml -f docker-compose.ci.yml config --images | head -1)"
+          if [ -z "$IMAGE" ]; then
+            echo "::error::无法确定构建出的镜像名"
+            exit 1
+          fi
+          echo "fail-closed 使用镜像：${IMAGE}"
+
+          mkdir -p failclosed
           {
-            echo "SANIC_ENV=production"
-            echo "HOST=0.0.0.0"
-            echo "PORT=${APP_PORT_INTERNAL}"
-            # 注意：此处刻意不写 SECRET_KEY
             echo "PASSWORD_SALT='$(cat "$KEYDIR/password_salt")'"
             echo "JWT_PRIVATE_KEY='$(cat "$KEYDIR/jwt_private.pem")'"
             echo "INITIAL_ADMIN_PASSWORD='${CI_ADMIN_PASSWORD}'"
             echo "INITIAL_ADMIN_EMAIL='${CI_ADMIN_EMAIL}'"
-            echo "DATABASE_URL=sqlite:///app/data/sanic_admin_failclosed.sqlite3"
-            echo "CACHE_TYPE=memory"
-            echo "CORS_ALLOWED_ORIGINS="
           } > failclosed/.env
 
-          # 覆盖 compose 的 env_file 与 environment，使容器拿到上面这组变量。
-          cat > failclosed/compose.override.yml <<'YAML'
+          cat > failclosed/docker-compose.yml <<YAML
           services:
             app:
+              image: ${IMAGE}
+              container_name: sanic-admin-failclosed
+              restart: "no"
               env_file:
                 - .env
               environment:
                 SANIC_ENV: production
                 HOST: "0.0.0.0"
-                PORT: "22222"
+                PORT: "${APP_PORT_INTERNAL}"
+                # 刻意置空：production 下缺 SECRET_KEY 必须 fail-closed。
+                # 空字符串在 app/config.py 的 _env_secret 中按"未提供"处理。
                 SECRET_KEY: ""
+                DATABASE_URL: "sqlite:///app/data/sanic_admin_failclosed.sqlite3"
+                CACHE_TYPE: "memory"
+                CORS_ALLOWED_ORIGINS: ""
           YAML
 
           echo "--- fail-closed 启动（预期非零退出）---"
           set +e
-          $CLI -f docker-compose.yml -f failclosed/compose.override.yml \
-               up --no-deps --abort-on-container-exit --exit-code-from "$APP_SERVICE" \
-               "$APP_SERVICE"
+          $CLI -p ci-failclosed -f failclosed/docker-compose.yml \
+               up --abort-on-container-exit --exit-code-from app app
           RC=$?
           set -e
           echo "容器退出码 = ${RC}"
 
           echo "--- fail-closed 容器日志 ---"
-          $CLI -f docker-compose.yml -f failclosed/compose.override.yml logs --no-color || true
+          $CLI -p ci-failclosed -f failclosed/docker-compose.yml logs --no-color || true
 
           # 稳健断言：只要求"非零退出"。
           # 不对退出原因字符串做断言——m23 基线上 production 即使密钥齐备也会因
@@ -338,13 +372,18 @@ jobs:
           set -uo pipefail
           CLI="${{ steps.compose.outputs.cli }}"
           echo "--- docker compose logs (app) ---"
-          $CLI logs --no-color || true
+          $CLI -f docker-compose.yml -f docker-compose.ci.yml logs --no-color || true
           echo "--- docker compose ps ---"
-          $CLI ps -a || true
-          $CLI down -v --remove-orphans || true
+          $CLI -f docker-compose.yml -f docker-compose.ci.yml ps -a || true
+          $CLI -f docker-compose.yml -f docker-compose.ci.yml down -v --remove-orphans || true
+          # fail-closed 的独立 project 也要清理
+          if [ -f failclosed/docker-compose.yml ]; then
+            $CLI -p ci-failclosed -f failclosed/docker-compose.yml down -v --remove-orphans || true
+          fi
           if [ -n "${{ steps.keys.outputs.KEYDIR }}" ]; then
             rm -rf "${{ steps.keys.outputs.KEYDIR }}"
           fi
           rm -f .env
+          rm -f docker-compose.ci.yml
           rm -rf failclosed
           echo "已清理容器、卷与临时密钥。"
