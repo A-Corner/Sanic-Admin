@@ -44,9 +44,10 @@ name: Sanic-Admin Docker Acceptance
 
 on:
   push:
-    branches: [ main, master, develop, sa-oss/m23 ]
+    branches: [ master ]
+    tags: [ 'v*' ]
   pull_request:
-    branches: [ main, master, develop, sa-oss/m23 ]
+    branches: [ master ]
   workflow_dispatch:
 
 jobs:
