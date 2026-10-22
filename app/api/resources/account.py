@@ -116,6 +116,21 @@ async def _invalidate_sessions(account: Account) -> int:
     ).update(disabled=True)
 
 
+async def _may_modify_account(actor: Account, target: Account) -> bool:
+    """
+    ``actor`` 是否有权改动 ``target`` 账户。
+
+    复用角色资源的**统一管理员判定**（``is_admin`` 标志 **或** 持有授予全部
+    权限的角色都算受保护的管理员），确保角色入口与账户入口口径一致。
+
+    这里必须在函数体内延迟 import ``app.api.resources.role``：该模块在导入时
+    会执行 ``v1_bp.add_route(...)``，模块级 import 会改变路由注册顺序。
+    """
+    from app.api.resources.role import actor_may_modify
+
+    return await actor_may_modify(actor, target)
+
+
 class AccountResource(HTTPMethodView):
     """
     账户管理资源（管理他人账户，需要 account 资源权限）。
@@ -207,8 +222,9 @@ class AccountResource(HTTPMethodView):
             return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
                                      status_code=404)
 
-        # 非 admin 不能修改 admin 账户
-        if account.is_admin and not actor.is_admin:
+        # 非 admin 不能修改受保护的管理员账户
+        # （is_admin 标志 或 持有全权限角色，两种形态都算）
+        if not await _may_modify_account(actor, account):
             return APIResponse.error(message="无权修改管理员账户", error_code=APIError.FORBIDDEN,
                                      status_code=403)
 
@@ -261,7 +277,7 @@ class AccountResource(HTTPMethodView):
             return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
                                      status_code=404)
 
-        if account.is_admin and not actor.is_admin:
+        if not await _may_modify_account(actor, account):
             return APIResponse.error(message="无权删除管理员账户", error_code=APIError.FORBIDDEN,
                                      status_code=403)
 
@@ -441,18 +457,29 @@ class MyAccountPasswordResource(HTTPMethodView):
 # 注册路由
 # 显式给出路由名：Sanic 23.6 禁止同名路由，同一个视图注册到多个 URI 时
 # 会得到相同的隐式名，必须逐条命名。
+#
+# **必须用 ``v1_bp.route(...)`` 而不是 ``v1_bp.add_route(...)``**：
+# ``Blueprint.add_route`` 遇到 ``HTTPMethodView`` 处理器时，会**忽略传入的
+# ``methods`` 参数**，改成"按视图类实现了哪些方法来算路由支持哪些方法"。
+# 于是 ``add_route(account_resource.as_view(), "/accounts", methods=["GET","POST"])``
+# 实际上会把 ``/accounts`` 注册成 GET/POST/PUT/DELETE 四种方法全支持，
+# 而 ``AccountResource.put`` 的签名要求 ``account_id`` —— 命中 ``PUT /accounts``
+# 时缺参数 → TypeError → **500**（发布版主路径不允许出现 500）。
+#
+# ``Blueprint.route(uri, methods=[...])`` 则原样使用传入的 methods，
+# 方法不匹配时框架直接返回 **405 Method Not Allowed**。
 account_resource = AccountResource()
 account_password_resource = AccountPasswordResource()
 account_me_resource = AccountMeResource()
 my_account_password_resource = MyAccountPasswordResource()
 
-v1_bp.add_route(account_resource.as_view(), "/accounts/<account_id:int>",
-                methods=["GET", "PUT", "DELETE"], name="account_detail")
-v1_bp.add_route(account_resource.as_view(), "/accounts", methods=["GET", "POST"],
-                name="account_list")
-v1_bp.add_route(account_password_resource.as_view(), "/accounts/<account_id:int>/password",
-                methods=["PUT"], name="account_password")
-v1_bp.add_route(account_me_resource.as_view(), "/accounts/me", methods=["GET", "PUT"],
-                name="account_me")
-v1_bp.add_route(my_account_password_resource.as_view(), "/accounts/me/password",
-                methods=["PUT"], name="account_me_password")
+v1_bp.route("/accounts/<account_id:int>", methods=["GET", "PUT", "DELETE"],
+            name="account_detail")(account_resource.as_view())
+v1_bp.route("/accounts", methods=["GET", "POST"], name="account_list")(
+    account_resource.as_view())
+v1_bp.route("/accounts/<account_id:int>/password", methods=["PUT"],
+            name="account_password")(account_password_resource.as_view())
+v1_bp.route("/accounts/me", methods=["GET", "PUT"], name="account_me")(
+    account_me_resource.as_view())
+v1_bp.route("/accounts/me/password", methods=["PUT"], name="account_me_password")(
+    my_account_password_resource.as_view())
