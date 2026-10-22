@@ -8,6 +8,7 @@
 from sanic.request import Request
 from sanic.views import HTTPMethodView
 from app.api import APIResponse, v1_bp, APIError
+from app.api.resources.route_methods import register_view
 from app.models import OperationLog
 from app.auth.authorization import requires_permission
 from typing import Dict, Any, List, Optional, Tuple
@@ -856,6 +857,6 @@ performance_resource = PerformanceResource()
 exceptions_resource = ExceptionsResource()
 alerts_resource = AlertsResource()
 
-v1_bp.add_route(performance_resource.get, "/dashboard/performance", methods=["GET"])
-v1_bp.add_route(exceptions_resource.get, "/dashboard/exceptions", methods=["GET"])
-v1_bp.add_route(alerts_resource.get, "/dashboard/alerts", methods=["GET"]) 
+register_view(v1_bp, "/dashboard/performance", performance_resource, ["GET"], "dashboard_performance")
+register_view(v1_bp, "/dashboard/exceptions", exceptions_resource, ["GET"], "dashboard_exceptions")
+register_view(v1_bp, "/dashboard/alerts", alerts_resource, ["GET"], "dashboard_alerts") 

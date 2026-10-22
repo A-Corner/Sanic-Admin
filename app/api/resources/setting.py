@@ -297,7 +297,7 @@ class SettingResource(HTTPMethodView):
         # 客户端传的字符串 "false" 存成 True。
         is_public = _parse_bool(data.get("is_public", False))
         if is_public is None:
-            return _bad_request("is_public 必须是布尔值或 'true'/'false' 字符串")
+            return _bad_request("is_public 必须是布尔值，或 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' 字符串（大小写不敏感）")
 
         # key 在模型上是唯一列，软删除的记录**仍然占用** key。
         # 因此这里不过滤 deleted：
@@ -392,7 +392,7 @@ class SettingItemResource(HTTPMethodView):
             # 显式解析：bool("false") 是 True，会把字符串 "false" 存成 True
             is_public = _parse_bool(data["is_public"])
             if is_public is None:
-                return _bad_request("is_public 必须是布尔值或 'true'/'false' 字符串")
+                return _bad_request("is_public 必须是布尔值，或 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' 字符串（大小写不敏感）")
             setting.is_public = is_public
         await setting.save()
 
@@ -458,7 +458,7 @@ class SettingByKeyResource(HTTPMethodView):
             # 显式解析：bool("false") 是 True，会把字符串 "false" 存成 True
             is_public = _parse_bool(data["is_public"])
             if is_public is None:
-                return _bad_request("is_public 必须是布尔值或 'true'/'false' 字符串")
+                return _bad_request("is_public 必须是布尔值，或 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' 字符串（大小写不敏感）")
             setting.is_public = is_public
         await setting.save()
 
