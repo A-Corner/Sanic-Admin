@@ -613,11 +613,13 @@ Sanic-Admin/
 │
 ├── tests/                        # ── 测试 ────────────────────────────────
 │   ├── conftest.py               # app / db / client fixtures
-│   ├── utils/{data_generator,helpers}.py
-│   ├── test_auth.py / test_account_api.py / test_cache.py
-│   ├── test_db_optimizer.py / test_performance.py / test_integration.py
-│   ├── test_docs/{test_decorators,test_swagger,test_openapi}.py
-│   └── generate_coverage_report.py
+│   ├── test_auth.py              # 登录 / 注销 / 会话 / 两步验证
+│   ├── test_authorization.py     # RBAC：角色 / 权限 / 装饰器
+│   ├── test_account_crud.py      # 账户 CRUD
+│   ├── test_role_crud.py         # 角色 CRUD
+│   ├── test_upload_security.py   # 上传路径与下载鉴权
+│   ├── test_sql_readonly.py      # 只读 SQL 校验
+│   └── test_production_failclosed.py  # production 缺密钥拒绝启动
 │
 ├── .github/workflows/ci.yml      # ruff（E9,F63,F7,F82）+ pytest --cov=app
 ├── docs/                         # ★ 本目录：configuration.md / architecture.md
@@ -753,16 +755,26 @@ v1_bp.add_route(article_resource.as_view(), "/articles/<article_id:int>",
 | 文档注解 | 在函数上加 `@api_tags` / `@api_summary` / `@api_response`，OpenAPI 规范会反射收集 |
 | 异常 | 抛 `app/services/exceptions.py` 里的业务异常，异常处理器会自动转成统一 JSON |
 
-### 5.3 需要上游配合的事项
+### 5.3 M1 已解决的编写障碍
 
-- **当前基线的 `app.api` 包无法 import**（见 §1.3 的 `BlueprintGroup.add_blueprint` 问题），
-  因此新增的 API 资源**不会生效**。必须等 `sa-oss/m1` 合并。
-- `app/api/routes.py` 与 `app/api/example.py` 是死代码，M1 已删除，合并后请勿基于它们扩展。
-- `app/api/resources/database.py` 与 `compression.py` 依赖**不存在的** `app.utils.validator`
-  （`app/utils/` 目录在仓库中不存在，且全部 git 历史中从未有过）。
-  这两个模块当前无法 import，**不要参照它们的写法**；参照 `role.py` / `account.py`。
-- `app/api/resources/dashboard.py` 与 `dashboard_user.py` 从 `app.models` 导入 `File`，
-  但 `File` 模型不存在（模型实际叫 `UploadedFile`）——这两个模块同样当前无法 import。
+以下四项在 M1 之前会让新增的 API 资源**无法生效**，现已全部解除（**【已实测】**
+`import app.api` 成功，`create_app('testing')` 路由表含 39 条 `/api/v1` path）：
+
+- `app.api` 包的 `BlueprintGroup.add_blueprint` 导入失败（见 §1.3）——已改为
+  `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`。
+- `app/api/resources/database.py` 与 `compression.py` 原先依赖**不存在的**
+  `app.utils.validator`（`app/utils/` 目录在仓库中不存在，全部 git 历史中也从未有过）——
+  现已改用 `app/api/responses.py` 的 `APIResponse` / `APIError`，并各自实现
+  `_bad_request()` 做参数校验（`database.py:34`、`compression.py:26`）。
+- `app/api/resources/database.py` 与 `compression.py` 原先 `from app.api.base import response`，
+  而 `response` 在 `app/api/base.py` 中**不存在**（只有 `json`）——现已改用 `app/api/responses.py`。
+- `app/api/resources/dashboard.py` 与 `dashboard_user.py` 原先 `from app.models import File`，
+  而 `File` 模型不存在（模型实际叫 `UploadedFile`）——现已改正。
+
+**注意**：这四个模块在 M1 之前是**重写的**，写法与 `role.py` / `account.py` 差别较大
+（前者用 `HTTPMethodView` + 自建 `_bad_request()`，后者用 `app/api/validators.py` 的
+`validate_request` / `validate_path_param` 装饰器）。**新增资源请参照 `role.py` / `account.py`**，
+不要照抄 `database.py` / `compression.py` 的手工校验写法。
 
 ---
 
@@ -770,19 +782,20 @@ v1_bp.add_route(article_resource.as_view(), "/articles/<article_id:int>",
 
 ### 6.1 AMIS 页面 JSON 放在哪
 
-**目录：`amis/pages/`**（**【读码确认】** 实际文件清单）
+**目录：`amis/pages/`**（**【读码确认】** 实际文件清单，M1 后共 6 个）
 
 | 文件 | 用途 |
 |---|---|
 | `site.json` | 站点布局与菜单树；通过 `schemaApi` 引用各页面 JSON |
-| `crud-list.json` | 列表页（用户管理） |
-| `crud-new.json` | 新建页 |
-| `crud-view.json` | 详情页 |
-| `crud-edit.json` | 编辑页 |
-| `crud-advance.json` | 高级 CRUD 示例 |
-| `dash_board.json` | 仪表盘 |
-| `login.json` | 登录页 |
-| `form-basic.json` / `editor.json` / `wizard.json` / `console.json` | 表单 / 编辑器 / 向导 / 控制台示例 |
+| `dash_board.json` | 仪表盘（`initApi` → `/api/v1/dashboard/summary`） |
+| `account-list.json` | 账户列表（CRUD，`/api/v1/accounts`） |
+| `role-list.json` | 角色列表（CRUD，`/api/v1/roles`） |
+| `log-list.json` | 操作日志列表（`/api/v1/logs`） |
+| `setting-list.json` | 系统设置列表（`/api/v1/settings`） |
+
+M1 之前的 `crud-list.json` / `crud-new.json` / `crud-view.json` / `crud-edit.json` /
+`crud-advance.json` / `login.json` / `form-basic.json` / `editor.json` / `wizard.json` /
+`console.json` 已在 M1 提交 `0f05fba` 中**删除**——那些是旧的演示页，菜单已对齐到真实 API。
 
 ### 6.2 路由怎么挂
 
@@ -805,76 +818,91 @@ if AMIS_DIR and os.path.isdir(AMIS_DIR):
 环境变量覆盖；`/amis` 挂载在 `app/__init__.py:62-67`。实测 `GET /amis/` 与
 `GET /amis/login.html` 均返回 200 并给出登录页 HTML，`GET /amis`（不带尾斜杠）返回 404。
 
-**【读码确认】** `amis/pages/site.json` 的菜单节点用 `schemaApi` 引用页面 JSON：
+**【读码确认】** `amis/pages/site.json` 的菜单节点用 `schemaApi` 引用页面 JSON
+（当前内容，`amis/pages/site.json:22-30`）：
 
 ```json
 {
-  "label": "用户管理",
-  "url": "/user",
-  "redirect": "/user/crud/list",
+  "label": "账户管理",
+  "url": "/account",
+  "redirect": "/account/list",
+  "icon": "fa fa-user",
   "children": [
     {
-      "label": "详细信息",
-      "url": "/user/crud/list",
-      "schemaApi": "get:./static/pages/crud-list.json"
-    },
-    {
-      "label": "新增",
-      "url": "/user/crud/new",
-      "schemaApi": "get:./static/pages/crud-new.json"
+      "label": "账户列表",
+      "url": "/account/list",
+      "icon": "fa fa-list",
+      "schemaApi": "get:pages/account-list.json?v1"
     }
   ]
 }
 ```
 
 `schemaApi` 的值是 `get:<URL>`，**相对于 AMIS 开发服务器的静态根**。
-`site.json` 位于 `amis/pages/`，但引用路径写的是 `./static/pages/xxx.json`——
-说明页面 JSON 期望被放在**服务器的 `static/` 目录**下，而不是 `amis/pages/`。
+`site.json` 位于 `amis/pages/`，引用路径写的是 `pages/account-list.json`——
+即**同目录相对路径**，与 `amis/server.js` 把 `pages/` 直接作为静态根一致
+（`amis/server.js:14` 的 `ROOT = __dirname`，静态根就是 `amis/` 目录本身）。
 
 **【已实测】** M1 已把 `amis/server.js` 换成零依赖 Node 服务器，把 `pages/` 直接作为静态根，
 并把页面引用改成相对路径——`site.json` 现在写的是 `get:pages/dash_board.json?v1` 这类路径
-（不再是 `./static/pages/xxx.json`），`amis/index.html` 与 `amis/login.html` 也已就位。
-列表页文件按实际资源改名（如 `crud-list.json` → `account-list.json`）。
-> **M1 合并后本节必须重新核实。**
+（不再是旧的 `./static/pages/xxx.json`），`amis/index.html` 与 `amis/login.html` 也已就位。
+列表页文件按实际资源改名（如 `crud-list.json` → `account-list.json`，
+后者在 M1 提交 `0f05fba` 中随旧 `crud-*` 系列一并删除）。
+实测 `GET /amis/pages/site.json` 与 `GET /amis/pages/dash_board.json` 均返回 200。
 
 ### 6.3 AMIS 的 API 地址
 
-**【读码确认】** `amis/pages/crud-list.json` 当前写的是**绝对地址 + 硬编码后端端口**：
+**【已实测】** M1 已把页面 JSON 里的 `api.url` 全部改成**相对路径**，直接指向后端真实路由
+（`amis/pages/account-list.json:8`、`role-list.json:8`、`log-list.json:8`、`setting-list.json:8`、
+`dash_board.json:7`）：
+
+```json
+"api": { "method": "get", "url": "/api/v1/accounts", "dataType": "json", "adaptor": "..." }
+```
+
+M1 之前的旧写法是**绝对地址 + 硬编码后端端口**：
 
 ```json
 "api": { "method": "get", "url": "http://127.0.0.1:22222/refapi/account/0" }
 ```
 
-问题有两点：
+它有两个问题：硬编码 `127.0.0.1:22222`（后端端口一变所有页面 JSON 都要改）；
+`/refapi/*` 这个路径**后端并不存在**——它只是开发服务器的反代前缀，后端真实的账户列表路径是
+`/api/v1/accounts`（`app/api/resources/account.py:476`）。M1 已把这两点一并消除。
 
-1. 硬编码 `127.0.0.1:22222`——后端端口一变所有页面 JSON 都要改。
-2. `/refapi/*` 这个路径**后端并不存在**——它是**开发服务器的反代前缀**。
-   后端实际的账户列表路径是 `/api/v1/accounts`（`app/api/resources/account.py`）。
+**【已实测】** `amis/server.js:15` 的 `PROXY_PREFIXES` 仍保留 `/refapi`：
 
-**【已实测】** `amis/server.js` 把 `/auth`、`/capt`、`/api`、`/health`、`/refapi`、`/account`
-这些前缀**反向代理到后端**，并删除 `Origin` 头做同源转发（注释写明「同源转发，避免后端按
-Origin 判定跨域」）。因此 `/refapi/*` 是代理前缀而非后端真实路径，前端 JSON 里的 `api.url`
-用相对路径 + 代理前缀即可，不必写绝对地址。
+```js
+const PROXY_PREFIXES = ['/auth', '/capt', '/api', '/health', '/refapi', '/account'];
+```
 
-**注意它不代理 `/uploads`**：后端已移除上传目录的静态挂载，文件下载统一走需鉴权的
-`GET /api/v1/files/<id>/download`。
+`amis/server.js` 把这些前缀**反向代理到后端**，并删除 `Origin` 头做同源转发
+（`amis/server.js:30` 注释写明「同源转发，避免后端按 Origin 判定跨域」）。
+`/refapi` 保留下来是为了兼容旧的页面 JSON 写法；当前页面 JSON 已不再使用它。
+
+**注意它不代理 `/uploads`**（`amis/server.js:5-6` 注释明确说明）：后端已移除上传目录的
+静态挂载，文件下载统一走需鉴权的 `GET /api/v1/files/<id>/download`。
 
 ### 6.4 开发服务器（可选）
 
 **这是可选的开发辅助，不是正式接入方式。** 正式方式是 §6.2 的后端同源托管
 （`http://127.0.0.1:22222/amis/login.html`）。Node 服务器只在「后端还没接好静态托管」时用于本地预览界面。
 
-**【已实测】** `amis/server.js` 现在是**零依赖**的 Node 服务器（只用 Node 内置模块）：
+**【已实测】** `amis/server.js` 现在是**零依赖**的 Node 服务器（只用 Node 内置模块
+`http` / `fs` / `path`），M1 之前的 Express 版本已移除：
 
 ```js
-const PORT = Number(process.env.PORT || 3000);
-const target = new URL(process.env.API_TARGET || 'http://127.0.0.1:22222');
-const PROXY_PREFIXES = ['/auth', '/capt', '/api', '/health', '/refapi', '/account'];
+const PORT = Number(process.env.PORT || 3000);                              // :12
+const target = new URL(process.env.API_TARGET || 'http://127.0.0.1:22222'); // :13
+const ROOT = __dirname;                                                     // :14
+const PROXY_PREFIXES = ['/auth', '/capt', '/api', '/health', '/refapi', '/account'];  // :15
+const DENY = new Set(['server.js', 'package.json', 'package-lock.json', 'nodemon.json', 'README.md']);  // :16
 ```
 
-它静态托管 `login.html` / `index.html` / `pages` / `sdk`，把 `PROXY_PREFIXES` 里的路径
-反代到后端，并**拒绝**直接提供 `server.js`、`package.json`、`package-lock.json`、
-`nodemon.json`、`README.md` 这几个开发文件。
+它静态托管 `login.html` / `index.html` / `pages` / `sdk` / `css` / `fonts` / `images`
+（静态根就是 `amis/` 目录本身，见 `:14` 与 `:47`），把 `PROXY_PREFIXES` 里的路径反代到后端
+（`:24-25` 的 `isProxied()` + `:28-40` 的 `proxy()`），并**拒绝**直接提供 `DENY` 里的开发文件
+（`:50`）。监听地址是 `127.0.0.1`（`:65`），默认端口 `3000`。
 
 ### 6.5 Vue 前端（实验性）
 
@@ -900,20 +928,14 @@ const PROXY_PREFIXES = ['/auth', '/capt', '/api', '/health', '/refapi', '/accoun
 
 ---
 
-## 7. 当前基线的已知缺口
+## 7. 已知缺口（M1 前后对比）
 
-**【实测】** 在当前基线上实际启动应用（`create_app()`），路由表如下：
+**【已实测】** 在 M1 候选 `8750d51` 上实际启动应用（`create_app('testing')`），
+路由表共 **80 条路由 / 66 个不同 path**，其中 **39 个 path 在 `/api/v1` 下**，
+另有 `/api/database/*`、`/api/compression/*`、`/auth/*`、`/capt/*`、`/health`、
+`/swagger*`、`/redoc`、`/docs/*`、`/static/*`、`/amis/*`。
 
-```
-POST /auth              POST /auth/associated   POST /auth/login
-POST /auth/logout       POST /auth/register     POST /auth/validate-2fa
-POST /auth/verify
-GET  /capt/image        GET  /capt/request
-GET  /health
-GET  /uploads/<path>
-```
-
-**`/api/v1/*` 全部不存在**。启动日志给出两条降级警告：
+M1 之前的基线上，`/api/v1/*` **全部不存在**，启动日志给出两条降级警告：
 
 ```
 [WARNING] [降级] 文件下载计数中间件未启用（app.api.resources.upload 不可用，待 B1d 修复）:
@@ -922,21 +944,25 @@ GET  /uploads/<path>
            AttributeError("'BlueprintGroup' object has no attribute 'add_blueprint'")
 ```
 
-根因与影响：
+这 11 项问题在 M1 后的状态：
 
 | # | 问题 | 位置 | 状态（截至 `8750d51`） |
 |---|---|---|---|
-| 1 | `Blueprint.group()` 在 sanic 23.6.0 中无 `add_blueprint` | `app/api/__init__.py` | **已修复**：改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`；实测 API v1 正常挂载，OpenAPI 规范 57 条 path |
-| 2 | `app/utils/` 包不存在 | `app/api/resources/database.py`、`compression.py` | **已修复**：改用 `app/api/validators.py` 的 `validate_request` / `validate_path_param` |
-| 3 | `from app.models import File` | `dashboard.py`、`dashboard_user.py` | **已修复**：模型名为 `UploadedFile` |
-| 4 | `from app.api.base import response` | `database.py`、`compression.py` | **已修复**：改用 `app/api/responses.py` 的 `APIResponse` |
+| 1 | `Blueprint.group()` 在 sanic 23.6.0 中无 `add_blueprint` | `app/api/__init__.py:24` | **已修复**：改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`；实测 API v1 正常挂载，OpenAPI 规范 57 条 path |
+| 2 | `app/utils/` 包不存在（`from app.utils.validator import validate_request`） | `app/api/resources/database.py`、`compression.py` | **已修复**：两个模块已整体重写，改用 `app/api/responses.py` 的 `APIResponse` / `APIError`，各自实现 `_bad_request()` 做参数校验（`database.py:34`、`compression.py:26`）——**并未**改用 `app/api/validators.py` |
+| 3 | `from app.models import File` | `dashboard.py:11`、`dashboard_user.py:11` | **已修复**：模型名为 `UploadedFile`；`dashboard_user.py:11` 只导入 `Account` / `Role` / `OperationLog` |
+| 4 | `from app.api.base import response`（`response` 在 `app/api/base.py` 中不存在） | `database.py:16`、`compression.py:16` | **已修复**：改用 `from app.api.responses import APIResponse, APIError` |
 | 5 | `from app.api.resources.account import account_api` | `app/api/routes.py` | **已消除**：M1 删除了 `app/api/routes.py` 与 `app/api/example.py` |
-| 6 | `setup_docs()` 无调用点 | `app/docs/__init__.py` | **已修复**：已接线，由 `ENABLE_API_DOCS` 控制；development 下 `/swagger`、`/swagger.json`、`/redoc` 均 200 |
+| 6 | `setup_docs()` 无调用点 | `app/docs/__init__.py:33` | **已修复**：已在 `app/__init__.py:81-83` 接线，由 `ENABLE_API_DOCS` 控制；development 下 `/swagger`（302→200）、`/swagger.json`、`/redoc` 均 200 |
 | 7 | `register_web_blueprints()` 无调用点 + `frontend/templates/` 不存在 | `app/web/routes.py:39` | **仍存在**：Web 渲染路由是死代码，前端主线已改用 AMIS 静态页 |
-| 8 | `csrf_protect()` 无路由使用 | `app/middleware/security_middleware.py` | **仍存在**：CSRF 保护未生效（目前靠 SameSite=Lax） |
-| 9 | 中间件读 Cookie `session_id`，实际下发的是 `session` | `app/middleware/auth_middleware.py` | **已修复**：改读 `AuthenticationSession.cookie_name` |
-| 10 | 邮件配置无消费方 | `app/config.py` | **仍存在**：production 下验证码无处送达，注册验证 / 两步验证流程无法完成 |
-| 11 | `amis/index.html` 不存在；`site.json` 引用不存在的 `static/pages/` | `amis/` | **已修复**：M1 补齐 `index.html` 并把页面引用改为相对路径 |
+| 8 | `csrf_protect()` 无路由使用 | `app/middleware/security_middleware.py:44` | **仍存在**：CSRF 保护未生效（目前靠 SameSite=Lax） |
+| 9 | 中间件读 Cookie `session_id`，实际下发的是 `session` | `app/middleware/auth_middleware.py:27` | **已修复**：改读 `AuthenticationSession.cookie_name`（即 `session`，`app/models/session.py:66`） |
+| 10 | 邮件配置无消费方 | `app/config.py:220-225` | **仍存在**：production 下验证码无处送达，注册验证 / 两步验证流程无法完成 |
+| 11 | `amis/index.html` 不存在；`site.json` 引用不存在的 `static/pages/` | `amis/` | **已修复**：M1 补齐 `index.html`，并把页面引用改成 `pages/xxx.json` 相对路径 |
+
+**另有一项未在上表但仍是现状的限制**：部分动态路径的方法不匹配仍返回 **404 而非 405**
+（405 兜底只覆盖 `account` / `role` / `profile` 三个资源，其余资源仍用
+`v1_bp.add_route(...)`）。例如实测 `DELETE /api/v1/settings/key/x` 返回 **404**。
 
 ---
 
