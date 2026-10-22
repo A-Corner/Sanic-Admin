@@ -8,6 +8,7 @@ API 基础模块，提供API资源的基类和通用功能
 from sanic.views import HTTPMethodView
 from sanic.request import Request
 from sanic.response import json
+from sanic.log import logger
 from tortoise.exceptions import DoesNotExist
 from typing import Type, Dict, Any, List, Optional, Union, Tuple
 from app.models.base import BaseModel
@@ -16,6 +17,9 @@ from app.services.exceptions import (
     ValidationError,
     InsufficientPermissionsError
 )
+
+# 未知异常对外的统一文案（原始异常只写服务端日志，不返回给客户端）
+INTERNAL_ERROR_MESSAGE = "服务器内部错误"
 
 
 class BaseResource(HTTPMethodView):
@@ -147,7 +151,22 @@ class BaseResource(HTTPMethodView):
             },
             "message": message
         })
-    
+
+    @classmethod
+    def server_error_response(cls, exception: Exception, error_code: str = "SERVER_ERROR") -> json:
+        """
+        生成未知异常的错误响应：原始异常文本与堆栈只写服务端日志，不返回给客户端。
+
+        Args:
+            exception: 捕获到的异常
+            error_code: 错误代码
+
+        Returns:
+            Response: Sanic JSON响应（500）
+        """
+        logger.exception(f"{cls.__name__} 处理请求时发生未预期异常: {exception!r}")
+        return cls.error_response(message=INTERNAL_ERROR_MESSAGE, status=500, error_code=error_code)
+
     async def get_model_by_id(self, model_id: Union[int, str]) -> BaseModel:
         """
         通过ID获取模型实例
@@ -301,22 +320,26 @@ class CRUDResource(BaseResource):
     
     def extract_model_data(self, request: Request, for_update: bool = False) -> Dict[str, Any]:
         """
-        从请求中提取模型数据
-        
+        从请求中提取模型数据（只保留白名单字段，防止 mass-assignment）
+
+        安全约定：``allowed_create_fields`` / ``allowed_update_fields`` 是**白名单**。
+        白名单为空表示该资源未声明可写字段，此时**一律返回空字典**（默认拒绝所有输入字段），
+        而不是"放行请求里的全部字段"。子类必须显式声明白名单才能写入模型。
+
         Args:
             request: Sanic请求对象
             for_update: 是否用于更新操作
-            
+
         Returns:
-            Dict[str, Any]: 提取的模型数据
-            
+            Dict[str, Any]: 提取的模型数据（仅含白名单字段）
+
         Raises:
-            ValidationError: 如果缺少必需字段或提供了不允许的字段
+            ValidationError: 如果缺少必需字段
         """
         # 确定允许的字段和必需的字段
         allowed_fields = self.allowed_update_fields if for_update else self.allowed_create_fields
         required_fields = self.required_update_fields if for_update else self.required_create_fields
-        
+
         # 从请求中获取数据
         if request.json:
             data = request.json
@@ -324,18 +347,18 @@ class CRUDResource(BaseResource):
             data = {key: request.form.get(key) for key in request.form.keys()}
         else:
             data = {}
-        
+
         # 检查必需字段
         missing_fields = [field for field in required_fields if field not in data]
         if missing_fields:
             raise ValidationError(f"缺少必需字段: {', '.join(missing_fields)}")
-        
-        # 过滤允许的字段
+
+        # 过滤允许的字段；白名单为空则拒绝全部字段（默认拒绝）
         if allowed_fields:
             filtered_data = {k: v for k, v in data.items() if k in allowed_fields}
         else:
-            filtered_data = data
-        
+            filtered_data = {}
+
         return filtered_data
     
     async def get(self, request: Request, resource_id: str = None):
@@ -377,7 +400,7 @@ class CRUDResource(BaseResource):
         except ResourceNotFoundError as e:
             return self.error_response(message=str(e), status=404, error_code="RESOURCE_NOT_FOUND")
         except Exception as e:
-            return self.error_response(message=str(e), status=500, error_code="SERVER_ERROR")
+            return self.server_error_response(e)
     
     async def post(self, request: Request):
         """
@@ -406,7 +429,7 @@ class CRUDResource(BaseResource):
         except ValidationError as e:
             return self.error_response(message=str(e), status=400, error_code="VALIDATION_ERROR")
         except Exception as e:
-            return self.error_response(message=str(e), status=500, error_code="SERVER_ERROR")
+            return self.server_error_response(e)
     
     async def put(self, request: Request, resource_id: str):
         """
@@ -443,7 +466,7 @@ class CRUDResource(BaseResource):
         except ValidationError as e:
             return self.error_response(message=str(e), status=400, error_code="VALIDATION_ERROR")
         except Exception as e:
-            return self.error_response(message=str(e), status=500, error_code="SERVER_ERROR")
+            return self.server_error_response(e)
     
     async def patch(self, request: Request, resource_id: str):
         """
@@ -487,4 +510,4 @@ class CRUDResource(BaseResource):
         except ResourceNotFoundError as e:
             return self.error_response(message=str(e), status=404, error_code="RESOURCE_NOT_FOUND")
         except Exception as e:
-            return self.error_response(message=str(e), status=500, error_code="SERVER_ERROR") 
+            return self.server_error_response(e) 
