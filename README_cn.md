@@ -2,7 +2,7 @@
 
 > **完整文档请看英文版 [README.md](README.md)。** 本文件是精简版：只保留最常用的信息，特性清单、证据表和限制说明以英文版为准。
 >
-> **项目状态**：正在为 **v0.2.0** 重建，当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+> **项目状态**：**v0.2.0** 已于 2026-10-22 发布，**v0.2.1** 是其维护补丁版本。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
 >
 > **许可证**：Apache-2.0，见 [LICENSE](LICENSE)。
 
@@ -17,9 +17,9 @@
 - **管理 API**：账户、角色、个人资料、系统设置、操作日志、文件上传、仪表盘、缓存、只读 SQL 分析。这些是**类式 CRUD 资源**（继承 `app/api/base.py` 的 `CRUDResource`），不是独立的 `@bp.route` 蓝图装饰器。
 - **缓存**：内存 / Redis 双后端，共用一套接口；Redis 不可达时开发环境降级为内存，**生产环境拒绝降级启动**。
 - **安全基线**：生产环境缺少必需密钥时 **fail-closed**（直接退出，rc=1）；仓库内无密钥；SQL 分析只接受单条 `SELECT`/`WITH`；上传文件使用生成的文件名，不使用原始文件名拼路径。
-- **API 文档**：OpenAPI 3.0 生成器与 `@api_tags` / `@api_summary` / `@api_response` 等装饰器，由 `ENABLE_API_DOCS` 控制（开发环境开、生产环境关）。实测 `/swagger` 302 跳转后 200、`/redoc` 200、`/swagger.json` 200 且规范含 57 条 path（详见英文版 README）。
+- **API 文档**：OpenAPI 3.0 生成器与 `@api_tags` / `@api_summary` / `@api_response` 等装饰器，由 `ENABLE_API_DOCS` 控制（开发环境开、生产环境关）。实测 `/swagger` 302 跳转后 200、`/redoc` 200、`/swagger.json` 200 且规范含 66 条 path（详见英文版 README）。
 
-**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.2.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；测试覆盖率 50%；若干 404/405 与静态公开文件的边界问题留到 v0.3。
+**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.2.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；测试覆盖率 52%；`value` 字段仍无长度上限（实际上限 100MB），且 `MAX_CONTENT_LENGTH` 配置项在 Sanic 23.6 下不生效——两项均留到 v0.3。
 
 ---
 
@@ -49,6 +49,17 @@ docker compose up -d --build
 ```
 
 访问 **http://localhost:22230**（宿主机映射端口；容器内为 22222）。Redis 是可选 profile：`CACHE_TYPE=redis` 时用 `docker compose --profile redis up -d` 启用。
+
+**受限网络（无法直连 pypi.org）**：在 `.env` 里设 `PIP_INDEX_URL` 指向可用的镜像源即可换源，
+然后照常执行 `docker compose up -d --build`，**无需手工加 `--build-arg`**：
+
+```bash
+# 在 .env 里加一行（示例为阿里云镜像源，按所在网络选可用的）
+echo "PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/" >> .env
+docker compose up -d --build
+```
+
+不设这一行时用的是官方源 `https://pypi.org/simple`，默认行为不变。
 
 容器内固定 `SANIC_ENV=production`，因此密钥没通过 `.env` 真正提供时容器会直接拒绝启动——**「容器起来了」本身就是配置已正确提供的证据**。
 
@@ -128,7 +139,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **当前测试状态**：`pytest` 报 **`95 passed`，0 失败，0 错误**（收集 95 个用例，约 90 秒；加 `--cov` 约 6 分钟）。`app/` 的覆盖率为 **50%**，用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
+> **当前测试状态**：`pytest` 报 **`171 passed`，0 失败，0 错误**（收集 171 个用例，约 65 秒；加 `--cov` 约 80 秒）。`app/` 的覆盖率为 **52%**，用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
 
 ---
 
