@@ -24,7 +24,7 @@ graph TD
             MW2["注册2 请求: OPTIONS 预检短路<br/>security_middleware.py:37-41"]
             MW3["注册3 请求: 日志<br/>app/middleware/__init__.py:24-27"]
             MW4["注册4 响应: 耗时日志<br/>app/middleware/__init__.py:29-33"]
-            MW5["注册5 请求: 认证中间件<br/>auth_middleware.py:41-45"]
+            MW5["注册5 请求: 认证中间件<br/>auth_middleware.py:43-47"]
             MW7["注册6 响应: gzip 压缩<br/>compression.py:240-300"]
             MW8["异常处理 (非中间件)<br/>error_handler.py:19-40"]
         end
@@ -247,11 +247,13 @@ M1 已改用上述写法并删除了 `app/api/routes.py`、`app/api/example.py`�
 | `app/docs/models.py` | Pydantic 模型注册与 Schema 生成 |
 | `app/docs/decorators.py` | `api_tags` / `api_summary` / `api_description` / `api_body` / `api_response` / `api_response_list` / `api_response_pagination` / `api_param` / `api_paginated_params` / `api_security` / `api_exclude` |
 
-**【已实测】** `setup_docs()` 已接线：`app/__init__.py` 中有
-`if app.config.get("ENABLE_API_DOCS"): setup_docs(app)`，由新增的 `ENABLE_API_DOCS` 开关控制
-（development 默认 `True`，production 默认 `False`）。
+**【已实测】** `setup_docs()` 已接线：`app/__init__.py:81-83` 中有
+`if app.config.get("ENABLE_API_DOCS"): setup_docs(app)`，由 `ENABLE_API_DOCS` 开关控制
+（development / testing 默认 `True`，production 默认 `False`，见 `app/config.py:240` 与 `:278`；
+可用环境变量覆盖，`app/config.py:360`）。`setup_docs()` 同时把 sanic-ext 自带的 OAS 关掉
+（`app/docs/__init__.py:43` 的 `app.config.OAS = False`），以本模块为唯一文档来源。
 
-development 下实测：
+development / testing 下实测（`ENABLE_API_DOCS=True`）：
 
 | 端点 | 结果 |
 |---|---|
@@ -261,12 +263,18 @@ development 下实测：
 | `GET /docs` | 302 → `/swagger`（别名） |
 | `GET /docs/models` `/docs/tags` `/docs/paths` `/docs/redoc` | **200** |
 
-production 下这些路由返回 404（`ENABLE_API_DOCS` 默认 `False`），需显式设
-`ENABLE_API_DOCS=true` 才挂载。
+production 下（`ENABLE_API_DOCS=False`，实测）：
 
-**注意**：`sanic-ext` 自己也会在 `/docs/openapi.json` 提供一份 OpenAPI 文档，
-那是**另一套**生成器，与 `app/docs/` 不是同一份——development 下实测该路径为 **404**
-（`app/docs/routes.py` 不注册它），production 下反而是 200。**规范以 `/swagger.json` 为准。**
+| 端点 | 结果 |
+|---|---|
+| `GET /swagger` `/swagger/index.html` `/swagger.json` `/redoc` `/docs/models` | **404**（本模块的路由未挂载） |
+| `GET /docs` | **200**——sanic-ext 自带的 OAS 页面 |
+| `GET /docs/openapi.json` | development 下 **404**（`setup_docs()` 接管了 `/docs` 前缀）；production 下 200——sanic-ext 生成的**另一份** OpenAPI 规范 |
+
+**注意**：production 下能访问到的 `/docs` 与 `/docs/openapi.json` 来自 **sanic-ext**，
+是**另一套**生成器（标题 `"API"`），与 `app/docs/` 产出的（标题 `"SanicAdmin"`，
+57 条 path）**不是同一份**。**规范以 `/swagger.json` 为准**；production 想暴露本模块的规范
+需显式设 `ENABLE_API_DOCS=true`。
 
 ### 2.7 `app/middleware` —— 中间件
 
@@ -332,7 +340,7 @@ sequenceDiagram
     autonumber
     participant C as 客户端
     participant A as /auth/login<br/>(app/auth/routes.py:89)
-    participant AU as authentication.login<br/>(app/auth/authentication.py:136)
+    participant AU as authentication.login<br/>(app/auth/authentication.py:157)
     participant AR as app/models/account.py
     participant M as app/models/session.py
     participant DB as 数据库
@@ -390,9 +398,9 @@ Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
 sequenceDiagram
     autonumber
     participant C as 客户端
-    participant MW as AuthMiddleware<br/>(auth_middleware.py:41)
+    participant MW as AuthMiddleware<br/>(auth_middleware.py:43-47)
     participant H as 路由处理函数
-    participant AU as authenticate_request<br/>(authentication.py:238)
+    participant AU as authenticate_request<br/>(authentication.py:259)
     participant AUZ as authorization<br/>(authorization.py:84)
     participant DB as 数据库
 
@@ -481,8 +489,8 @@ curl -X POST /auth/associated -H "Authorization: Bearer <JWT>" # 200
 
 | 路径 | 位置 | 行为 |
 |---|---|---|
-| **中间件** | `app/middleware/auth_middleware.py:14-38` | 尽力而为：从 `Authorization: Bearer` 或 Cookie 取令牌，查有效会话，挂到 `request.ctx.authentication_session`。**失败不抛异常、不中断请求** |
-| **装饰器 / 显式调用** | `app/auth/authentication.py:238-269` | 强制校验：无令牌 → `AuthenticationError`(401)；会话/账户不可用 → 抛对应异常；二次验证未完成 → `AuthenticationError` |
+| **中间件** | `app/middleware/auth_middleware.py:14-40` | 尽力而为：从 `Authorization: Bearer` 或 Cookie 取令牌，查有效会话，挂到 `request.ctx.authentication_session`。**失败不抛异常、不中断请求** |
+| **装饰器 / 显式调用** | `app/auth/authentication.py:259-290` | 强制校验：无令牌 → `AuthenticationError`(401)；会话/账户不可用 → 抛对应异常；二次验证未完成 → `AuthenticationError` |
 
 **【已实测】Cookie 名已对齐**：中间件现在直接读会话模型实际下发的名字
 （`app/middleware/auth_middleware.py:27` → `request.cookies.get(AuthenticationSession.cookie_name)`，
@@ -490,7 +498,7 @@ curl -X POST /auth/associated -H "Authorization: Bearer <JWT>" # 200
 因此 `Authorization: Bearer` 与 Cookie 两条路径都能命中中间件。
 
 实际鉴权不依赖中间件——`requires_authentication` / `check_permissions` 都会调用
-`authenticate_request()` 自行解码（`authentication.py:252-257`：已挂载则复用，否则重新解码），
+`authenticate_request()` 自行解码（`authentication.py:273-278`：已挂载则复用，否则重新解码），
 所以功能上是正确的，只是中间件的那次尝试在 Cookie 场景下白做了。
 
 ---
@@ -726,13 +734,16 @@ class ArticleResource(CRUDResource):
         return await create_article(request)
 ```
 
-**第 3 步 —— 注册路由**。在模块末尾把资源挂到 `v1_bp`：
+**第 3 步 —— 注册路由**。在模块末尾把资源挂到 `v1_bp`。
+推荐用 `register_view()`（自带 405 兜底，见 `app/api/resources/route_methods.py`）：
 
 ```python
+from app.api.resources.route_methods import register_view
+
 article_resource = ArticleResource()
-v1_bp.add_route(article_resource.as_view(), "/articles", methods=["GET", "POST"])
-v1_bp.add_route(article_resource.as_view(), "/articles/<article_id:int>",
-                methods=["GET", "PUT", "DELETE"])
+register_view(v1_bp, "/articles", article_resource, ["GET", "POST"], "article_list")
+register_view(v1_bp, "/articles/<article_id:int>", article_resource,
+              ["GET", "PUT", "DELETE"], "article_detail")
 ```
 
 **第 4 步 —— 加入资源清单**。在 `app/api/resources/__init__.py` 的 `all_resources`
@@ -740,18 +751,20 @@ v1_bp.add_route(article_resource.as_view(), "/articles/<article_id:int>",
 
 **第 5 步 —— 加权限**。新资源需要在 `Role.permissions` 里加上对应条目，格式为
 `{"article": ["create", "read", "update", "delete"]}`。
-内置 `admin` 角色在 `app/auth/authentication.py:120-130` 硬编码了
-`users` / `roles` / `settings` 三组权限——新资源需要一并补上，或直接依赖
-`Account.is_admin` 短路。
+**必须先在 `app/auth/permissions.py` 的 `ALL_PERMISSIONS` 注册表里登记该资源**
+（`:35-55`）——权限判定只认注册表里的资源名，没登记的资源即使写进了角色权限也不会生效。
+内置 `admin` 角色取的是注册表的全量权限（`app/auth/authentication.py:94-116` 的
+`_admin_role_permissions()` → `admin_all_permissions()`），新资源登记后自动纳入。
 
 ### 5.2 约定要点
 
 | 约定 | 说明 |
 |---|---|
-| 蓝图 | 资源模块 `from app.api import v1_bp` 取蓝图，路由用 `v1_bp.add_route(...)`（`role.py:608-615` 是范本）。**只有**需要独立前缀（如 `/api/database`）时才自建 `bp` |
-| 装饰器顺序 | `@validate_request` / `@validate_path_param` 在外，`@check_permissions` 在内（见 `role.py:97-103`、`:155-161`） |
+| 蓝图 | 资源模块 `from app.api import v1_bp` 取蓝图，路由用 `register_view(v1_bp, ...)` 或 `v1_bp.add_route(...)`（`role.py:565-575` 是 `register_view` 范本，`log.py:179-181` 是 `add_route` 范本）。**只有**需要独立前缀（如 `/api/database`）时才自建 `bp` |
+| 参数校验 | 在视图方法体内用 `validate_fields(data, {...})`（`app/api/validators.py`）——**不是** `@validate_request` / `@validate_path_param` 装饰器（那两个装饰器目前只有 docstring 示例，无实际调用点）。范本见 `role.py:244-251` |
+| 权限 | 视图方法上加 `@check_permissions("resource", "action")`（`app/auth/authorization.py:180`）。**权限判定在参数校验之前**——`role.py:213` 的 `@check_permissions("role", "read")` 就在 `get` 上，装饰器先于方法体执行 |
 | 响应 | 统一用 `APIResponse.success` / `.error` / `.list` / `.created`，不要手拼 dict |
-| 权限粒度 | 资源名 + 操作名；字符串简写用 `@requires_permission("article:read")`（`authorization.py:156-165`） |
+| 权限粒度 | 资源名 + 操作名；字符串简写用 `@requires_permission("article:read")`（`app/auth/authorization.py:213`） |
 | 文档注解 | 在函数上加 `@api_tags` / `@api_summary` / `@api_response`，OpenAPI 规范会反射收集 |
 | 异常 | 抛 `app/services/exceptions.py` 里的业务异常，异常处理器会自动转成统一 JSON |
 
@@ -819,7 +832,7 @@ if AMIS_DIR and os.path.isdir(AMIS_DIR):
 `GET /amis/login.html` 均返回 200 并给出登录页 HTML，`GET /amis`（不带尾斜杠）返回 404。
 
 **【读码确认】** `amis/pages/site.json` 的菜单节点用 `schemaApi` 引用页面 JSON
-（当前内容，`amis/pages/site.json:22-30`）：
+（当前内容，`amis/pages/site.json:17-30`）：
 
 ```json
 {
