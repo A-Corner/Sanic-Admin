@@ -45,8 +45,7 @@ def register_all_middlewares(app: Sanic) -> None:
     _setup_request_logging(app)
     app.middleware('request')(AuthMiddleware())
 
-    # 文件下载计数中间件（/uploads/ 下载次数统计）
-    from app.api.resources.upload import FileDownloadCounterMiddleware
-    app.middleware('request')(FileDownloadCounterMiddleware())
+    # 上传目录不再静态托管，文件下载走 /api/v1/files/<id>/download（自带鉴权），
+    # 下载计数由该资源内部维护，不再需要全局下载计数中间件。
 
     logger.info("所有中间件注册完成")

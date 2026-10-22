@@ -57,7 +57,8 @@ def create_app(config: Optional[Any] = None) -> Sanic:
     os.makedirs(app.config.UPLOAD_DIR, exist_ok=True)
     if os.path.isdir(app.config.STATIC_DIR):
         app.static('/static', app.config.STATIC_DIR)
-    app.static('/uploads', app.config.UPLOAD_DIR)
+    # 上传目录不对外静态托管：否则任何人都能直接下载他人上传的文件。
+    # 文件下载统一走需要鉴权的 GET /api/v1/files/<id>/download。
 
     register_all_middlewares(app)
     configure_compression(
