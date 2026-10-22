@@ -74,14 +74,18 @@ jobs:
         id: compose
         run: |
           set -euo pipefail
-          if docker compose version >/dev/null 2>&1; then
-            echo "cli=docker compose" >> "$GITHUB_OUTPUT"
-          else
-            echo "cli=docker-compose" >> "$GITHUB_OUTPUT"
-          fi
           # 记录用于排障的信息（不含任何密钥）
           docker --version
-          ${{ steps.compose.outputs.cli }} version
+          # 注意：本步骤**不能**引用自身的 outputs（同一 step 内自己的 output 尚不可用，
+          # 展开会得到空串，shell 会得到 "version: command not found"）。
+          # 因此这里直接用 docker 命令判定并记录；后续步骤再引用本 step 的 output。
+          if docker compose version >/dev/null 2>&1; then
+            echo "cli=docker compose" >> "$GITHUB_OUTPUT"
+            docker compose version
+          else
+            echo "cli=docker-compose" >> "$GITHUB_OUTPUT"
+            docker-compose version
+          fi
 
       - name: Verify lane A contract files are present
         run: |
@@ -218,8 +222,14 @@ jobs:
         id: start
         run: |
           set -euo pipefail
-          CLI="${{ steps.compose.outputs.cli }}"
-          $CLI -f docker-compose.yml -f docker-compose.ci.yml up -d --no-deps "$APP_SERVICE"
+          # compose CLI 可能是 "docker compose"（两词）或 "docker-compose"（一词），
+          # 用数组承载，避免在 $( ) 或字符串里因空格被当成单个命令。
+          read -r -a CLI <<< "${{ steps.compose.outputs.cli }}"
+          if [ "${#CLI[@]}" -eq 0 ]; then
+            echo "::error::未能确定 compose CLI"
+            exit 1
+          fi
+          "${CLI[@]}" -f docker-compose.yml -f docker-compose.ci.yml up -d --no-deps "$APP_SERVICE"
 
           PORT="${{ steps.port.outputs.port }}"
           BASE="http://127.0.0.1:${PORT}"
@@ -243,9 +253,9 @@ jobs:
           if [ "$READY" != "1" ]; then
             echo "::error::${BASE}/health 在 60 秒内未返回 200，打印容器日志后失败"
             echo "--- docker compose logs ---"
-            $CLI -f docker-compose.yml -f docker-compose.ci.yml logs --no-color || true
+            "${CLI[@]}" -f docker-compose.yml -f docker-compose.ci.yml logs --no-color || true
             echo "--- docker compose ps ---"
-            $CLI -f docker-compose.yml -f docker-compose.ci.yml ps -a || true
+            "${CLI[@]}" -f docker-compose.yml -f docker-compose.ci.yml ps -a || true
             exit 1
           fi
 
@@ -328,7 +338,13 @@ jobs:
         id: failclosed
         run: |
           set -euo pipefail
-          CLI="${{ steps.compose.outputs.cli }}"
+          # compose CLI 可能是 "docker compose"（两词）或 "docker-compose"（一词），
+          # 用数组承载，避免在 $( ) 或字符串里因空格被当成单个命令。
+          read -r -a CLI <<< "${{ steps.compose.outputs.cli }}"
+          if [ "${#CLI[@]}" -eq 0 ]; then
+            echo "::error::未能确定 compose CLI"
+            exit 1
+          fi
 
           # 用一套不同的环境变量集合启动：SANIC_ENV=production 且移除 JWT_PRIVATE_KEY。
           # production 下缺少必需密钥必须让进程非零退出（app/config.py 的
@@ -345,7 +361,7 @@ jobs:
           #   * 不发布宿主端口，避免与正在运行的 app 容器抢占 22230；
           #   * container_name / project 名与主服务隔离，日志互不污染。
           KEYDIR="${{ steps.keys.outputs.KEYDIR }}"
-          IMAGE="$($CLI -f docker-compose.yml -f docker-compose.ci.yml config --images | head -1)"
+          IMAGE="$("${CLI[@]}" -f docker-compose.yml -f docker-compose.ci.yml config --images | head -1)"
           if [ -z "$IMAGE" ]; then
             echo "::error::无法确定构建出的镜像名"
             exit 1
@@ -382,14 +398,14 @@ jobs:
 
           echo "--- fail-closed 启动（预期非零退出）---"
           set +e
-          $CLI -p ci-failclosed -f failclosed/docker-compose.yml \
+          "${CLI[@]}" -p ci-failclosed -f failclosed/docker-compose.yml \
                up --abort-on-container-exit --exit-code-from app app
           RC=$?
           set -e
           echo "容器退出码 = ${RC}"
 
           echo "--- fail-closed 容器日志 ---"
-          $CLI -p ci-failclosed -f failclosed/docker-compose.yml logs --no-color || true
+          "${CLI[@]}" -p ci-failclosed -f failclosed/docker-compose.yml logs --no-color || true
 
           # 稳健断言：只要求"非零退出"。
           # 不对退出原因字符串做断言——m23 基线上 production 即使密钥齐备也会因
@@ -409,15 +425,21 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          CLI="${{ steps.compose.outputs.cli }}"
+          # compose CLI 可能是 "docker compose"（两词）或 "docker-compose"（一词），
+          # 用数组承载，避免在 $( ) 或字符串里因空格被当成单个命令。
+          read -r -a CLI <<< "${{ steps.compose.outputs.cli }}"
+          if [ "${#CLI[@]}" -eq 0 ]; then
+            echo "::error::未能确定 compose CLI"
+            exit 1
+          fi
           echo "--- docker compose logs (app) ---"
-          $CLI -f docker-compose.yml -f docker-compose.ci.yml logs --no-color || true
+          "${CLI[@]}" -f docker-compose.yml -f docker-compose.ci.yml logs --no-color || true
           echo "--- docker compose ps ---"
-          $CLI -f docker-compose.yml -f docker-compose.ci.yml ps -a || true
-          $CLI -f docker-compose.yml -f docker-compose.ci.yml down -v --remove-orphans || true
+          "${CLI[@]}" -f docker-compose.yml -f docker-compose.ci.yml ps -a || true
+          "${CLI[@]}" -f docker-compose.yml -f docker-compose.ci.yml down -v --remove-orphans || true
           # fail-closed 的独立 project 也要清理
           if [ -f failclosed/docker-compose.yml ]; then
-            $CLI -p ci-failclosed -f failclosed/docker-compose.yml down -v --remove-orphans || true
+            "${CLI[@]}" -p ci-failclosed -f failclosed/docker-compose.yml down -v --remove-orphans || true
           fi
           if [ -n "${{ steps.keys.outputs.KEYDIR }}" ]; then
             rm -rf "${{ steps.keys.outputs.KEYDIR }}"
