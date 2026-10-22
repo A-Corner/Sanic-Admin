@@ -11,6 +11,8 @@ import time
 import logging
 import json
 import asyncio
+import math
+import decimal
 import re
 from collections import deque, defaultdict
 from typing import Dict, List, Any, Optional, Set, Tuple, Union, Deque
@@ -33,13 +35,15 @@ _query_logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_QUERY_LOGS)
 # 慢查询日志队列
 _slow_query_logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_SLOW_QUERIES)
 # 查询统计信息
+# min_query_time 初始为 None：表示"尚无任何查询记录"。绝不能用 float('inf') 表示无数据，
+# 因为 Infinity 不是标准 JSON（RFC 8259），会污染 API 响应体并让严格解析器报错。
 _query_stats = {
     "total_queries": 0,
     "total_slow_queries": 0,
     "total_query_time": 0.0,
     "avg_query_time": 0.0,
     "max_query_time": 0.0,
-    "min_query_time": float('inf'),
+    "min_query_time": None,
 }
 # 查询类型统计
 _query_type_stats: Dict[str, Dict[str, Any]] = defaultdict(
@@ -47,6 +51,61 @@ _query_type_stats: Dict[str, Dict[str, Any]] = defaultdict(
 )
 # 锁，防止并发修改
 _logs_lock = asyncio.Lock()
+
+
+def json_safe(value: Any) -> Any:
+    """
+    递归清洗数据，保证结果可被序列化为标准 JSON（RFC 8259）。
+
+    JSON 规范只允许 null / true / false / 数字 / 字符串 / 数组 / 对象。
+    ``Infinity`` / ``-Infinity`` / ``NaN`` 都**不是**合法 JSON 字面量：浏览器
+    ``JSON.parse()`` 会直接抛错，Go / Rust / Java 的严格解析器也会拒绝。
+
+    因此这里把所有非有限数值（``inf`` / ``-inf`` / ``nan``，含 ``Decimal`` 的
+    ``Infinity`` / ``NaN``）统一转成 ``None``（JSON ``null``），其余结构原样保留。
+
+    清洗是防御性的：无论内部统计状态如何演化（新增字段、外部写入、异常路径），
+    都不会让非标准 JSON 值漏进 API 响应体。
+
+    Args:
+        value: 任意待清洗的值
+
+    Returns:
+        Any: 保证可被标准 JSON 序列化的等价结构
+    """
+    # bool 是 int 的子类，但 JSON 原生支持 true/false，直接原样返回
+    if isinstance(value, bool) or value is None:
+        return value
+
+    # 浮点数：非有限值（inf / -inf / nan）转 None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    # Decimal：非有限值（Infinity / NaN）转 None；有限值转 float 便于序列化
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return None
+        converted = float(value)
+        return converted if math.isfinite(converted) else None
+
+    # 整数：JSON 原生支持，原样返回
+    if isinstance(value, int):
+        return value
+
+    # 字典：递归清洗值
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+
+    # 列表 / 元组：递归清洗元素
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+
+    # bytes：解码为字符串，与 APIResponse.serialize 的既有行为保持一致
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+
+    # 其他类型（str / 自定义对象等）原样返回
+    return value
 
 
 @dataclass
@@ -149,14 +208,20 @@ async def log_query(
             
             # 更新查询统计
             duration = query_info.duration or 0
+            # 兜底：耗时必须是有限数值。异常路径（如时钟异常）若产出 inf/nan，
+            # 会污染累计值与均值，并可能把 inf 再次写回 min_query_time。
+            if not math.isfinite(duration):
+                duration = 0.0
             _query_stats["total_queries"] += 1
             _query_stats["total_query_time"] += duration
             _query_stats["avg_query_time"] = _query_stats["total_query_time"] / _query_stats["total_queries"]
             
             if duration > _query_stats["max_query_time"]:
                 _query_stats["max_query_time"] = duration
-                
-            if duration < _query_stats["min_query_time"]:
+
+            # min_query_time 初始为 None（尚无数据），首个查询直接写入
+            current_min = _query_stats["min_query_time"]
+            if current_min is None or duration < current_min:
                 _query_stats["min_query_time"] = duration
             
             # 更新查询类型统计
@@ -218,11 +283,13 @@ async def get_query_logs(
         
         # 限制返回数量
         filtered_logs = filtered_logs[:limit]
-        
+
+        # 序列化边界清洗：确保任何 inf/nan 都不会以非标准 JSON 字面量进入 API 响应体。
+        # json_safe 同时返回新容器，不会把内部 _query_stats 的可变引用泄露给调用方。
         return {
-            "logs": filtered_logs,
-            "stats": _query_stats,
-            "type_stats": dict(_query_type_stats)
+            "logs": json_safe(filtered_logs),
+            "stats": json_safe(_query_stats),
+            "type_stats": json_safe(dict(_query_type_stats))
         }
 
 
@@ -243,7 +310,8 @@ async def get_slow_queries(limit: int = 20) -> List[Dict[str, Any]]:
             key=lambda x: x.get("duration", 0),
             reverse=True
         )
-        return logs[:limit]
+        # 同样在序列化边界清洗，避免非标准 JSON 值漏出
+        return json_safe(logs[:limit])
 
 
 # 只读分析允许的语句：单条 SELECT，或以 WITH 开头的单条查询
