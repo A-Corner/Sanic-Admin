@@ -49,6 +49,21 @@
     <script type="text/javascript">
       //Add amis app framework code to facilitate me to use jingja2 template to transfer json data
       // 先向后端确认登录态：未认证（401）跳转登录页；其他错误显示提示但不跳转
+
+      // CSRF 双提交 cookie：登录成功时后端下发非 HttpOnly 的 csrf_token cookie，
+      // 写请求须把它回填到 X-CSRF-Token 请求头（app/middleware/security_middleware.py 校验）。
+      function getCookie(name) {
+        const pair = document.cookie
+          .split('; ')
+          .find(row => row.startsWith(name + '='));
+        return pair ? decodeURIComponent(pair.slice(name.length + 1)) : '';
+      }
+
+      function csrfHeaders() {
+        const token = getCookie('csrf_token');
+        return token ? { 'X-CSRF-Token': token } : {};
+      }
+
       function bootstrapApp() {
         let amis = amisRequire('amis/embed');
         const match = amisRequire('path-to-regexp').match;
@@ -204,6 +219,20 @@
               }
             },
             isCurrentUrl: isCurrentUrl,
+            // 全局请求适配器：amis sdk 的 embed 默认 fetcher 在发出每个 axios 请求前
+            // 都会调用 env.requestAdaptor(config)（amis/sdk/sdk.js 内嵌实现），
+            // 在这里统一为写请求注入 CSRF 头，页面 JSON（pages/*.json）无需逐个配置。
+            requestAdaptor: function (config) {
+              const method = (config.method || 'get').toUpperCase();
+              if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+                config.headers = config.headers || {};
+                const token = getCookie('csrf_token');
+                if (token) {
+                  config.headers['X-CSRF-Token'] = token;
+                }
+              }
+              return config;
+            },
             theme: 'cxd'
           }
         );
@@ -221,10 +250,20 @@
         // API 用 '/' 起的绝对路径（后端路由都在根路径下）。
         const API_BASE = window.SANIC_API_BASE || '';
         try {
-          const r = await fetch(API_BASE + '/auth/associated', { method: 'POST', credentials: 'same-origin' });
+          const r = await fetch(API_BASE + '/auth/associated', { method: 'POST', credentials: 'same-origin', headers: csrfHeaders() });
           if (r.status === 401) {
             window.location.replace('./login.html');
             return;
+          }
+          if (r.status === 403) {
+            // 会话 cookie 还在但 CSRF 校验失败（如 csrf cookie 丢失/过期）：
+            // 重新登录即可同时拿到新的会话与 CSRF token。
+            let body = null;
+            try { body = await r.json(); } catch (e) {}
+            if (body && body.error === 'CSRF_TOKEN_INVALID') {
+              window.location.replace('./login.html');
+              return;
+            }
           }
           if (!r.ok) {
             document.getElementById('root').innerHTML =
@@ -239,7 +278,7 @@
         bootstrapApp();
         document.addEventListener('click', async (ev) => {
           if (ev.target && ev.target.id === 'logout-link') {
-            try { await fetch(API_BASE + '/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch (e) {}
+            try { await fetch(API_BASE + '/auth/logout', { method: 'POST', credentials: 'same-origin', headers: csrfHeaders() }); } catch (e) {}
             window.location.replace('./login.html');
           }
         });

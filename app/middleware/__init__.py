@@ -15,9 +15,20 @@ from sanic.log import logger
 
 from app.middleware.auth_middleware import AuthMiddleware
 from app.middleware.error_handler import setup_error_handlers
-from app.middleware.security_middleware import setup_security_middleware, csrf_protect
+from app.middleware.security_middleware import (
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    issue_csrf_token,
+    setup_security_middleware,
+)
 
-__all__ = ["register_all_middlewares", "AuthMiddleware", "csrf_protect"]
+__all__ = [
+    "register_all_middlewares",
+    "AuthMiddleware",
+    "issue_csrf_token",
+    "CSRF_COOKIE_NAME",
+    "CSRF_HEADER_NAME",
+]
 
 
 def _setup_request_logging(app: Sanic) -> None:

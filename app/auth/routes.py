@@ -16,11 +16,14 @@ from app.auth.authentication import (
     fulfill_second_factor,
     get_session_token,
 )
+from app.auth.rate_limit import LoginRateLimiter, client_ip
 from app.auth.verification import (
     request_two_step_verification,
     verify_account,
     request_captcha,
 )
+from app.middleware.security_middleware import issue_csrf_token
+from app.services.exceptions import CredentialsError
 
 
 # 创建认证相关蓝图
@@ -91,12 +94,31 @@ async def on_login(request):
     """
     使用电子邮件和密码登录
     """
+    # 登录限流：按（提交的用户名/邮箱 + IP）维度限制失败次数。
+    # 只在 cache 可用时启用（before_server_start 已初始化 app.ctx.cache）；
+    # 未提交登录标识时跳过（参数校验会以 400 拒绝，不属于暴力破解面）。
+    limiter = LoginRateLimiter.from_request(request)
+    identity = limiter.submitted_identity(request)
+    ip = client_ip(request)
+    if identity:
+        await limiter.raise_if_blocked(identity, ip)
+
     # 是否启用二次验证只由服务端配置决定，忽略客户端参数
     two_factor_authentication = bool(getattr(settings, "REQUIRE_TWO_FACTOR", False))
-    authentication_session = await login(
-        request, require_second_factor=two_factor_authentication
-    )
-    
+    try:
+        authentication_session = await login(
+            request, require_second_factor=two_factor_authentication
+        )
+    except CredentialsError:
+        # 仅凭据错误计入失败次数（未验证/禁用等账户状态问题不属于口令猜测）
+        if identity:
+            await limiter.record_failure(identity, ip)
+        raise
+
+    # 成功登录清零该维度的失败计数
+    if identity:
+        await limiter.clear(identity, ip)
+
     if two_factor_authentication:
         two_step_session = await request_two_step_verification(
             request, authentication_session.bearer
@@ -108,8 +130,14 @@ async def on_login(request):
         two_step_session.encode(response)
     else:
         response = json("登录成功!", authentication_session.bearer.json)
-    
+
     authentication_session.encode(response)
+    # 下发 CSRF token（双提交 cookie + 响应头），此后凭会话 cookie 的写请求须回传
+    # X-CSRF-Token 头（见 app/middleware/security_middleware.py 的 enforce_csrf）。
+    issue_csrf_token(
+        response,
+        secure=bool(request.app.config.get("SESSION_COOKIE_SECURE", True)),
+    )
     return response
 
 
