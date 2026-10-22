@@ -20,7 +20,7 @@ from sanic import Sanic
 from sanic.exceptions import NotFound
 from sanic.handlers.directory import DirectoryHandler
 from sanic.log import logger
-from sanic.response import json as json_response
+from sanic.response import file, json as json_response
 
 from app.config import ConfigError, config_to_dict, get_config, settings
 from app.middleware import register_all_middlewares
@@ -60,6 +60,45 @@ class _NoDirectoryListingHandler(DirectoryHandler):
             return await super().handle(request, path)
         except IsADirectoryError:
             raise NotFound("File not found")
+
+
+def _register_amis_index(app: Sanic, amis_dir: str) -> None:
+    """挂载 /amis 根路径：``/amis/`` 显示登录页，裸 ``/amis`` 返回 404。
+
+    为什么不用 ``app.static``：Sanic 的 ``app.static(uri, <文件>)`` 会把 uri 的
+    尾部斜杠去掉再注册（``app.static("/amis/", login.html)`` 注册的路由 uri 是
+    ``/amis``），且全局 ``strict_slashes=False`` 使 ``/amis`` 与 ``/amis/``
+    等价 —— 裸 ``/amis`` 会命中并返回 200。
+
+    而 v0.2.0 用的是整目录挂载（``app.static("/amis", amis_dir, index=...)``），
+    路由被改写成 ``/amis/<__file_uri__:path>``，裸 ``/amis`` 不匹配 → 404。
+    docker-acceptance 断言的正是这个行为。
+
+    这里改用普通路由精确控制：``/amis/`` 走登录页，其余路径按静态文件处理，
+    开发文件与路径逃逸一律 404。
+    """
+    amis_root = Path(amis_dir).resolve()
+
+    @app.route("/amis/", methods=["GET", "HEAD"], strict_slashes=True)
+    async def amis_index(request):
+        index_file = amis_root / AMIS_ENTRY_PAGES[0]
+        if not index_file.is_file():
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        return await file(index_file)
+
+    @app.route("/amis/<path:__rest__>", methods=["GET", "HEAD"], strict_slashes=True)
+    async def amis_files(request, __rest__):
+        # 开发文件不公开
+        if __rest__.split("/")[0] in AMIS_PRIVATE_FILES:
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        target = (amis_root / __rest__).resolve()
+        try:
+            target.relative_to(amis_root)
+        except ValueError:
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        if not target.is_file():
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        return await file(target)
 
 
 def _register_amis_static(app: Sanic, amis_dir: str) -> None:
@@ -104,7 +143,7 @@ def _register_amis_static(app: Sanic, amis_dir: str) -> None:
             app.static(f"/amis/{page}", page_path, name=f"amis_page_{page[:-5]}")
 
     # /amis/ 显示登录页；裸 /amis 返回 404（与 v0.2.0 行为一致）
-    app.static("/amis/", os.path.join(amis_dir, "login.html"), name="amis_index")
+    _register_amis_index(app, amis_dir)
 
 
 

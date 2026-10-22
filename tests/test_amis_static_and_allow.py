@@ -137,6 +137,59 @@ async def test_amis_index_serves_login_page(client):
     assert "login" in response.text.lower()
 
 
+async def test_bare_amis_path_is_404(client):
+    """裸 ``/amis``（无尾斜杠）必须是 404。
+
+    回归：v0.2.1 曾用 ``app.static("/amis/", login.html)`` 挂载入口页，而 Sanic
+    的 ``app.static(uri, <文件>)`` 会**去掉 uri 尾部斜杠**再注册（路由 uri 变成
+    ``/amis``），加上全局 ``strict_slashes=False``，裸 ``/amis`` 就命中了 → 200。
+
+    docker-acceptance 对此有断言（v0.2.0 的既定行为是裸 /amis → 404），
+    v0.2.1 因此让 CI 报红。
+    """
+    response = await client.get("/amis")
+    assert response.status_code == 404, (
+        f"裸 /amis 返回 {response.status_code}，应为 404"
+    )
+
+
+async def test_amis_console_assertions_match_docker_acceptance(client):
+    """把 docker-acceptance 的三条断言固化成测试。
+
+    CI 断言：``/amis/`` 与 ``/amis/login.html`` 都返回 200 且正文是 HTML；
+    裸 ``/amis`` 返回 404。
+    """
+    for path in ("/amis/", "/amis/login.html"):
+        response = await client.get(path)
+        assert response.status_code == 200, f"{path} 返回 {response.status_code}，期望 200"
+        assert "<html" in response.text.lower(), f"{path} 返回的不是 HTML 登录页"
+
+    response = await client.get("/amis")
+    assert response.status_code == 404, f"裸 /amis 返回 {response.status_code}，期望 404"
+
+
+@pytest.mark.parametrize("path", [
+    "/amis/server.js",
+    "/amis/package.json",
+    "/amis/nodemon.json",
+    "/amis/README.md",
+    "/amis/%2e%2e/app/__init__.py",
+    "/amis/../app/__init__.py",
+    "/amis/SERVER.JS",
+    "/amis/%73erver.js",
+    "/amis/./server.js",
+    "/amis/pages/../../server.js",
+    "/amis/pages/%2e%2e/%2e%2e/server.js",
+    "/amis/public/../server.js",
+])
+async def test_amis_dev_files_cannot_be_reached_by_bypass(client, path):
+    """开发文件的各种绕过变体都必须 404。"""
+    response = await client.get(path)
+    assert response.status_code == 404, (
+        f"{path} 返回 {response.status_code} —— 开发文件被绕过了"
+    )
+
+
 # ---------------------------------------------------------------------------
 # L2：含空字节的路径不应 500
 # ---------------------------------------------------------------------------
