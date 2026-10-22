@@ -76,7 +76,7 @@ def setup_openapi(app: Sanic, title: str = None, version: str = None,
     # routes_all 按路径去重且键为元组，会丢失同路径的多方法处理函数
     for route in app.router.routes:
         _process_route(route, route.uri)
-    
+
     # 为blueprint组织标签
     _organize_tags_by_blueprint(app)
 
@@ -85,6 +85,13 @@ def _process_route(route: Route, uri: str) -> None:
     """处理单个路由，提取API信息并添加到OpenAPI规范中"""
     # 忽略内部路由和静态文件路由
     if uri.startswith(_SKIP_PREFIXES):
+        return
+
+    # 忽略 405 兜底路由：``register_view`` 会为每个 URI 额外注册一条
+    # "方法不被允许" 的处理函数，它的方法集是该 URI **不支持**的那些
+    # （DELETE/GET/OPTIONS/PATCH/POST 之类）。若把它收进规范，会把
+    # 实际不存在的操作写进 OpenAPI（并因后写覆盖而丢掉真实的 view 方法）。
+    if str(getattr(route, "name", "") or "").endswith("_method_not_allowed"):
         return
     
     handler = route.handler

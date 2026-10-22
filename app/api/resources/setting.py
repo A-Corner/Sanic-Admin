@@ -25,6 +25,8 @@ from sanic.views import HTTPMethodView
 
 from app.api import APIResponse, v1_bp
 from app.api.responses import APIError
+from app.api.resources.route_methods import register_view
+from app.api.validators import parse_pagination
 from app.auth.authorization import check_permissions
 from app.models import SystemSetting
 
@@ -48,6 +50,79 @@ VALUE_TYPES = ("string", "int", "float", "bool", "json")
 
 #: 分页上限
 MAX_PAGE_SIZE = 100
+
+#: ``description`` 字段长度上限（与模型 ``CharField(max_length=255)`` 对齐）
+DESCRIPTION_MAX_LENGTH = 255
+
+#: ``category`` 字段长度上限（与模型 ``CharField(max_length=50)`` 对齐）
+CATEGORY_MAX_LENGTH = 50
+
+#: 布尔字段的合法字符串取值（供 ``is_public`` 解析）
+_TRUE_STRINGS = ("true", "1", "yes", "on")
+_FALSE_STRINGS = ("false", "0", "no", "off")
+
+
+def _parse_bool(value: Any) -> Optional[bool]:
+    """
+    解析布尔字段。
+
+    **不能直接用 ``bool(value)``**：``bool("false")`` 是 ``True``（非空字符串为真），
+    客户端传 JSON 字符串 ``"false"`` 会被当成 True 写进库。
+
+    支持：真正的布尔值、``"true"/"false"``、``"1"/"0"``、``"yes"/"no"``、
+    ``"on"/"off"``（大小写不敏感），以及数值 0/1。
+
+    Args:
+        value: 原始值
+
+    Returns:
+        Optional[bool]: 解析结果；无法解析时返回 None
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_STRINGS:
+            return True
+        if text in _FALSE_STRINGS:
+            return False
+    return None
+
+
+def _validate_text_fields(data: Dict[str, Any]) -> Optional[str]:
+    """
+    校验 ``description`` / ``category`` 这类文本字段。
+
+    检查项：
+
+    * 必须是字符串（否则会被字符串化落库，如 dict 变成 ``"{'a': 1}"``）；
+    * 长度不超过模型字段上限（超长会被数据库截断或报错）。
+
+    Args:
+        data: 白名单提取后的待写入数据
+
+    Returns:
+        Optional[str]: 错误描述；校验通过返回 None
+    """
+    for field, max_length in (("description", DESCRIPTION_MAX_LENGTH),
+                              ("category", CATEGORY_MAX_LENGTH)):
+        if field not in data:
+            continue
+        value = data[field]
+        if value is None:
+            # ``None`` 是**显式提供的非法值**，不是"未提供该字段"：
+            # category 的模型字段不允许 null（default="general"），
+            # 若放行 None 会在落库时抛 ValidationError → 500。
+            # description 允许 null，但"清空说明"与"不修改"无法区分，
+            # 统一按非法值拒绝更安全。
+            return f"{field} 不能是 null"
+        if not isinstance(value, str):
+            return f"{field} 必须是字符串"
+        if len(value) > max_length:
+            return f"{field} 长度不能超过 {max_length} 个字符"
+    return None
 
 
 def _bad_request(message: str, details: Any = None):
@@ -112,6 +187,10 @@ def validate_value_type(value: Any, value_type: str) -> Optional[str]:
     """
     校验值是否匹配声明的类型，不匹配时返回错误说明，匹配返回 None。
     """
+    # null 不是合法值：``str(None)`` 会落库成字面量 "None"，
+    # 读回来时又被当作有效配置 —— 配置里出现字符串 "None" 比报错更糟。
+    if value is None:
+        return "value 不能是 null"
     try:
         if value_type == "int":
             int(value)
@@ -125,6 +204,10 @@ def validate_value_type(value: Any, value_type: str) -> Optional[str]:
                 pass  # 已经是 JSON 对象
             else:
                 json.loads(str(value))
+        elif value_type == "string":
+            # string 类型此前没有任何校验分支，导致 value=null 穿过校验
+            if not isinstance(value, str):
+                return "值必须是字符串"
     except (ValueError, TypeError, json.JSONDecodeError):
         return f"值与声明的类型 {value_type} 不匹配"
     return None
@@ -169,8 +252,9 @@ class SettingResource(HTTPMethodView):
     @check_permissions("setting", "read")
     async def get(self, request: Request):
         """获取设置列表。"""
-        page = _positive_int(request.args.get("page"), 1)
-        page_size = min(_positive_int(request.args.get("page_size"), 20), MAX_PAGE_SIZE)
+        # 用 parse_pagination 而不是自带的 _positive_int：页码被钳制到 MAX_PAGE，
+        # 否则超大 page 会让 OFFSET 溢出 SQLite 整数范围 → IntegrityError → 500。
+        page, page_size = parse_pagination(request, 20, MAX_PAGE_SIZE)
 
         query = SystemSetting.filter(deleted=False)
         category = request.args.get("category")
@@ -218,21 +302,49 @@ class SettingResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
-        if await SystemSetting.filter(key=key).exists():
+        text_error = _validate_text_fields(data)
+        if text_error:
+            return _bad_request(text_error)
+
+        # is_public 显式解析：bool("false") 是 True，直接 bool() 会把
+        # 客户端传的字符串 "false" 存成 True。
+        is_public = _parse_bool(data.get("is_public", False))
+        if is_public is None:
+            return _bad_request("is_public 必须是布尔值，或 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' 字符串（大小写不敏感）")
+
+        # key 在模型上是唯一列，软删除的记录**仍然占用** key。
+        # 因此这里不过滤 deleted：
+        #   * 未删除的同 key 已存在 → 409（语义正确）；
+        #   * 只有软删除的同 key → 把那条记录"复活"（清掉 deleted 并写入新值），
+        #     否则新建会撞唯一约束（IntegrityError → 500），
+        #     且软删除后同 key 永远无法重建（原先 exists() 不过滤 deleted → 死锁 409）。
+        existing = await SystemSetting.filter(key=key).first()
+        if existing is not None and not existing.deleted:
             return APIResponse.error(
                 message=f"设置键 '{key}' 已存在",
                 error_code=APIError.CONFLICT,
                 status_code=409,
             )
 
-        setting = await SystemSetting.create(
-            key=key,
-            value=_store_value(data["value"], value_type),
-            value_type=value_type,
-            description=data.get("description"),
-            category=data.get("category", "general"),
-            is_public=bool(data.get("is_public", False)),
-        )
+        if existing is not None:
+            # 复活软删除的同 key 记录
+            existing.value = _store_value(data["value"], value_type)
+            existing.value_type = value_type
+            existing.description = data.get("description")
+            existing.category = data.get("category", "general")
+            existing.is_public = is_public
+            existing.deleted = False
+            await existing.save()
+            setting = existing
+        else:
+            setting = await SystemSetting.create(
+                key=key,
+                value=_store_value(data["value"], value_type),
+                value_type=value_type,
+                description=data.get("description"),
+                category=data.get("category", "general"),
+                is_public=is_public,
+            )
         return APIResponse.created(
             data=format_setting(setting),
             message="创建系统设置成功",
@@ -279,6 +391,10 @@ class SettingItemResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
+        text_error = _validate_text_fields(data)
+        if text_error:
+            return _bad_request(text_error)
+
         setting.value = _store_value(data["value"], value_type)
         setting.value_type = value_type
         if "description" in data:
@@ -286,7 +402,11 @@ class SettingItemResource(HTTPMethodView):
         if "category" in data:
             setting.category = data["category"]
         if "is_public" in data:
-            setting.is_public = bool(data["is_public"])
+            # 显式解析：bool("false") 是 True，会把字符串 "false" 存成 True
+            is_public = _parse_bool(data["is_public"])
+            if is_public is None:
+                return _bad_request("is_public 必须是布尔值，或 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' 字符串（大小写不敏感）")
+            setting.is_public = is_public
         await setting.save()
 
         return APIResponse.success(data=format_setting(setting), message="更新系统设置成功")
@@ -337,6 +457,10 @@ class SettingByKeyResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
+        text_error = _validate_text_fields(data)
+        if text_error:
+            return _bad_request(text_error)
+
         setting.value = _store_value(data["value"], value_type)
         setting.value_type = value_type
         if "description" in data:
@@ -344,7 +468,11 @@ class SettingByKeyResource(HTTPMethodView):
         if "category" in data:
             setting.category = data["category"]
         if "is_public" in data:
-            setting.is_public = bool(data["is_public"])
+            # 显式解析：bool("false") 是 True，会把字符串 "false" 存成 True
+            is_public = _parse_bool(data["is_public"])
+            if is_public is None:
+                return _bad_request("is_public 必须是布尔值，或 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' 字符串（大小写不敏感）")
+            setting.is_public = is_public
         await setting.save()
 
         return APIResponse.success(data=format_setting(setting), message="更新系统设置成功")
@@ -412,22 +540,20 @@ class SettingBulkResource(HTTPMethodView):
         )
 
 
-def _positive_int(value: Any, default: int) -> int:
-    """把请求参数解析为正整数，非法时回落到默认值。"""
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return default
-    return number if number > 0 else default
-
-
 # 注册路由（显式指定路由名：同一个 view 类注册两次时 Sanic 会报路由名重复）
+# 用 ``register_view``（而不是 ``v1_bp.add_route``）：后者遇到 ``HTTPMethodView``
+# 处理器时会**忽略传入的 methods**，按视图类反推方法集；而 Sanic 23.6 对
+# **动态路径**的方法不匹配会把 ``NoMethod`` 转成 ``NotFound`` → **404**
+# （谎报资源不存在）。``register_view`` 用 ``Blueprint.route`` 原样注册方法，
+# 并给其余方法挂 405 兜底，详见 ``app/api/resources/route_methods.py``。
 setting_resource = SettingResource()
 setting_item_resource = SettingItemResource()
 setting_by_key_resource = SettingByKeyResource()
 setting_bulk_resource = SettingBulkResource()
 
-v1_bp.add_route(setting_resource.as_view(), "/settings", methods=["GET", "POST"], name="setting_collection")
-v1_bp.add_route(setting_item_resource.as_view(), "/settings/<setting_id:int>", methods=["GET", "PUT", "DELETE"], name="setting_item")
-v1_bp.add_route(setting_by_key_resource.as_view(), "/settings/key/<key:str>", methods=["GET", "PUT"], name="setting_by_key")
-v1_bp.add_route(setting_bulk_resource.as_view(), "/settings/bulk", methods=["GET", "PUT"], name="setting_bulk")
+register_view(v1_bp, "/settings", setting_resource, ["GET", "POST"], "setting_collection")
+register_view(v1_bp, "/settings/<setting_id:int>", setting_item_resource,
+              ["GET", "PUT", "DELETE"], "setting_item")
+register_view(v1_bp, "/settings/key/<key:str>", setting_by_key_resource,
+              ["GET", "PUT"], "setting_by_key")
+register_view(v1_bp, "/settings/bulk", setting_bulk_resource, ["GET", "PUT"], "setting_bulk")

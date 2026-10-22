@@ -63,7 +63,13 @@ def _method_not_allowed_handler(request, **kwargs):
     注意：**不能**在这里做认证/授权判断 —— 路由匹配已经失败，
     处理函数拿不到视图的权限装饰器语义；405 表达的是"这个 URI 不支持
     这个方法"，与"有没有权限"无关（权限不足由视图自己返回 403）。
+
+    RFC 9110 要求 405 响应的 ``Allow`` 头列出该资源支持的方法。
+    这里从 ``request.route``（Sanic 匹配到的路由）取该 URI 实际注册的方法；
+    取不到时退回到空列表（不返回 Allow 头，也不因此报错）。
     """
+    allow = _allowed_methods_for(request)
+    headers = {"Allow": ", ".join(allow)} if allow else None
     return json(
         {
             "success": False,
@@ -71,7 +77,46 @@ def _method_not_allowed_handler(request, **kwargs):
             "error": "METHOD_NOT_ALLOWED",
         },
         status=405,
+        headers=headers,
     )
+
+
+def _allowed_methods_for(request) -> list:
+    """
+    取出该 URI 实际支持的方法列表，供 405 响应的 ``Allow`` 头使用。
+
+    兜底路由本身只注册了"不被支持"的方法，所以要从**同一 URI** 的其它路由
+    （即真正处理请求的那个 view 路由）取方法集合。
+
+    实现：从应用的路由表里找出所有 path 相同、且不是兜底路由的条目，
+    把它们的方法并起来。取不到时返回空列表（调用方据此省略 Allow 头）。
+
+    ``OPTIONS`` 不列入：它由 CORS 预检中间件在路由之前就返回 204，不走 405 分支。
+    ``HEAD`` 列入：GET 存在时 HEAD 由视图回落处理，同样属该 URI 支持的方法。
+    """
+    route = getattr(request, "route", None)
+    path = getattr(route, "path", None)
+    if not path:
+        return []
+
+    app = getattr(request, "app", None)
+    router = getattr(app, "router", None)
+    routes = getattr(router, "routes", None) or []
+
+    supported = set()
+    for r in routes:
+        if getattr(r, "path", None) != path:
+            continue
+        if str(getattr(r, "name", "") or "").endswith("_method_not_allowed"):
+            continue
+        methods = getattr(r, "methods", None) or ()
+        supported.update(methods)
+
+    if not supported:
+        # 退化：直接用匹配到的路由自身的方法（兜底路由自身的方法是不被支持的那些，
+        # 这种情况说明没有 view 路由可参考，宁可不给 Allow 头也不要给错的）。
+        return []
+    return [m for m in ALL_HTTP_METHODS if m in supported and m != "OPTIONS"]
 
 
 def register_view(blueprint: Blueprint, uri: str, view: HTTPMethodView,

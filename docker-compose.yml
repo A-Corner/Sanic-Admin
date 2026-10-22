@@ -17,6 +17,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 受限网络（无法直连 pypi.org）时，在 .env 里设 PIP_INDEX_URL 即可换源。
+      # 默认值保持官方源，不改变默认行为。
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     image: sanic-admin:latest
     container_name: sanic-admin-app
     restart: unless-stopped

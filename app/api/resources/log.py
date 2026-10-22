@@ -18,6 +18,7 @@ from sanic.views import HTTPMethodView
 from tortoise.functions import Count
 
 from app.api import APIResponse, v1_bp
+from app.api.resources.route_methods import register_view
 from app.api.responses import APIError
 from app.api.validators import parse_pagination
 from app.auth.authorization import check_permissions
@@ -176,7 +177,6 @@ class LogStatisticsResource(HTTPMethodView):
 log_resource = LogResource()
 log_statistics_resource = LogStatisticsResource()
 
-v1_bp.add_route(log_resource.as_view(), "/logs/<log_id:int>", methods=["GET"], name="log_detail")
-v1_bp.add_route(log_resource.as_view(), "/logs", methods=["GET"], name="log_list")
-v1_bp.add_route(log_statistics_resource.as_view(), "/logs/statistics", methods=["GET"],
-                name="log_statistics")
+register_view(v1_bp, "/logs/<log_id:int>", log_resource, ["GET"], "log_detail")
+register_view(v1_bp, "/logs", log_resource, ["GET"], "log_list")
+register_view(v1_bp, "/logs/statistics", log_statistics_resource, ["GET"], "log_statistics")

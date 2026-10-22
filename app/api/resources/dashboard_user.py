@@ -8,6 +8,7 @@
 from sanic.request import Request
 from sanic.views import HTTPMethodView
 from app.api import APIResponse, v1_bp, APIError
+from app.api.resources.route_methods import register_view
 from app.models import Account, Role, OperationLog
 from app.auth.authorization import requires_permission
 from typing import Dict, Any, List, Optional, Tuple
@@ -559,6 +560,6 @@ user_activity = UserActivityResource()
 feature_usage = FeatureUsageResource()
 permission_analysis = PermissionAnalysisResource()
 
-v1_bp.add_route(user_activity.get, "/dashboard/user-activity", methods=["GET"])
-v1_bp.add_route(feature_usage.get, "/dashboard/feature-usage", methods=["GET"])
-v1_bp.add_route(permission_analysis.get, "/dashboard/permission-analysis", methods=["GET"]) 
+register_view(v1_bp, "/dashboard/user-activity", user_activity, ["GET"], "dashboard_user_activity")
+register_view(v1_bp, "/dashboard/feature-usage", feature_usage, ["GET"], "dashboard_feature_usage")
+register_view(v1_bp, "/dashboard/permission-analysis", permission_analysis, ["GET"], "dashboard_permission_analysis")

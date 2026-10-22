@@ -34,6 +34,8 @@ from tortoise.expressions import F
 
 from app.api import APIResponse, v1_bp
 from app.api.responses import APIError
+from app.api.resources.route_methods import register_view
+from app.api.validators import parse_pagination
 from app.auth.authentication import authenticate_request
 from app.auth.authorization import check_permissions, has_permission, requires_permission
 from app.models import Profile, UploadedFile
@@ -168,15 +170,6 @@ def _iter_uploaded_files(files) -> list:
     return [files]
 
 
-def _parse_positive_int(value, default: int, maximum: Optional[int] = None) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return default
-    number = max(1, number)
-    return min(number, maximum) if maximum else number
-
-
 async def store_upload(file, account, category: str, *, allowed: Optional[set] = None,
                        max_size: int = MAX_FILE_SIZE) -> UploadedFile:
     """校验并保存一个上传文件，返回数据库记录。校验失败抛 UploadError。"""
@@ -272,7 +265,7 @@ class FileUploadResource(HTTPMethodView):
         return APIResponse.created(data={"files": uploaded}, message=f"成功上传{len(uploaded)}个文件")
 
 
-class AvatarUploadResource:
+class AvatarUploadResource(HTTPMethodView):
     """
     头像上传（自助操作）：``POST /api/v1/upload/avatar``
 
@@ -316,14 +309,16 @@ def _avatar_file_id(avatar_url: Optional[str]) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
-class FileListResource:
+class FileListResource(HTTPMethodView):
     """文件列表：``GET /api/v1/files``"""
 
     @requires_permission("file:read")
     async def get(self, request: Request):
         account = request.ctx.authentication_session.bearer
-        page = _parse_positive_int(request.args.get("page"), 1)
-        page_size = _parse_positive_int(request.args.get("page_size"), 20, maximum=100)
+        # 用 parse_pagination 而不是自带的 _parse_positive_int：页码被钳制到
+        # MAX_PAGE，否则超大 page 会让 OFFSET 溢出 SQLite 整数范围
+        # → IntegrityError: datatype mismatch → 500。
+        page, page_size = parse_pagination(request, 20, 100)
         query = UploadedFile.filter(deleted=False)
         if request.args.get("category"):
             query = query.filter(category=request.args.get("category"))
@@ -338,7 +333,7 @@ class FileListResource:
                                 page_size=page_size, message="获取文件列表成功")
 
 
-class FileDownloadResource:
+class FileDownloadResource(HTTPMethodView):
     """
     文件下载：``GET /api/v1/files/<id>/download``
 
@@ -389,7 +384,7 @@ class FileDownloadResource:
         )
 
 
-class FileDeleteResource:
+class FileDeleteResource(HTTPMethodView):
     """
     文件删除：``DELETE /api/v1/files/<id>``
 
@@ -419,15 +414,26 @@ class FileDeleteResource:
 
 
 # 注册路由
+#
+# 用 ``register_view``（而不是 ``v1_bp.add_route``）：
+# * ``Blueprint.add_route`` 遇到 ``HTTPMethodView`` 处理器时会**忽略传入的 methods**，
+#   按视图类反推方法集 —— 同一个视图类注册到多个 URI 时（如 ``FileUploadResource``
+#   同时注册到 ``/upload`` 与 ``/upload/<category>``）每个 URI 都会拿到该视图的
+#   **全部**方法，命中签名不匹配的处理函数时缺参数 → **500**；
+# * Sanic 23.6 对**动态路径**的方法不匹配会把 ``NoMethod`` 转成 ``NotFound``
+#   → **404**（谎报资源不存在）。
+#
+# ``register_view`` 用 ``Blueprint.route`` 原样注册方法，并给其余方法挂 405 兜底，
+# 详见 ``app/api/resources/route_methods.py``。
 file_upload_resource = FileUploadResource()
 avatar_upload_resource = AvatarUploadResource()
 file_list_resource = FileListResource()
 file_download_resource = FileDownloadResource()
 file_delete_resource = FileDeleteResource()
 
-v1_bp.add_route(avatar_upload_resource.post, "/upload/avatar", methods=["POST"])
-v1_bp.add_route(file_upload_resource.as_view(), "/upload", methods=["POST"])
-v1_bp.add_route(file_upload_resource.as_view(), "/upload/<category:str>", methods=["POST"])
-v1_bp.add_route(file_list_resource.get, "/files", methods=["GET"])
-v1_bp.add_route(file_download_resource.get, "/files/<file_id:int>/download", methods=["GET"])
-v1_bp.add_route(file_delete_resource.delete, "/files/<file_id:int>", methods=["DELETE"])
+register_view(v1_bp, "/upload/avatar", avatar_upload_resource, ["POST"], "avatar_upload")
+register_view(v1_bp, "/upload", file_upload_resource, ["POST"], "file_upload")
+register_view(v1_bp, "/upload/<category:str>", file_upload_resource, ["POST"], "file_upload_category")
+register_view(v1_bp, "/files", file_list_resource, ["GET"], "file_list")
+register_view(v1_bp, "/files/<file_id:int>/download", file_download_resource, ["GET"], "file_download")
+register_view(v1_bp, "/files/<file_id:int>", file_delete_resource, ["DELETE"], "file_delete")

@@ -12,17 +12,139 @@ development/testing 默认开启，production 默认关闭。
 
 import importlib
 import os
+from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote
 
 from sanic import Sanic
+from sanic.exceptions import NotFound
+from sanic.handlers.directory import DirectoryHandler
 from sanic.log import logger
-from sanic.response import json as json_response
+from sanic.response import file, json as json_response
 
 from app.config import ConfigError, config_to_dict, get_config, settings
 from app.middleware import register_all_middlewares
 from app.middleware.compression import configure_compression
 
 __all__ = ["create_app", "ConfigError"]
+
+#: AMIS 静态目录下**不应对外提供**的文件（开发期配置与源码）。
+#: 这些文件既无运行期用途，又会泄漏开发环境信息（依赖清单、监听端口等），
+#: 因此整目录静态托管时必须显式排除。
+AMIS_PRIVATE_FILES = frozenset({
+    "server.js",
+    "package.json",
+    "package-lock.json",
+    "nodemon.json",
+    "README.md",
+})
+
+#: AMIS 根目录下的入口页面（运行期需要的顶层 HTML）。
+AMIS_ENTRY_PAGES = ("login.html", "index.html")
+
+
+class _NoDirectoryListingHandler(DirectoryHandler):
+    """裸目录路径返回 404，而不是触发 Sanic 默认的 500。
+
+    Sanic 的 ``DirectoryHandler`` 在既无 ``index`` 又未开启 ``directory_view`` 时
+    会 ``raise IsADirectoryError`` —— 那是**未捕获异常**，直接变成 500。
+    访问 ``/amis/css/`` 这类裸目录路径就会命中它，等于开了一个可外部触发的
+    500 面。
+
+    这里覆写 ``handle``：只保留"index 文件命中"与"文件直出"两条正常路径，
+    其余一律 404 —— 静态资源目录不应该被列目录。
+    """
+
+    async def handle(self, request, path):
+        try:
+            return await super().handle(request, path)
+        except IsADirectoryError:
+            raise NotFound("File not found")
+
+
+def _register_amis_index(app: Sanic, amis_dir: str) -> None:
+    """挂载 /amis 根路径：``/amis/`` 显示登录页，裸 ``/amis`` 返回 404。
+
+    为什么不用 ``app.static``：Sanic 的 ``app.static(uri, <文件>)`` 会把 uri 的
+    尾部斜杠去掉再注册（``app.static("/amis/", login.html)`` 注册的路由 uri 是
+    ``/amis``），且全局 ``strict_slashes=False`` 使 ``/amis`` 与 ``/amis/``
+    等价 —— 裸 ``/amis`` 会命中并返回 200。
+
+    而 v0.2.0 用的是整目录挂载（``app.static("/amis", amis_dir, index=...)``），
+    路由被改写成 ``/amis/<__file_uri__:path>``，裸 ``/amis`` 不匹配 → 404。
+    docker-acceptance 断言的正是这个行为。
+
+    这里改用普通路由精确控制：``/amis/`` 走登录页，其余路径按静态文件处理，
+    开发文件与路径逃逸一律 404。
+    """
+    amis_root = Path(amis_dir).resolve()
+
+    @app.route("/amis/", methods=["GET", "HEAD"], strict_slashes=True)
+    async def amis_index(request):
+        index_file = amis_root / AMIS_ENTRY_PAGES[0]
+        if not index_file.is_file():
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        return await file(index_file)
+
+    @app.route("/amis/<path:__rest__>", methods=["GET", "HEAD"], strict_slashes=True)
+    async def amis_files(request, __rest__):
+        # 开发文件不公开
+        if __rest__.split("/")[0] in AMIS_PRIVATE_FILES:
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        target = (amis_root / __rest__).resolve()
+        try:
+            target.relative_to(amis_root)
+        except ValueError:
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        if not target.is_file():
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        return await file(target)
+
+
+def _register_amis_static(app: Sanic, amis_dir: str) -> None:
+    """
+    托管 AMIS 管理界面，同时挡住开发文件。
+
+    做法：不整目录静态托管（那会把 ``server.js``、``package.json`` 等开发文件
+    一并公开），而是分两类挂载：
+
+    * **子目录**：枚举 ``amis_dir`` 下实际存在的所有子目录逐个挂载。枚举而非
+      硬编码清单，是为了避免新增资源目录时漏挂（``public/`` 曾因写死清单而
+      整目录 404，导致 AMIS 仪表盘 logo 加载不到）。
+    * **顶层文件**：只有 ``login.html`` / ``index.html`` 两个入口页面被显式挂载。
+
+    顶层其余文件（``server.js``、``package.json``、``nodemon.json``、
+    ``README.md`` 等开发文件）没有对应路由，自然返回 404。
+    """
+    # 所有子目录：枚举实际存在的，避免硬编码清单漏挂
+    try:
+        subdirs = sorted(
+            name for name in os.listdir(amis_dir)
+            if os.path.isdir(os.path.join(amis_dir, name))
+            and not name.startswith(".")
+        )
+    except OSError:
+        subdirs = []
+    for sub in subdirs:
+        sub_path = os.path.join(amis_dir, sub)
+        app.static(
+            f"/amis/{sub}",
+            sub_path,
+            name=f"amis_{sub}",
+            directory_handler=_NoDirectoryListingHandler(
+                f"/amis/{sub}", Path(sub_path)
+            ),
+        )
+
+    # 根目录下的入口页面单独挂载
+    for page in AMIS_ENTRY_PAGES:
+        page_path = os.path.join(amis_dir, page)
+        if os.path.isfile(page_path):
+            app.static(f"/amis/{page}", page_path, name=f"amis_page_{page[:-5]}")
+
+    # /amis/ 显示登录页；裸 /amis 返回 404（与 v0.2.0 行为一致）
+    _register_amis_index(app, amis_dir)
+
 
 
 def _resolve_config(config: Any) -> dict:
@@ -56,7 +178,15 @@ def create_app(config: Optional[Any] = None) -> Sanic:
     # 确保上传目录存在；静态目录存在时才挂载
     os.makedirs(app.config.UPLOAD_DIR, exist_ok=True)
     if os.path.isdir(app.config.STATIC_DIR):
-        app.static('/static', app.config.STATIC_DIR)
+        # 同样禁用目录列表：裸目录路径（/static/）否则会被 Sanic 的
+        # DirectoryHandler 抛成 500（见 _NoDirectoryListingHandler 注释）。
+        app.static(
+            '/static',
+            app.config.STATIC_DIR,
+            directory_handler=_NoDirectoryListingHandler(
+                '/static', Path(app.config.STATIC_DIR)
+            ),
+        )
     # 上传目录不对外静态托管：否则任何人都能直接下载他人上传的文件。
     # 文件下载统一走需要鉴权的 GET /api/v1/files/<id>/download。
     # 托管 AMIS 管理界面（与 API 同源，便于复用 HttpOnly 会话 Cookie）。
@@ -64,7 +194,7 @@ def create_app(config: Optional[Any] = None) -> Sanic:
     # 显式指定 name，避免与 /static 的默认路由名重复（Sanic 23.6 拒绝重名路由）。
     amis_dir = app.config.get('AMIS_DIR')
     if amis_dir and os.path.isdir(amis_dir):
-        app.static('/amis', amis_dir, index='login.html', name='amis')
+        _register_amis_static(app, amis_dir)
 
     register_all_middlewares(app)
     configure_compression(
@@ -72,6 +202,32 @@ def create_app(config: Optional[Any] = None) -> Sanic:
         min_length=app.config.get('COMPRESSION_MIN_LENGTH', 1024),
         compression_level=app.config.get('COMPRESSION_LEVEL', 6),
     )
+
+    @app.on_request
+    async def reject_null_byte_path(request):
+        """
+        拒绝路径中含空字节（``\\x00``）的请求。
+
+        静态文件处理器会把请求路径拼到磁盘路径上再求 realpath，空字节会让
+        ``posixpath`` 抛 ``ValueError: lstat: embedded null character in path``，
+        最终变成 500。带空字节的路径一律没有合法用途，直接 400。
+
+        注意：``request.path`` 是**未解码**的路径（``%00`` 仍是三个字符），
+        所以必须先 ``unquote`` 才能看到真正的空字节。
+        """
+        try:
+            decoded = unquote(request.path)
+        except Exception:  # noqa: BLE001 - 非法编码不应导致 500
+            return json_response(
+                {"success": False, "message": "非法路径", "error": "INVALID_PATH"},
+                status=400,
+            )
+        if "\x00" in decoded:
+            return json_response(
+                {"success": False, "message": "非法路径", "error": "INVALID_PATH"},
+                status=400,
+            )
+        return None
 
     @app.get('/health')
     async def health(request):

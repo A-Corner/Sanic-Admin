@@ -13,7 +13,7 @@
 
 本仓库正处于**重构中段**，`README.md` 明确写了"尚不可用于生产环境"。
 后端骨架（配置 / 中间件 / 模型 / 认证 / 缓存 / 文档装饰器）已可运行，
-**API v1 资源层已挂载并可用**，测试**全绿（95 passed）**。
+**API v1 资源层已挂载并可用**，测试**全绿（171 passed）**。
 
 因此：
 
@@ -212,8 +212,8 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 | 命令 | 真实结果 |
 |---|---|
 | `pytest --collect-only -q` | **95 tests collected** |
-| `pytest -q` | **95 passed, 88 warnings**（约 90 秒，exit 0） |
-| `pytest --cov=app --cov-report=term -q` | **95 passed**，覆盖率 **50%**（5535 语句 / 2750 未覆盖）；加 `--cov` 约 6 分钟 |
+| `pytest -q` | **171 passed, 136 warnings**（约 65 秒，exit 0） |
+| `pytest --cov=app --cov-report=term -q` | **171 passed**，覆盖率 **52%**（5667 语句 / 2726 未覆盖）；加 `--cov` 约 80 秒 |
 | `ruff check . --select E9,F63,F7,F82` | **All checks passed!**（exit 0） |
 
 按文件的用例数：
@@ -242,7 +242,7 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 ```bash
 .venv/bin/python tests/generate_coverage_report.py
 ```
-已实测：总覆盖率 50%（5535 语句 / 2750 未覆盖），详见 §3.2。
+已实测：总覆盖率 52%（5667 语句 / 2726 未覆盖），详见 §3.2。
 
 ### 3.4 CI 现状
 
@@ -599,7 +599,7 @@ app/middleware/error_handler.py 统一异常 → JSON
 
 **`/api/v1/*` 已挂载**：`app/api/__init__.py` 用
 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 装配。
-实测 `GET /api/v1/settings` → 200，OpenAPI 规范 57 条 path。
+实测 `GET /api/v1/settings` → 200，OpenAPI 规范 66 条 path。
 注意 `/api/v1/health` 这个路由在代码中**从未存在**，它 404 不代表蓝图没挂载。
 
 **无需认证即可访问的端点**（实测）：
@@ -680,7 +680,7 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 |---|---|---|---|
 | 1 | `app.models.permission` 模块缺失 | 已由 M1 补齐，权限注册表移到 `app/auth/permissions.py` | 已解决 |
 | 2 | `app.cache.backends` 模块缺失 | 已由 M1 补齐，实际结构 `app/cache/{base,memory,redis}.py` | 已解决 |
-| 3 | `BlueprintGroup.add_blueprint` 不存在 | M1 改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` | 已解决：`/api/v1` 正常挂载，OpenAPI 规范 57 条 path |
+| 3 | `BlueprintGroup.add_blueprint` 不存在 | M1 改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` | 已解决：`/api/v1` 正常挂载，OpenAPI 规范 66 条 path |
 | 4 | `create_app()` 未调用 `setup_docs()` | M1 已接线，由 `ENABLE_API_DOCS` 控制（开发开、生产关） | 已解决：`/swagger` 302→200、`/redoc` 200、`/swagger.json` 200 |
 | 5 | `tests/test_docs/` 两个同名 `Sanic("test_app")` fixture | 测试套件已重建 | 已解决 |
 | 6 | `test_openapi_spec_generation` 尾斜杠断言 | 测试套件已重建 | 已解决 |
@@ -696,10 +696,10 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 
 ## 10. 已知问题速查（写 PR 描述时可直接引用）
 
-- **pytest 全绿**：`95 passed`，0 失败 0 错误（§3.2）。
-- **覆盖率 50%**（§3.2）——本版本已知的短板。
+- **pytest 全绿**：`171 passed`，0 失败 0 错误（§3.2）。
+- **覆盖率 52%**（§3.2）——本版本已知的短板。
 - **`ruff check .` 通过**（exit 0）。
-- **`/api/v1` 已挂载**，OpenAPI 规范 57 条 path。注意 `/api/v1/health` 这个路由**在代码中从未存在**，
+- **`/api/v1` 已挂载**，OpenAPI 规范 66 条 path。注意 `/api/v1/health` 这个路由**在代码中从未存在**，
   它返回 404 不代表 API 蓝图没挂载。
 - **`/swagger`、`/redoc`、`/swagger.json` 在开发环境可用**；生产环境需显式 `ENABLE_API_DOCS=true`。
 - **`/docs` 是 302 跳转到 `/swagger`**，规范在 `/swagger.json`，**不在** `/docs/openapi.json`（后者 404）。

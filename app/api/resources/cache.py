@@ -24,6 +24,7 @@ from sanic.request import Request
 from sanic.views import HTTPMethodView
 
 from app.api import APIResponse, v1_bp
+from app.api.resources.route_methods import register_view
 from app.api.responses import APIError
 from app.auth.authorization import check_permissions
 from app.cache import get_cache
@@ -268,6 +269,6 @@ cache_resource = CacheResource()
 cache_keys_resource = CacheKeysResource()
 cache_key_resource = CacheKeyResource()
 
-v1_bp.add_route(cache_resource.as_view(), "/cache", name="cache_overview")
-v1_bp.add_route(cache_keys_resource.as_view(), "/cache/keys", name="cache_keys")
-v1_bp.add_route(cache_key_resource.as_view(), "/cache/keys/<key:str>", name="cache_key")
+register_view(v1_bp, "/cache", cache_resource, ["GET"], "cache_overview")
+register_view(v1_bp, "/cache/keys", cache_keys_resource, ["GET"], "cache_keys")
+register_view(v1_bp, "/cache/keys/<key:str>", cache_key_resource, ["GET"], "cache_key")

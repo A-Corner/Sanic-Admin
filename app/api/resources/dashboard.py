@@ -8,6 +8,7 @@
 from sanic.request import Request
 from sanic.views import HTTPMethodView
 from app.api import APIResponse, v1_bp
+from app.api.resources.route_methods import register_view
 from app.models import Account, Role, OperationLog, UploadedFile
 from app.auth.authorization import requires_permission
 from app.cache.decorators import cached
@@ -359,6 +360,6 @@ dashboard_summary = DashboardSummaryResource()
 dashboard_activities = DashboardActivitiesResource()
 dashboard_storage = DashboardStorageResource()
 
-v1_bp.add_route(dashboard_summary.get, "/dashboard/summary", methods=["GET"])
-v1_bp.add_route(dashboard_activities.get, "/dashboard/activities", methods=["GET"])
-v1_bp.add_route(dashboard_storage.get, "/dashboard/storage", methods=["GET"]) 
+register_view(v1_bp, "/dashboard/summary", dashboard_summary, ["GET"], "dashboard_summary")
+register_view(v1_bp, "/dashboard/activities", dashboard_activities, ["GET"], "dashboard_activities")
+register_view(v1_bp, "/dashboard/storage", dashboard_storage, ["GET"], "dashboard_storage")

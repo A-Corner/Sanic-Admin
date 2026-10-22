@@ -540,6 +540,10 @@ def parse_pagination(request: Request, default_size: int = 20,
 
     页码会被钳制到 ``MAX_PAGE``：超大页码会让 OFFSET 溢出数据库整数范围，
     导致分页查询抛 OverflowError（500）。
+
+    各资源的默认每页条数不同时，通过 ``default_size`` / ``max_size`` 传入，
+    **不要在资源层各写一份钳制逻辑** —— 钳制规则必须集中在这里，
+    否则新资源很容易漏掉上限、重新引入 500。
     """
     def _int(name, default):
         raw = request.args.get(name)
