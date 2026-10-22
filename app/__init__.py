@@ -139,7 +139,15 @@ def create_app(config: Optional[Any] = None) -> Sanic:
     # 确保上传目录存在；静态目录存在时才挂载
     os.makedirs(app.config.UPLOAD_DIR, exist_ok=True)
     if os.path.isdir(app.config.STATIC_DIR):
-        app.static('/static', app.config.STATIC_DIR)
+        # 同样禁用目录列表：裸目录路径（/static/）否则会被 Sanic 的
+        # DirectoryHandler 抛成 500（见 _NoDirectoryListingHandler 注释）。
+        app.static(
+            '/static',
+            app.config.STATIC_DIR,
+            directory_handler=_NoDirectoryListingHandler(
+                '/static', Path(app.config.STATIC_DIR)
+            ),
+        )
     # 上传目录不对外静态托管：否则任何人都能直接下载他人上传的文件。
     # 文件下载统一走需要鉴权的 GET /api/v1/files/<id>/download。
     # 托管 AMIS 管理界面（与 API 同源，便于复用 HttpOnly 会话 Cookie）。
