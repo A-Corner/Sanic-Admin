@@ -91,6 +91,31 @@ async def register(request: Request):
     return account
 
 
+def _admin_role_permissions():
+    """
+    内置 admin 角色的初始权限：取自统一权限注册表的全量权限。
+
+    历史上这里写死 ``{"users": [...], "roles": [...], "settings": [...]}``，
+    与注册表里的资源名（``account`` / ``role`` / ``setting`` 等）完全对不上：
+    注册表里没有 ``users`` / ``roles`` / ``settings`` 这三个资源，
+    所以新装环境的 admin 角色实际上**一个真实权限都没有**。
+    （初始管理员自己还能用，只是因为 ``Account.is_admin=True`` 会短路放行。）
+
+    这里改为从 ``app.auth.permissions`` 注册表取全量权限，
+    与 ``app.auth.authorization.sync_admin_role_permissions`` 的惰性同步口径一致。
+
+    ``app.auth.permissions`` 是纯数据与纯函数模块（只 import ``typing``，不导入任何模型），
+    因此这里 import 它不会产生循环依赖。为避免模块导入期的加载顺序问题，
+    采用函数内延迟 import。
+
+    Returns:
+        dict: ``{资源: ["all"]}`` 形式的权限字典
+    """
+    from app.auth.permissions import admin_all_permissions
+
+    return admin_all_permissions()
+
+
 async def create_initial_admin_account(app=None):
     """
     创建初始管理员账户（如果不存在），口令取自环境变量 INITIAL_ADMIN_PASSWORD
@@ -122,11 +147,7 @@ async def create_initial_admin_account(app=None):
         admin_role = await Role.create(
             name="admin",
             description="管理员角色",
-            permissions={
-                "users": ["create", "read", "update", "delete"],
-                "roles": ["create", "read", "update", "delete"],
-                "settings": ["read", "update"]
-            }
+            permissions=_admin_role_permissions(),
         )
     await admin.roles.add(admin_role)
     logger.info(f"已创建初始管理员账户: {admin.email}")
