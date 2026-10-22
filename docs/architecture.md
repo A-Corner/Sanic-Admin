@@ -1,11 +1,12 @@
 # Sanic-Admin 架构文档
 
 > 适用范围：Sanic-Admin 后端（Sanic 23.6 + Tortoise ORM 0.20 + Redis + PyJWT），前端 AMIS 低代码框架。
-> 基线：`sa-oss/m23-doc` 分支，base `9a8f946`。
+> 基线：发布候选 `release/v0.2.0`，M1 候选 `8750d51`（M1 已交付并入）。
 > 事实来源：逐文件阅读 `app/` 源码 + 在临时虚拟环境中实际启动应用、抓取路由表与响应头。
 > 标注约定：
 > - **【读码确认】** = 源码可查证，且多数经过运行时实测。
-> - **> 待 M1 交付后核实** = 当前基线尚未具备该能力，只描述现状，不做前瞻承诺。
+> - **【已实测】** = 在 M1 候选 `8750d51` 上实际执行命令或发起 HTTP 请求得到的结果。
+> - **截至 `8750d51` 仍未实现** = 如实描述现状，不是前瞻承诺。
 
 ---
 
@@ -139,13 +140,16 @@ api_bp.add_blueprint(v1_bp)                          # :22
 `/api/database/...`（`app/api/resources/database.py:29`）、
 `/api/compression/...`（`app/api/resources/compression.py:26`）。
 
-> **> 待 M1 交付后核实**：当前 `Blueprint.group()` 返回的 `BlueprintGroup` 在 sanic 23.6.0 中
-> **没有 `add_blueprint` 方法**（实测 `hasattr(Blueprint.group(...), 'add_blueprint') == False`），
-> 因此 `app/api/__init__.py:22` 在 import 期就抛
-> `AttributeError: 'BlueprintGroup' object has no attribute 'add_blueprint'`，
-> 导致整个 `app.api` 包导入失败、API v1 蓝图整体降级（详见 §7）。
-> `sa-oss/m1` 分支已把这里改成 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`
-> 并删除了 `app/api/routes.py`、`app/api/example.py`。**M1 合并后本节需重新核实。**
+**【已实测】** `app/api/__init__.py:24` 用
+`Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 装配蓝图组。
+这里必须用 `Blueprint.group(...)` 的**可变参数**形式：Sanic 23.6 返回的 `BlueprintGroup`
+**没有 `add_blueprint` 方法**（实测 `hasattr(Blueprint.group(...), 'add_blueprint') == False`，
+公开方法只有 `append` / `blueprints` / `clear` / `extend` / `insert` / `pop` / `remove`），
+早期版本用 `api_bp.add_blueprint(...)` 会在 import 期就抛
+`AttributeError`，导致整个 `app.api` 包导入失败、API v1 蓝图整体降级。
+M1 已改用上述写法并删除了 `app/api/routes.py`、`app/api/example.py`。
+
+实测：蓝图正常注册，生成的 OpenAPI 规范含 **57 条 path**。
 
 ---
 
@@ -231,12 +235,26 @@ api_bp.add_blueprint(v1_bp)                          # :22
 | `app/docs/models.py` | Pydantic 模型注册与 Schema 生成 |
 | `app/docs/decorators.py` | `api_tags` / `api_summary` / `api_description` / `api_body` / `api_response` / `api_response_list` / `api_response_pagination` / `api_param` / `api_paginated_params` / `api_security` / `api_exclude` |
 
-> **> 待 M1 交付后核实**：`setup_docs()` **当前没有任何调用点**（全仓库 grep 只命中定义处），
-> 因此 `/swagger`、`/swagger.json`、`/redoc`、`/docs/models` 实测全部 **404**。
-> 现在能访问的 `/docs` 是 **sanic-ext 自带**的 OAS 页面（实测 `/docs/openapi.json` 返回 200），
-> 不是本模块产出的规范。`sa-oss/m1` 已在 `app/__init__.py` 中加入
-> `if app.config.get("ENABLE_API_DOCS"): setup_docs(app)`，并新增 `ENABLE_API_DOCS` 开关
-> （production 默认 `False`）。**M1 合并后需重新核实本文档所有 `/swagger` 相关路径。**
+**【已实测】** `setup_docs()` 已接线：`app/__init__.py` 中有
+`if app.config.get("ENABLE_API_DOCS"): setup_docs(app)`，由新增的 `ENABLE_API_DOCS` 开关控制
+（development 默认 `True`，production 默认 `False`）。
+
+development 下实测：
+
+| 端点 | 结果 |
+|---|---|
+| `GET /swagger` | 302 → `/swagger/index.html` → **200**（Swagger UI） |
+| `GET /swagger.json` | **200**，OpenAPI 3.0.3 规范，**57 条 path** |
+| `GET /redoc` | **200**（ReDoc） |
+| `GET /docs` | 302 → `/swagger`（别名） |
+| `GET /docs/models` `/docs/tags` `/docs/paths` `/docs/redoc` | **200** |
+
+production 下这些路由返回 404（`ENABLE_API_DOCS` 默认 `False`），需显式设
+`ENABLE_API_DOCS=true` 才挂载。
+
+**注意**：`sanic-ext` 自己也会在 `/docs/openapi.json` 提供一份 OpenAPI 文档，
+那是**另一套**生成器，与 `app/docs/` 不是同一份——development 下实测该路径为 **404**
+（`app/docs/routes.py` 不注册它），production 下反而是 200。**规范以 `/swagger.json` 为准。**
 
 ### 2.7 `app/middleware` —— 中间件
 
@@ -285,10 +303,11 @@ api_bp.add_blueprint(v1_bp)                          # :22
 | `app/web/routes.py` | `login_bp`（`/login`）与 `index_bp`（`/index`），用 Jinja2 渲染 `frontend/templates/login.html` / `site.html` |
 | `app/web/__init__.py` | 仅模块 docstring |
 
-> **> 待 M1 交付后核实**：`register_web_blueprints()` **当前无调用点**，且
-> `frontend/templates/` 目录在仓库中**不存在**（Jinja2 `FileSystemLoader('frontend/templates')`
-> 会直接失败）。这批 Web 渲染路由在当前基线是**死代码**。
-> M1 已把前端主线切到 AMIS 静态页（`amis/index.html`），Web 渲染路线预计会被移除。
+**【已实测】截至 `8750d51`**：`register_web_blueprints()`（`app/web/routes.py:39`）
+**仍无调用点**，且 `frontend/templates/` 目录在仓库中**不存在**
+（Jinja2 `FileSystemLoader('frontend/templates')` 会直接失败）。
+这批 Web 渲染路由是**死代码**——前端主线已切到 AMIS 静态页（`amis/`），
+Web 渲染路线是否移除留待后续版本决定。
 
 ---
 
@@ -438,10 +457,11 @@ curl -X POST /auth/associated -H "Authorization: Bearer <JWT>" # 200
 - `TwoStepSession` / `CaptchaSession` 各有独立表与独立 Cookie 名
   （`two_step_session` / `captcha_session`），避免互相覆盖。
 - 二次验证由服务端配置 `settings.REQUIRE_TWO_FACTOR` 决定，
-  **忽略客户端传入的参数**（`app/auth/routes.py:94-95`）。
-  当前基线该配置项不存在 → `getattr(..., False)` 恒为 `False` → 二次验证默认关闭。
-- **> 待 M1 交付后核实**：M1 已新增 `REQUIRE_TWO_FACTOR` 布尔环境变量
-  （`_bool_env()`，接受 `1/true/yes/on` 与 `0/false/no/off/`）。
+  **忽略客户端传入的参数**（`app/auth/routes.py:95`）。
+  该配置项已存在于 `app/config.py:242`，并可用环境变量覆盖
+  （`app/config.py:361`，`_bool_env()` 接受 `1/true/yes/on` 与 `0/false/no/off/`）。
+  **默认关闭**（`False`），需显式开启才会要求二次验证。
+  注意这是**全局开关**，不支持按账户开关——见 Release Notes 的已知限制。
 
 ### 3.5 认证中间件与会话校验的分工
 
@@ -452,12 +472,10 @@ curl -X POST /auth/associated -H "Authorization: Bearer <JWT>" # 200
 | **中间件** | `app/middleware/auth_middleware.py:14-38` | 尽力而为：从 `Authorization: Bearer` 或 Cookie 取令牌，查有效会话，挂到 `request.ctx.authentication_session`。**失败不抛异常、不中断请求** |
 | **装饰器 / 显式调用** | `app/auth/authentication.py:238-269` | 强制校验：无令牌 → `AuthenticationError`(401)；会话/账户不可用 → 抛对应异常；二次验证未完成 → `AuthenticationError` |
 
-**注意一个当前基线的缺陷**：中间件读的是 Cookie `session_id`
-（`auth_middleware.py:25`），而会话实际下发的 Cookie 名是 `session`
-（`app/models/session.py:66`）。二者对不上，因此**中间件路径在 Cookie 场景下取不到会话**，
-只有 `Authorization: Bearer` 路径能命中中间件。
-（`sa-oss/m1` 已改为读 `AuthenticationSession.cookie_name`。
-**> 待 M1 交付后核实**。）
+**【已实测】Cookie 名已对齐**：中间件现在直接读会话模型实际下发的名字
+（`app/middleware/auth_middleware.py:27` → `request.cookies.get(AuthenticationSession.cookie_name)`，
+即 `session`，见 `app/models/session.py:66`），不再硬编码 `session_id`。
+因此 `Authorization: Bearer` 与 Cookie 两条路径都能命中中间件。
 
 实际鉴权不依赖中间件——`requires_authentication` / `check_permissions` 都会调用
 `authenticate_request()` 自行解码（`authentication.py:252-257`：已挂载则复用，否则重新解码），
@@ -772,9 +790,9 @@ if AMIS_DIR and os.path.isdir(AMIS_DIR):
 `AMIS_DIR` 默认指向应用旁的 `amis/` 目录，并可通过环境变量覆盖；置空或指向不存在的目录则不挂载，
 生产环境可据此关闭管理界面。
 
-> **> 待 M1 交付后核实**：以上按 M1 的 `amis/README.md` 契约写成，落地实现在 M1 的 Lane L 中
-> （`app/config.py` 的 `AMIS_DIR` 配置项 + `app/__init__.py` 的 `/amis` 挂载）。
-> 回填时按 M1 的最终交付实测核对。
+**【已实测】** `AMIS_DIR` 配置项已在 `app/config.py:195` 定义、`app/config.py:348` 支持
+环境变量覆盖；`/amis` 挂载在 `app/__init__.py:62-67`。实测 `GET /amis/` 与
+`GET /amis/login.html` 均返回 200 并给出登录页 HTML，`GET /amis`（不带尾斜杠）返回 404。
 
 **【读码确认】** `amis/pages/site.json` 的菜单节点用 `schemaApi` 引用页面 JSON：
 
@@ -802,14 +820,10 @@ if AMIS_DIR and os.path.isdir(AMIS_DIR):
 `site.json` 位于 `amis/pages/`，但引用路径写的是 `./static/pages/xxx.json`——
 说明页面 JSON 期望被放在**服务器的 `static/` 目录**下，而不是 `amis/pages/`。
 
-> **> 待 M1 交付后核实**：当前基线的 `amis/server.js`（Express 版）把 `./public`、`./pages`、`./sdk`
-> 三个目录挂为静态资源，但**没有 `static/` 目录**，所以 `site.json` 里的
-> `./static/pages/*.json` 在当前基线**取不到**。同时 `amis/index.html` 在当前基线**不存在**
-> （只有 `site.html`；`site.html` → `index.html` 的重命名发生在 `sa-oss/m1` 的提交 `81e51bb`，
-> 不在当前分支历史中）。
-> `sa-oss/m1` 已把 `amis/server.js` 换成零依赖 Node 服务器，把 `pages/` 直接作为静态根，
-> 并把页面引用改成相对路径（`sa-oss/m1:amis/pages/crud-list.json` 的 `api.url` 从
-> `http://127.0.0.1:22222/refapi/account/0` 改为 `/refapi/account/0`）。
+**【已实测】** M1 已把 `amis/server.js` 换成零依赖 Node 服务器，把 `pages/` 直接作为静态根，
+并把页面引用改成相对路径——`site.json` 现在写的是 `get:pages/dash_board.json?v1` 这类路径
+（不再是 `./static/pages/xxx.json`），`amis/index.html` 与 `amis/login.html` 也已就位。
+列表页文件按实际资源改名（如 `crud-list.json` → `account-list.json`）。
 > **M1 合并后本节必须重新核实。**
 
 ### 6.3 AMIS 的 API 地址
@@ -823,33 +837,33 @@ if AMIS_DIR and os.path.isdir(AMIS_DIR):
 问题有两点：
 
 1. 硬编码 `127.0.0.1:22222`——后端端口一变所有页面 JSON 都要改。
-2. `/refapi/account/0` 这个路径**后端并不存在**（全仓库 grep `refapi` 只命中这 3 个 AMIS JSON 文件）。
-   后端实际的账户列表路径是 `/api/v1/accounts`（`app/api/resources/account.py:424`），
-   而该路径当前因 `app.api` 导入失败而**不可达**。
+2. `/refapi/*` 这个路径**后端并不存在**——它是**开发服务器的反代前缀**。
+   后端实际的账户列表路径是 `/api/v1/accounts`（`app/api/resources/account.py`）。
 
-> **> 待 M1 交付后核实**：M1 的 `amis/server.js` 把 `/refapi` 等前缀**反向代理到后端**，
-> 并删除 `Origin` 头做同源转发。因此 M1 之后 `/refapi/*` 是代理前缀而非后端真实路径，
-> 前端 JSON 里的 `api.url` 用相对路径 + 代理前缀即可，不必写绝对地址。
+**【已实测】** `amis/server.js` 把 `/auth`、`/capt`、`/api`、`/health`、`/refapi`、`/account`
+这些前缀**反向代理到后端**，并删除 `Origin` 头做同源转发（注释写明「同源转发，避免后端按
+Origin 判定跨域」）。因此 `/refapi/*` 是代理前缀而非后端真实路径，前端 JSON 里的 `api.url`
+用相对路径 + 代理前缀即可，不必写绝对地址。
+
+**注意它不代理 `/uploads`**：后端已移除上传目录的静态挂载，文件下载统一走需鉴权的
+`GET /api/v1/files/<id>/download`。
 
 ### 6.4 开发服务器（可选）
 
 **这是可选的开发辅助，不是正式接入方式。** 正式方式是 §6.2 的后端同源托管
 （`http://127.0.0.1:22222/amis/login.html`）。Node 服务器只在「后端还没接好静态托管」时用于本地预览界面。
 
-**【读码确认】** 当前基线 `amis/server.js` 用 Express：
+**【已实测】** `amis/server.js` 现在是**零依赖**的 Node 服务器（只用 Node 内置模块）：
 
 ```js
-app.use('./public', express.static('public'));
-app.use('./pages',  express.static('pages'));
-app.use('./sdk',     express.static('sdk'));
-app.get('/*', ... sendFile(path.join(__dirname, 'index.html')));
+const PORT = Number(process.env.PORT || 3000);
+const target = new URL(process.env.API_TARGET || 'http://127.0.0.1:22222');
+const PROXY_PREFIXES = ['/auth', '/capt', '/api', '/health', '/refapi', '/account'];
 ```
 
-默认端口 `process.env.PORT || 3000`（`:10`）。**没有反向代理**，后端地址由页面 JSON 里的绝对 URL 决定。
-
-> **> 待 M1 交付后核实**：M1 已换成零依赖 Node 服务器（`PORT` 默认 3000，
-> `API_TARGET` 默认 `http://127.0.0.1:22222`），并把 `/auth`、`/capt`、`/api`、`/health`、
-> `/uploads`、`/refapi`、`/account` 反代到后端。
+它静态托管 `login.html` / `index.html` / `pages` / `sdk`，把 `PROXY_PREFIXES` 里的路径
+反代到后端，并**拒绝**直接提供 `server.js`、`package.json`、`package-lock.json`、
+`nodemon.json`、`README.md` 这几个开发文件。
 
 ### 6.5 Vue 前端（实验性）
 
@@ -899,36 +913,30 @@ GET  /uploads/<path>
 
 根因与影响：
 
-| # | 问题 | 位置 | 影响 |
+| # | 问题 | 位置 | 状态（截至 `8750d51`） |
 |---|---|---|---|
-| 1 | `Blueprint.group()` 在 sanic 23.6.0 中无 `add_blueprint` | `app/api/__init__.py:22` | **整个 `app.api` 包导入失败**，25 个 API 资源全部不可达 |
-| 2 | `app/utils/` 包不存在 | `app/api/resources/database.py:16`、`compression.py:16` | 这两个资源模块无法 import |
-| 3 | `from app.models import File` | `dashboard.py:11`、`dashboard_user.py:11` | 模型实际叫 `UploadedFile`；这两个模块无法 import |
-| 4 | `from app.api.base import response` | `database.py:14`、`compression.py:14` | `response` 在 `app/api/base.py` 中**不存在**（只有 `json`）；无法 import |
-| 5 | `from app.api.resources.account import account_api` | `app/api/routes.py:8` | `account_api` 不存在；`app/api/routes.py` 无法 import（但它本就无调用点） |
-| 6 | `setup_docs()` 无调用点 | `app/docs/__init__.py:33` | `/swagger`、`/swagger.json`、`/redoc`、`/docs/models` 全部 404 |
-| 7 | `register_web_blueprints()` 无调用点 + `frontend/templates/` 不存在 | `app/web/routes.py:39` | Web 渲染路由是死代码 |
-| 8 | `csrf_protect()` 无路由使用 | `app/middleware/security_middleware.py:44` | CSRF 保护未生效（目前靠 SameSite=Lax） |
-| 9 | 中间件读 Cookie `session_id`，实际下发的是 `session` | `app/middleware/auth_middleware.py:25` vs `app/models/session.py:66` | 中间件在 Cookie 场景下取不到会话（不影响功能，鉴权走 `authenticate_request`） |
-| 10 | 邮件配置无消费方 | `app/config.py:212-217` | production 下验证码无处送达，注册验证 / 两步验证流程无法完成 |
-| 11 | `amis/index.html` 不存在；`site.json` 引用不存在的 `static/pages/` | `amis/` | AMIS 页面在当前基线跑不起来 |
-
-其中 #1、#2、#3、#4 都由 `sa-oss/m1` 修复（M1 已删除 `app/api/routes.py`、`app/api/example.py`，
-并重写 `app/api/__init__.py` 的蓝图装配）。
-
-**> 待 M1 交付后核实**：上表 #1~#4 在 M1 合并后需重新核实；
-#6、#7、#8、#9、#10、#11 的状态也需在合并后复测。
+| 1 | `Blueprint.group()` 在 sanic 23.6.0 中无 `add_blueprint` | `app/api/__init__.py` | **已修复**：改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`；实测 API v1 正常挂载，OpenAPI 规范 57 条 path |
+| 2 | `app/utils/` 包不存在 | `app/api/resources/database.py`、`compression.py` | **已修复**：改用 `app/api/validators.py` 的 `validate_request` / `validate_path_param` |
+| 3 | `from app.models import File` | `dashboard.py`、`dashboard_user.py` | **已修复**：模型名为 `UploadedFile` |
+| 4 | `from app.api.base import response` | `database.py`、`compression.py` | **已修复**：改用 `app/api/responses.py` 的 `APIResponse` |
+| 5 | `from app.api.resources.account import account_api` | `app/api/routes.py` | **已消除**：M1 删除了 `app/api/routes.py` 与 `app/api/example.py` |
+| 6 | `setup_docs()` 无调用点 | `app/docs/__init__.py` | **已修复**：已接线，由 `ENABLE_API_DOCS` 控制；development 下 `/swagger`、`/swagger.json`、`/redoc` 均 200 |
+| 7 | `register_web_blueprints()` 无调用点 + `frontend/templates/` 不存在 | `app/web/routes.py:39` | **仍存在**：Web 渲染路由是死代码，前端主线已改用 AMIS 静态页 |
+| 8 | `csrf_protect()` 无路由使用 | `app/middleware/security_middleware.py` | **仍存在**：CSRF 保护未生效（目前靠 SameSite=Lax） |
+| 9 | 中间件读 Cookie `session_id`，实际下发的是 `session` | `app/middleware/auth_middleware.py` | **已修复**：改读 `AuthenticationSession.cookie_name` |
+| 10 | 邮件配置无消费方 | `app/config.py` | **仍存在**：production 下验证码无处送达，注册验证 / 两步验证流程无法完成 |
+| 11 | `amis/index.html` 不存在；`site.json` 引用不存在的 `static/pages/` | `amis/` | **已修复**：M1 补齐 `index.html` 并把页面引用改为相对路径 |
 
 ---
 
 ## 8. 附：本文档的核实方式
 
-**读过的源码文件**（均在本分支 `sa-oss/m23-doc` / base `9a8f946` 上）：
+**读过的源码文件**（均在本分支 `release/v0.2.0` / base `8750d51` 上）：
 
 ```
 app/__init__.py                  app/config.py                app/main.py(→ 根 main.py)
 app/api/__init__.py              app/api/base.py              app/api/responses.py
-app/api/validators.py            app/api/routes.py            app/api/example.py
+app/api/validators.py            app/api/resources/route_methods.py
 app/api/resources/__init__.py    app/api/resources/account.py app/api/resources/role.py
 app/api/resources/profile.py     app/api/resources/log.py     app/api/resources/setting.py
 app/api/resources/upload.py      app/api/resources/dashboard.py
