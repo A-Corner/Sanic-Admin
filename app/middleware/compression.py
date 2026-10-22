@@ -10,6 +10,8 @@
 import gzip
 import zlib
 import time
+import math
+import decimal
 from typing import Dict, Any, List, Optional, Set, Callable
 from functools import wraps
 import re
@@ -26,13 +28,17 @@ MIN_COMPRESS_LENGTH = 1024  # 1KB
 DEFAULT_COMPRESSION_LEVEL = 6
 
 # 保存压缩统计
+# min_compression_ratio 初始为 None：表示"尚无任何响应被压缩过"。
+# 绝不能用 float('inf') 表示无数据 —— Infinity 不是标准 JSON（RFC 8259 只允许
+# null/true/false/数字/字符串/数组/对象），会污染 API 响应体：浏览器 JSON.parse()
+# 直接抛错，Go / Rust / Java 的严格解析器同样拒绝。
 _compression_stats = {
     "compressed_responses": 0,
     "uncompressed_responses": 0,
     "total_original_size": 0,
     "total_compressed_size": 0,
     "avg_compression_ratio": 0,
-    "min_compression_ratio": float('inf'),
+    "min_compression_ratio": None,
     "max_compression_ratio": 0,
     "avg_compression_time": 0,
     "total_requests": 0
@@ -69,6 +75,58 @@ EXCLUDED_PATHS = [
 EXCLUDED_PATHS_REGEX = [re.compile(pattern) for pattern in EXCLUDED_PATHS]
 
 logger = logging.getLogger('app.middleware.compression')
+
+
+def _sanitize_non_finite(value: Any) -> Any:
+    """
+    递归清洗统计值，保证结果是严格合法 JSON（RFC 8259）。
+
+    非有限数值（``inf`` / ``-inf`` / ``nan``，含 ``Decimal`` 的 ``Infinity`` /
+    ``NaN``）统一转成 ``None``（JSON ``null``），其余结构原样保留。
+
+    这是 ``get_compression_stats()`` 出口处的防御：即使内部统计状态因异常路径
+    演化出非有限值（例如除零、异常耗时），也不会让 ``Infinity`` 字面量漏进
+    API 响应体导致浏览器 ``JSON.parse()`` 抛错。
+
+    Args:
+        value: 任意待清洗的值
+
+    Returns:
+        Any: 保证可被标准 JSON 序列化的等价结构
+    """
+    # bool 是 int 的子类，但 JSON 原生支持 true/false，直接原样返回
+    if isinstance(value, bool) or value is None:
+        return value
+
+    # 浮点数：非有限值（inf / -inf / nan）转 None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    # Decimal：非有限值（Infinity / NaN）转 None；有限值转 float 便于序列化
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return None
+        converted = float(value)
+        return converted if math.isfinite(converted) else None
+
+    # 整数：JSON 原生支持，原样返回
+    if isinstance(value, int):
+        return value
+
+    # 字典：递归清洗值
+    if isinstance(value, dict):
+        return {key: _sanitize_non_finite(item) for key, item in value.items()}
+
+    # 列表 / 元组：递归清洗元素
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_non_finite(item) for item in value]
+
+    # bytes：解码为字符串
+    if isinstance(value, bytes):
+        return value.decode('utf-8', errors='replace')
+
+    # 其他类型（str / 自定义对象等）原样返回
+    return value
 
 
 def should_compress(request: Request, response: Response) -> bool:
@@ -165,7 +223,9 @@ def compress_response(response: Response, level: int = DEFAULT_COMPRESSION_LEVEL
     # 更新最大和最小压缩率
     if compression_ratio > _compression_stats["max_compression_ratio"]:
         _compression_stats["max_compression_ratio"] = compression_ratio
-    if compression_ratio < _compression_stats["min_compression_ratio"]:
+    # min 初始为 None（尚无压缩记录），第一次压缩时直接落值；之后才做比较。
+    current_min = _compression_stats["min_compression_ratio"]
+    if current_min is None or compression_ratio < current_min:
         _compression_stats["min_compression_ratio"] = compression_ratio
     
     # 更新平均压缩时间
@@ -293,4 +353,5 @@ def get_compression_stats() -> Dict[str, Any]:
     # 计算总节省的带宽
     stats["total_bytes_saved"] = stats["total_original_size"] - stats["total_compressed_size"]
     
-    return stats 
+    # 出口处清洗：确保返回的是严格合法 JSON，不含 Infinity / NaN 字面量
+    return _sanitize_non_finite(stats) 
