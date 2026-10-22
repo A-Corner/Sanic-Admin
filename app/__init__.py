@@ -76,8 +76,9 @@ def _register_amis_static(app: Sanic, amis_dir: str) -> None:
 
     用普通路由、**不再配合任何 ``app.static`` 挂载**，一条路径只由一套机制
     提供。v0.2.1 曾同时保留「逐子目录 ``app.static`` + 顶层页面 ``app.static``」
-    与普通路由两套机制，同一批文件被注册两次（11 条冗余路由，OpenAPI 里同一
-    资源出现多次）；本版本收敛为只有下面两条路由。
+    与普通路由两套机制，同一批文件被注册两次（OpenAPI 里 AMIS 相关 path
+    12 条，其中 10 条是与普通路由重复覆盖的静态路由——8 个子目录挂载加
+    2 个顶层页面挂载）；本版本收敛为只有下面两条路由。
 
     为什么不用 ``app.static``：
 
@@ -109,14 +110,22 @@ def _register_amis_static(app: Sanic, amis_dir: str) -> None:
 
     @app.route("/amis/<__rest__:path>", methods=["GET", "HEAD"], strict_slashes=True)
     async def amis_files(request, __rest__):
-        # 开发文件不公开（大小写不敏感：判定发生在文件系统解析之前，
-        # 大小写不敏感的文件系统会把变体名解析到同一个文件）
+        # 黑名单判两次：
+        # ① 原始请求首段（快速路径，防明显命中）；
+        # ② **规范化后的相对路径首段**——这是真正提供文件的依据。
+        #    只判①会被原始 dot-segment 绕过："/amis/./server.js" 的原始首段
+        #    是 "."，而 resolve() 后实际提供的文件就是 server.js（Linux 同样
+        #    中招，与文件系统大小写无关）。必须以"实际提供的文件"为准。
+        #    大小写不敏感：判定发生在文件系统解析之前，大小写不敏感的文件
+        #    系统（macOS/Windows）会把变体名解析到同一个文件。
         if __rest__.split("/")[0].lower() in AMIS_PRIVATE_FILES_LOWER:
             return json_response({"success": False, "message": "Not found"}, status=404)
         target = (amis_root / __rest__).resolve()
         try:
-            target.relative_to(amis_root)
+            relative = target.relative_to(amis_root)
         except ValueError:
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        if relative.parts and relative.parts[0].lower() in AMIS_PRIVATE_FILES_LOWER:
             return json_response({"success": False, "message": "Not found"}, status=404)
         if not target.is_file():
             return json_response({"success": False, "message": "Not found"}, status=404)
