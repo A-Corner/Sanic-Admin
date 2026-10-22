@@ -29,6 +29,9 @@ services:
       SANIC_ENV: production
       HOST: 0.0.0.0
       PORT: 22222
+      # 容器内仓库位于 /app（Dockerfile 的 WORKDIR），管理界面目录随之内置。
+      # 固定写死而不依赖 .env：本地 pip 运行的路径与此不同。
+      AMIS_DIR: /app/amis
     ports:
       # 宿主机 22230 -> 容器 22222
       - "22230:22222"

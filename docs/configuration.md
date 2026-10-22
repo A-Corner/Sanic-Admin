@@ -4,7 +4,7 @@
 > 事实来源：`app/config.py`（394 行，本文中所有行号引用均指该文件在 `sa-oss/m23-doc` 分支上的版本）。
 > 标注约定：
 > - **【读码确认】** = 直接读 `app/config.py` 或调用 `get_config()` 实测得到。
-> - **> 待 M1 交付后核实** = 当前基线尚未具备该能力，本文档只描述现状，不做前瞻承诺。
+> - 文中标注「**已实测**」的条目，其数据来自在发布候选 `release/v0.2.0`（基线 `8750d51`）上实际执行的命令。
 
 ---
 
@@ -59,11 +59,10 @@ development/testing 缺失时自动生成临时值、打 warning、并**写回 `
 | `SECRET_KEY` | 应用密钥。**当前实现中不参与任何签名或加密**——JWT 实际用 `BaseConfig.SECRET`（RS256 私钥），因此设它不会增强安全性（见 §8） | 空 | 否 |
 | `PASSWORD_SALT` | 口令盐。**当前实现中不参与口令哈希**——实际口令哈希用 argon2id 自带随机盐（`app/models/account.py:19`） | 空 | 否 |
 
-> **> 待 M1 交付后核实**：当前基线（`9a8f946`）上 `SECRET_KEY` 与 `PASSWORD_SALT` 仍走
-> `_env_secret()`，在 production 缺失会拒绝启动。`sa-oss/m1` 已把这两项改为
-> `os.getenv(var, "")`（`app/config.py:326-329`），即降为可选——理由与上表一致：
-> 它们是「必填但无人使用」的假安全项。**M1 合入后本文档即以上表为准**，
-> 本节其余行号引用会随之上移，回填时需一并更新。
+> **已实测**：在 production 下分别只缺 `JWT_PRIVATE_KEY`、只缺 `INITIAL_ADMIN_PASSWORD`，
+> 两次都以 exit code 1 退出并给出对应的 `配置错误:` 文案；而 `SECRET_KEY` 与
+> `PASSWORD_SALT` **同时缺失时服务照常启动**——因为它们确实不参与任何签名或加密。
+> `tests/test_production_failclosed.py` 的 `REQUIRED_PRODUCTION_VARS` 同样只列这两项。
 
 `JWT_PUBLIC_KEY` 单独说明（**可选**）：`load_jwt_keys()`（`:121-145`）先读私钥；公钥缺失时由私钥推导
 （`:137` → `_derive_public_pem`，`:98-105`）；公钥存在则必须能解析为 RSA 公钥，且与私钥的
@@ -141,9 +140,8 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 > `app/__init__.py` 用 `app.config.get("AMIS_DIR")` 读取后
 > `app.static("/amis", AMIS_DIR, index="login.html")` 挂载；目录为空或不存在则不挂载。
 >
-> **> 待 M1 交付后核实**：以上按 M1 的 `amis/README.md` 契约写成，落地实现在 M1 的 Lane L 中
-> （`app/config.py` 的 `AMIS_DIR` 配置项 + `app/__init__.py` 的 `/amis` 挂载）。
-> 回填时按 M1 的最终交付实测核对本节与 `.env.example` 的 `AMIS_DIR` 一行。
+> **已实测**：`GET /amis/` 与 `GET /amis/login.html` 均返回 200 并给出登录页 HTML；
+> `GET /amis`（不带尾斜杠）返回 404。
 
 > 生产部署提示：`HOST` 默认是 `127.0.0.1`，只监听回环。对外提供服务需要显式设为 `0.0.0.0`
 > 或由反向代理转发。
@@ -202,10 +200,12 @@ fail-closed 的完整清单：
 | `CACHE_TYPE=redis` 但 Redis 不可达 | production 抛 `ConfigError` 拒绝启动；其它环境降级为内存缓存并 warning | `app/cache/__init__.py:52-63` |
 | 可选模块导入失败（models / cache / api / auth / upload 中间件） | production 抛 `ConfigError` 拒绝启动；其它环境 warning 降级 | `app/__init__.py:28-39`、`app/middleware/__init__.py:48-56` |
 
-> **> 待 M1 交付后核实**：`sa-oss/m1` 分支已经引入 `ENABLE_API_DOCS`、`REQUIRE_TWO_FACTOR`
-> 两个新的布尔环境变量（`_bool_env()`，接受 `1/true/yes/on` 与 `0/false/no/off/`），
-> production 的 `ENABLE_API_DOCS` 默认为 `False`。这两个变量在当前基线 **不存在**，
-> 待 M1 合入后需重新核对本文档第 2 节。
+> **已实测**：另有 `ENABLE_API_DOCS` 与 `REQUIRE_TWO_FACTOR` 两个布尔环境变量
+> （`_bool_env()`，接受 `1/true/yes/on` 与 `0/false/no/off/`）。前者控制是否挂载
+> Swagger / ReDoc 路由（development 默认 `True`，production 默认 `False`；
+> production 下实测 `/swagger`、`/redoc`、`/swagger.json` 均返回 404，
+> 显式设 `ENABLE_API_DOCS=true` 后才可用）；后者决定登录后是否要求二次验证
+> （默认 `False`，即关闭）。
 
 ---
 
@@ -352,10 +352,14 @@ CORS_ALLOWED_ORIGINS=https://admin.example.com,https://ops.example.com
 注意 `*` 与 credentials 不能共存。如果前端与后端**同源**部署（例如用同一个反向代理挂载
 `/` 和 `/api`），则无需配置 CORS。
 
-> **> 待 M1 交付后核实**：M1 分支把 AMIS 开发服务器改成了同源反代（`sa-oss/m1:amis/server.js`）
-> ——代理 `/auth`、`/capt`、`/api`、`/health`、`/uploads`、`/refapi`、`/account` 前缀并
-> **删除 `Origin` 头**转发（注释写明「同源转发，避免后端按 Origin 判定跨域」）。
-> 该改动在当前基线不存在。合并后 production 的 `CORS_ALLOWED_ORIGINS=[]` 与同源反代可以共存。
+> **已实测**：`amis/server.js` 是一个零依赖的 Node 开发服务器，代理
+> `/auth`、`/capt`、`/api`、`/health`、`/refapi`、`/account` 前缀并**删除 `Origin` 头**
+> 转发（注释写明「同源转发，避免后端按 Origin 判定跨域」），使 production 的
+> `CORS_ALLOWED_ORIGINS=[]` 与同源访问可以共存。
+> 它**不代理 `/uploads`** —— 后端已移除上传目录的静态挂载，文件下载统一走
+> 需鉴权的 `GET /api/v1/files/<id>/download`。
+> 注意这只是可选的开发辅助；管理界面的正式访问方式是后端同源托管的
+> `http://127.0.0.1:22222/amis/login.html`，那种情况下根本不需要 CORS 配置。
 
 ---
 
