@@ -24,11 +24,14 @@ from app.auth.authentication import create_initial_admin_account
 
 
 # 测试配置覆盖
+#
+# 注意：此处不再设置 SECRET_KEY / PASSWORD_SALT。二者在当前实现中不参与任何
+# 签名或加密（JWT 用 JWT_PRIVATE_KEY/RS256，口令哈希用 argon2 自带的随机 salt），
+# 保留一个假的"必需项"只会误导读者以为它们是必需的测试配置。
 test_config = {
     "TESTING": True,
     "DEBUG": True,
     "DB_URL": "sqlite://:memory:",  # 使用内存数据库
-    "SECRET_KEY": "test_secret_key",
     "ACCESS_TOKEN_EXPIRE_MINUTES": 15,
     "REFRESH_TOKEN_EXPIRE_DAYS": 7,
     "CACHE_TYPE": "memory",  # 使用内存缓存

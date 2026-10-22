@@ -5,7 +5,12 @@
 SanicAdmin 应用入口点
 
 环境由 SANIC_ENV 决定（默认 development）；production 必须通过环境变量提供
-SECRET_KEY / JWT_PRIVATE_KEY / INITIAL_ADMIN_PASSWORD / PASSWORD_SALT，缺失时直接退出。
+JWT_PRIVATE_KEY（RS256 私钥；可选 JWT_PUBLIC_KEY，未提供时由私钥推导）与
+INITIAL_ADMIN_PASSWORD，缺失时直接退出。
+
+SECRET_KEY 与 PASSWORD_SALT 是可选的兼容项：当前实现中不参与任何签名或加密
+（JWT 用 JWT_PRIVATE_KEY/RS256，口令哈希用 argon2 自带的随机 salt），设置它们
+不会增强安全性，因此不再是 production 启动的必需项。
 """
 import sys
 

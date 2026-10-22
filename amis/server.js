@@ -1,7 +1,9 @@
 // AMIS 前端开发服务器（零依赖，仅用 Node 内置模块）
 //  - 静态托管本目录下的页面与资源（login.html / index.html / pages / sdk ...）
-//  - 把 /auth /capt /api /health /uploads 反向代理到后端，使浏览器同源访问，
+//  - 把 /auth /capt /api /health /refapi /account 反向代理到后端，使浏览器同源访问，
 //    session Cookie 与登录态无需 CORS 即可工作。
+//  - 不代理 /uploads：后端已移除上传目录的静态挂载，上传文件下载统一走
+//    GET /api/v1/files/<id>/download（需鉴权）。
 // 环境变量：PORT（默认 3000）、API_TARGET（默认 http://127.0.0.1:22222）
 const http = require('http');
 const fs = require('fs');
@@ -10,7 +12,7 @@ const path = require('path');
 const PORT = Number(process.env.PORT || 3000);
 const target = new URL(process.env.API_TARGET || 'http://127.0.0.1:22222');
 const ROOT = __dirname;
-const PROXY_PREFIXES = ['/auth', '/capt', '/api', '/health', '/uploads', '/refapi', '/account'];
+const PROXY_PREFIXES = ['/auth', '/capt', '/api', '/health', '/refapi', '/account'];
 const DENY = new Set(['server.js', 'package.json', 'package-lock.json', 'nodemon.json', 'README.md']);
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8',
