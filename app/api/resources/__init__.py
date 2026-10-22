@@ -8,15 +8,19 @@ API资源模块初始化文件
 """
 
 # 导入所有资源模块
-from app.api.resources.account import AccountResource, AccountPasswordResource, AccountMeResource
+from app.api.resources.account import (
+    AccountResource,
+    AccountPasswordResource,
+    AccountMeResource,
+    MyAccountPasswordResource,
+)
 from app.api.resources.role import RoleResource, RoleMembersResource, AccountRolesResource
 from app.api.resources.profile import ProfileResource, MyProfileResource
 from app.api.resources.log import LogResource, LogStatisticsResource
 from app.api.resources.setting import SettingResource, SettingByKeyResource, SettingBulkResource
 from app.api.resources.upload import (
-    FileUploadResource, AvatarUploadResource, 
-    FileListResource, FileDeleteResource, 
-    FileDownloadCounterMiddleware
+    FileUploadResource, AvatarUploadResource,
+    FileListResource, FileDeleteResource,
 )
 from app.api.resources.dashboard import (
     DashboardSummaryResource, DashboardActivitiesResource, DashboardStorageResource
@@ -31,12 +35,14 @@ from app.api.resources.dashboard_performance import (
 # 资源列表 - 用于配置文档
 all_resources = [
     AccountResource,
-    AccountPasswordResource, 
+    AccountPasswordResource,
     AccountMeResource,
+    MyAccountPasswordResource,
     RoleResource,
     RoleMembersResource,
     AccountRolesResource,
     ProfileResource,
+    MyProfileResource,
     LogResource,
     LogStatisticsResource,
     SettingResource,
@@ -63,6 +69,7 @@ __all__ = [
     'AccountResource',
     'AccountPasswordResource',
     'AccountMeResource',
+    'MyAccountPasswordResource',
     'RoleResource',
     'RoleMembersResource',
     'AccountRolesResource',
@@ -77,7 +84,6 @@ __all__ = [
     'AvatarUploadResource',
     'FileListResource',
     'FileDeleteResource',
-    'FileDownloadCounterMiddleware',
     # 仪表盘资源
     'DashboardSummaryResource',
     'DashboardActivitiesResource',
