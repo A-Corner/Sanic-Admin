@@ -39,7 +39,7 @@ Python 版本：**3.10 – 3.12**（CI 在这三个版本上运行）。
 
 > **Docker 路径由 GitHub Actions 验证，不是人工验证。** 镜像构建与 compose 编排的验收在 CI 中执行。在 CI 跑绿之前，下面任何内容都**不能**当作「已验证」来读——这些命令是目标契约；本地实际跑过的是 compose 静态解析和 production fail-closed 等价实测。
 >
-> `TODO(M1)`：`Dockerfile`、`docker-compose.yml`、`.env.example`、`.dockerignore` 由并行的打包迭代交付，当前分支中**尚未存在**。
+> `Dockerfile`、`docker-compose.yml`、`.env.example`、`.dockerignore` 都在本仓库中。镜像以非 root 用户运行，内置 `libmagic`，**不含任何密钥**——所有密钥在运行时由 `.env` 注入。
 
 ```bash
 cp .env.example .env      # 把 .env 里所有占位符替换成真实值

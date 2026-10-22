@@ -118,7 +118,7 @@ The only documentation endpoint that answers today is the `sanic-ext` default at
 
 > **The Docker path is validated by GitHub Actions, not by hand.** The image build and the compose orchestration are exercised in CI. Until those runs are green, do not read anything below as "verified" — the commands are the intended contract, and the local checks that *were* run are the compose static parse and the production fail-closed equivalence.
 >
-> `TODO(M1)`: `Dockerfile`, `docker-compose.yml`, `.env.example` and `.dockerignore` are delivered by the parallel packaging iteration and are **not yet present in this branch**.
+> `Dockerfile`, `docker-compose.yml`, `.env.example` and `.dockerignore` are in this repository. The image runs as a non-root user, installs `libmagic`, and carries **no secrets** — every secret is injected at run time through `.env`.
 
 ```bash
 cp .env.example .env      # then replace every placeholder value in .env
@@ -182,7 +182,7 @@ pytest
 
 All configuration is environment-driven. The authoritative source is **`app/config.py`** — every variable is read there, and the values below are taken directly from it.
 
-> **TODO(M1)**: the full reference — every variable, its type, its default and its behaviour per environment — belongs in **[docs/configuration.md](docs/configuration.md)**, which the parallel documentation iteration is delivering. Until it lands, the table below is the working substitute.
+> The full reference — every variable, its type, its default and its behaviour per environment — is in **[docs/configuration.md](docs/configuration.md)**, written directly from `app/config.py`. The table below is the short version.
 
 The handful that matter most:
 
