@@ -8,6 +8,7 @@
 ``Account.is_admin`` 为 True 的账户拥有全部权限。
 """
 import functools
+from sanic.log import logger
 from sanic.request import Request
 from app.models import Account, Role
 from app.services.exceptions import (
@@ -16,6 +17,11 @@ from app.services.exceptions import (
     RoleRequiredError
 )
 from app.auth.authentication import authenticate_request, find_request
+from app.auth.permissions import (
+    admin_all_permissions,
+    effective_permissions,
+    permission_granted,
+)
 
 
 async def assign_role(account: Account, role: Role):
@@ -71,6 +77,52 @@ async def get_account_permissions(account: Account):
     return permissions
 
 
+#: 内置管理员角色名（app.auth.authentication.create_initial_admin_account 使用同一个名字）
+ADMIN_ROLE_NAME = "admin"
+
+#: 管理员角色权限是否已同步过。模块级标志位，避免每次请求都查库。
+_admin_role_synced = False
+
+
+async def sync_admin_role_permissions(force: bool = False) -> bool:
+    """
+    把内置 admin 角色同步为注册表里的全量权限。
+
+    历史上 admin 角色的 permissions 写死为 ``{"users": [...], "roles": [...],
+    "settings": [...]}``，与当前资源名（``account`` / ``setting`` 等）不一致，
+    导致非 admin 账户即便被授予 admin 角色也拿不到实际权限。
+
+    这里做**惰性同步**：首次需要时检查一次并写入，之后不再查库
+    （用模块级标志位；进程重启后重新检查一次）。
+
+    Args:
+        force: 为 True 时忽略标志位强制重新同步
+
+    Returns:
+        bool: 是否发生了同步写入
+    """
+    global _admin_role_synced
+
+    if _admin_role_synced and not force:
+        return False
+
+    role = await Role.filter(name=ADMIN_ROLE_NAME, deleted=False).first()
+    if role is None:
+        _admin_role_synced = True
+        return False
+
+    target = admin_all_permissions()
+    if role.permissions == target:
+        _admin_role_synced = True
+        return False
+
+    role.permissions = target
+    await role.save(update_fields=["permissions"])
+    _admin_role_synced = True
+    logger.info(f"已同步内置 admin 角色权限为注册表全量权限（{len(target)} 个资源）")
+    return True
+
+
 async def has_role(account: Account, *role_names: str) -> bool:
     """
     检查账户是否具有指定角色之一（管理员账户视为拥有所有角色）
@@ -84,15 +136,20 @@ async def has_role(account: Account, *role_names: str) -> bool:
 async def has_permission(account: Account, resource: str, *actions: str) -> bool:
     """
     检查账户是否具有指定资源的全部指定操作权限（管理员账户拥有全部权限）
+
+    权限判定使用 ``app.auth.permissions`` 的归一化口径：子资源（如
+    ``system:database:connectionpool``）折叠到基资源（``system:database``）
+    后再比对，使同一功能的读/写能被同一份授权覆盖。
     """
     if account.is_admin:
         return True
-    granted = (await get_account_permissions(account)).get(resource)
-    if not granted:
-        return False
-    if "all" in granted:
-        return True
-    return all(action in granted for action in actions)
+
+    # 惰性同步内置 admin 角色的权限（首次调用时写库，之后走标志位）
+    await sync_admin_role_permissions()
+
+    granted = await get_account_permissions(account)
+    effective = effective_permissions(granted)
+    return all(permission_granted(effective, resource, action) for action in actions)
 
 
 def _guard(check, args, kwargs, func):
