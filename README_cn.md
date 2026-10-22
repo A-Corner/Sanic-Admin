@@ -108,11 +108,11 @@ pytest
 | 变量 | 说明 |
 |---|---|
 | `SANIC_ENV` | `development`（默认）/ `testing` / `production` |
-| `SECRET_KEY` | 应用密钥，**生产环境必需** |
+| `SECRET_KEY` | 应用密钥，可选——当前不参与任何签名或加密 |
 | `JWT_PRIVATE_KEY` | RS256 签名私钥 PEM，**生产环境必需**；公钥由私钥推导 |
 | `INITIAL_ADMIN_PASSWORD` | 初始管理员口令，**生产环境必需** |
 | `INITIAL_ADMIN_EMAIL` | 管理员邮箱，默认 `SAdmin@Sanic.com` |
-| `PASSWORD_SALT` | 口令盐，**生产环境必需** |
+| `PASSWORD_SALT` | 口令盐，可选——口令哈希用 argon2 自带随机盐 |
 | `DATABASE_URL` | Tortoise ORM 连接串；开发默认本地 SQLite，测试默认内存 SQLite |
 | `CACHE_TYPE` | `memory` 或 `redis`；生产默认 `redis` 且不可降级 |
 | `HOST` / `PORT` | 监听地址与端口，默认 `127.0.0.1` / `22222` |

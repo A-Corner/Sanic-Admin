@@ -87,7 +87,7 @@ The only documentation endpoint that answers today is the `sanic-ext` default at
 
 | Control | Evidence |
 |---|---|
-| Production fails closed when required secrets are missing | `app/config.py` — `_env_secret` raises `ConfigError`; verified: `SANIC_ENV=production python main.py` prints `配置错误: 生产环境必须通过环境变量 SECRET_KEY 提供应用密钥` and exits with **rc=1** |
+| Production fails closed when required secrets are missing | `app/config.py` — `_env_secret` raises `ConfigError`; verified: `SANIC_ENV=production python main.py` prints `配置错误: 生产环境必须通过环境变量 SECRET_KEY 提供应用密钥` and exits with **rc=1**. On this baseline the four secret variables were all required; M1 narrows the production requirement to `JWT_PRIVATE_KEY` and `INITIAL_ADMIN_PASSWORD` |
 | No secret, key or default password in the repository | `app/config.py` — all secrets read from environment variables; verified: `git grep -nIE "BEGIN (RSA )?PRIVATE KEY"` finds no key material |
 | Administrator password generated at startup, printed once to stdout in development only | `app/config.py` — `_generate_admin_password` |
 | SQL analysis accepts a single read-only `SELECT`/`WITH` statement and issues only `EXPLAIN` | `app/database/query_analyzer.py` — `validate_readonly_sql`, `_FORBIDDEN_SQL_RE`, `_FORBIDDEN_FUNC_RE`; verified: `DELETE FROM account`, `SELECT 1; DROP TABLE x` and `PRAGMA table_info(account)` are all rejected |
@@ -191,11 +191,11 @@ The handful that matter most:
 | Variable | Purpose |
 |---|---|
 | `SANIC_ENV` | `development` (default), `testing` or `production`. Selects the config class and the fail-closed behaviour. |
-| `SECRET_KEY` | Application key. **Required in production.** |
+| `SECRET_KEY` | Application key. Optional — it currently takes part in no signing or encryption. |
 | `JWT_PRIVATE_KEY` | RSA private key PEM for RS256 session signing. **Required in production.** `JWT_PUBLIC_KEY` is derived from it when not given. Newlines may be written as literal `\n`. |
 | `INITIAL_ADMIN_PASSWORD` | Password for the first-run administrator account. **Required in production.** In development a random one is generated and printed once to stdout if this is unset. |
 | `INITIAL_ADMIN_EMAIL` | Administrator e-mail. Defaults to `SAdmin@Sanic.com`. |
-| `PASSWORD_SALT` | Password salt. **Required in production.** |
+| `PASSWORD_SALT` | Password salt. Optional — password hashing uses argon2's own random salt. |
 | `DATABASE_URL` | Tortoise ORM connection string. Defaults to a local SQLite file in development, in-memory SQLite in testing. Falls back to assembling a MySQL URL from `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME`. |
 | `CACHE_TYPE` | `memory` or `redis`. Production defaults to `redis` and refuses to degrade to memory if Redis is unreachable. |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` / `REDIS_PASSWORD` | Redis connection settings. |

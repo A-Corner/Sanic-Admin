@@ -378,7 +378,14 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 
   `main.py:16-18` 捕获 `ConfigError` 并 `sys.exit(f"配置错误: {exc}")`。
 
-  > **当前 production 仍起不来**，即使四个变量齐全——原因不是密钥，而是 §9 #3 的 B1d 缺陷：
+  > **> 待 M1 交付后核实**：上表是**当前基线**的行为，四个变量在 production 都必填。
+  > M1 已把 `SECRET_KEY` 与 `PASSWORD_SALT` 降为可选（`sa-oss/m1` 的
+  > `app/config.py:326-329` 改为 `os.getenv(var, "")`），理由是这两个变量当前不参与
+  > 任何签名或加密——JWT 用 RS256 私钥，口令哈希用 argon2 自带随机盐。
+  > **M1 之后 production 真正必填的是 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD`**，
+  > 上表的后两行仍然成立，前两行不再成立。回填时需按 M1 的实测值重写本节。
+
+  > **当前 production 仍起不来**，即使变量齐全——原因不是密钥，而是 §9 #3 的 B1d 缺陷：
   > `配置错误: 生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）`。
   >
   > **注意两次失败的退出点不同，含义也不同**：

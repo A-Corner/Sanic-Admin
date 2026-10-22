@@ -7,7 +7,7 @@ name: Sanic-Admin Docker Acceptance
 #   1. docker build 成功
 #   2. 带测试用环境变量 run 后，GET /health 返回 200
 #   3. POST /auth/login 能登录
-#   4. 缺 SECRET_KEY 时容器必须非零退出（production fail-closed）
+#   4. 缺 JWT_PRIVATE_KEY 时容器必须非零退出（production fail-closed）
 #
 # ── 与 SA-OSS-M23 lane A 的对接契约 ─────────────────────────────────────
 # 本 job 只依赖下列约定，这些约定同时写在下面的常量注释里以便自洽阅读：
@@ -292,15 +292,21 @@ jobs:
             || { echo "::error::登录响应体缺少 status=0"; cat /tmp/login.json; exit 1; }
           echo "验收 3 通过：登录成功并返回会话数据"
 
-      - name: Assert production fail-closed when SECRET_KEY is missing
+      - name: Assert production fail-closed when JWT_PRIVATE_KEY is missing
         id: failclosed
         run: |
           set -euo pipefail
           CLI="${{ steps.compose.outputs.cli }}"
 
-          # 用一套不同的环境变量集合启动：SANIC_ENV=production 且移除 SECRET_KEY。
+          # 用一套不同的环境变量集合启动：SANIC_ENV=production 且移除 JWT_PRIVATE_KEY。
           # production 下缺少必需密钥必须让进程非零退出（app/config.py 的
           # _env_secret 对 production 抛 ConfigError，main.py 转成 sys.exit）。
+          #
+          # 为什么用 JWT_PRIVATE_KEY 而不是 SECRET_KEY：
+          #   SECRET_KEY 与 PASSWORD_SALT 当前不参与任何签名或加密
+          #   （JWT 用 RS256 私钥，口令哈希用 argon2 自带随机盐），M1 已把它们
+          #   降为可选。真正决定 production 是否 fail-closed 的是
+          #   JWT_PRIVATE_KEY 与 INITIAL_ADMIN_PASSWORD 两个变量。
           #
           # 这里不复用主 compose 文件，而是另起一份自包含的 compose：
           #   * 直接引用上面 build 出来的镜像，避免重复 build；
@@ -316,8 +322,8 @@ jobs:
 
           mkdir -p failclosed
           {
+            echo "SECRET_KEY='$(cat "$KEYDIR/secret_key")'"
             echo "PASSWORD_SALT='$(cat "$KEYDIR/password_salt")'"
-            echo "JWT_PRIVATE_KEY='$(cat "$KEYDIR/jwt_private.pem")'"
             echo "INITIAL_ADMIN_PASSWORD='${CI_ADMIN_PASSWORD}'"
             echo "INITIAL_ADMIN_EMAIL='${CI_ADMIN_EMAIL}'"
           } > failclosed/.env
@@ -334,9 +340,9 @@ jobs:
                 SANIC_ENV: production
                 HOST: "0.0.0.0"
                 PORT: "${APP_PORT_INTERNAL}"
-                # 刻意置空：production 下缺 SECRET_KEY 必须 fail-closed。
+                # 刻意置空：production 下缺 JWT_PRIVATE_KEY 必须 fail-closed。
                 # 空字符串在 app/config.py 的 _env_secret 中按"未提供"处理。
-                SECRET_KEY: ""
+                JWT_PRIVATE_KEY: ""
                 DATABASE_URL: "sqlite:///app/data/sanic_admin_failclosed.sqlite3"
                 CACHE_TYPE: "memory"
                 CORS_ALLOWED_ORIGINS: ""
@@ -358,10 +364,10 @@ jobs:
           # app/api/__init__.py:22 的 BlueprintGroup.add_blueprint 缺陷
           # （属 B1d，待 SA-OSS-M1 修复）以非零退出，断言原因会误判。
           if [ "$RC" -eq 0 ]; then
-            echo "::error::缺 SECRET_KEY 时容器却以 0 退出，production 未 fail-closed"
+            echo "::error::缺 JWT_PRIVATE_KEY 时容器却以 0 退出，production 未 fail-closed"
             exit 1
           fi
-          echo "验收 4 通过：缺 SECRET_KEY 时容器非零退出（退出码 ${RC}）"
+          echo "验收 4 通过：缺 JWT_PRIVATE_KEY 时容器非零退出（退出码 ${RC}）"
           {
             echo "exit_code=${RC}"
             echo "note=退出码非零即通过；退出原因可能是缺密钥(ConfigError)，也可能是 B1d 的 BlueprintGroup 缺陷导致的生产环境拒绝降级启动。"

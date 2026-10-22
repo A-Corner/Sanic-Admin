@@ -47,17 +47,23 @@
 
 ### 2.1 生产必填（fail-closed）
 
-**【读码确认】** 这 4 个变量在 production 缺失时，`_env_secret()` 抛 `ConfigError`（`app/config.py:64-83`），
-进程拒绝启动；在 development/testing 缺失时自动生成临时值、打 warning、并**写回 `os.environ`**
-（`:82`），使 Sanic 拉起的 worker 子进程复用同一份临时值——否则各 worker 各生成一份，
-会导致会话签名不一致。
+**【读码确认】** production 环境真正必填的是 **2 个**变量：`JWT_PRIVATE_KEY` 与
+`INITIAL_ADMIN_PASSWORD`。缺失时 `_env_secret()` 抛 `ConfigError`，进程拒绝启动；在
+development/testing 缺失时自动生成临时值、打 warning、并**写回 `os.environ`**（`app/config.py:82`），
+使 Sanic 拉起的 worker 子进程复用同一份临时值——否则各 worker 各生成一份，会导致会话签名不一致。
 
 | 变量 | 说明 | 默认值 | 生产必填 |
 |---|---|---|---|
-| `SECRET_KEY` | 应用密钥。当前代码只把它放进配置对象，**尚无任何业务读取点**（见 §8） | 无（dev 自动生成 `secrets.token_urlsafe(48)`） | **是** |
-| `PASSWORD_SALT` | 口令盐。同样只放进配置对象，**尚无任何业务读取点**；实际口令哈希用 argon2id 自带随机盐（`app/models/account.py:19`） | 无（dev 自动生成 `secrets.token_hex(16)`） | **是** |
 | `JWT_PRIVATE_KEY` | RS256 签名私钥（PEM）。换行可写成字面量 `\n` | 无（dev 自动生成 2048 位 RSA 私钥） | **是** |
 | `INITIAL_ADMIN_PASSWORD` | 初始管理员口令。数据库中不存在该邮箱账户时用它建号（`app/auth/authentication.py:94-133`） | 无（dev 自动生成并在 stdout 打印一次） | **是** |
+| `SECRET_KEY` | 应用密钥。**当前实现中不参与任何签名或加密**——JWT 实际用 `BaseConfig.SECRET`（RS256 私钥），因此设它不会增强安全性（见 §8） | 空 | 否 |
+| `PASSWORD_SALT` | 口令盐。**当前实现中不参与口令哈希**——实际口令哈希用 argon2id 自带随机盐（`app/models/account.py:19`） | 空 | 否 |
+
+> **> 待 M1 交付后核实**：当前基线（`9a8f946`）上 `SECRET_KEY` 与 `PASSWORD_SALT` 仍走
+> `_env_secret()`，在 production 缺失会拒绝启动。`sa-oss/m1` 已把这两项改为
+> `os.getenv(var, "")`（`app/config.py:326-329`），即降为可选——理由与上表一致：
+> 它们是「必填但无人使用」的假安全项。**M1 合入后本文档即以上表为准**，
+> 本节其余行号引用会随之上移，回填时需一并更新。
 
 `JWT_PUBLIC_KEY` 单独说明（**可选**）：`load_jwt_keys()`（`:121-145`）先读私钥；公钥缺失时由私钥推导
 （`:137` → `_derive_public_pem`，`:98-105`）；公钥存在则必须能解析为 RSA 公钥，且与私钥的
@@ -152,14 +158,14 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 
 ## 3. 生产环境必填项与 fail-closed 行为
 
-**【读码确认，实测】** production 缺 `SECRET_KEY` 时：
+**【读码确认，实测】** production 缺 `JWT_PRIVATE_KEY` 时：
 
 ```
 $ SANIC_ENV=production python -c "import app.config"
-ConfigError: 生产环境必须通过环境变量 SECRET_KEY 提供应用密钥
+ConfigError: 生产环境必须通过环境变量 JWT_PRIVATE_KEY 提供 JWT 签名私钥
 ```
 
-生产环境全部 4 个密钥齐备时，实测生效值：
+生产环境必填密钥齐备时，实测生效值：
 
 ```
 ENV           = production
@@ -175,7 +181,8 @@ fail-closed 的完整清单：
 
 | 触发点 | 行为 | 依据 |
 |---|---|---|
-| `SECRET_KEY` / `PASSWORD_SALT` / `JWT_PRIVATE_KEY` / `INITIAL_ADMIN_PASSWORD` 缺失 | `ConfigError`，进程退出 | `app/config.py:73-74` |
+| `JWT_PRIVATE_KEY` / `INITIAL_ADMIN_PASSWORD` 缺失 | `ConfigError`，进程退出 | `app/config.py:73-74` |
+| `SECRET_KEY` / `PASSWORD_SALT` 缺失 | **不报错**（M1 起降为可选，见 §2.1 的待核实说明） | `sa-oss/m1` 的 `app/config.py:326-329` |
 | `JWT_PRIVATE_KEY` 无法解析为 PEM 私钥 | `ConfigError` | `:113-115` |
 | `JWT_PRIVATE_KEY` 不是 RSA 私钥 | `ConfigError("JWT_PRIVATE_KEY 必须是 RSA 私钥（RS256）")` | `:116-117` |
 | `JWT_PUBLIC_KEY` 无法解析 | `ConfigError` | `:140-142` |
@@ -433,9 +440,10 @@ payload 只有两个字段：
    （`grep -rn "csrf_protect"` 只命中定义与导出）。会话 Cookie 是 `HttpOnly` + `SameSite=Lax`
    （`app/models/session.py:144-150`），目前依赖 SameSite 做基础防护。
 
-7. **`SECRET_KEY` 与 `PASSWORD_SALT` 是「必填但没人用」**：这会造成一种虚假的安全感——
+7. **`SECRET_KEY` 与 `PASSWORD_SALT` 曾经是「必填但没人用」**：这会造成一种虚假的安全感——
    运维以为配了就安全，实际上口令哈希由 argon2id 的随机盐保护，会话签名由 RSA 密钥保护，
-   这两个变量形同虚设。建议在后续批次里要么接入真实用途，要么从必填清单中移除。
+   这两个变量形同虚设。**M1 已按此把它们从 production 必填清单中移除**（见 §2.1），
+   真正决定 fail-closed 的是 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD`。
 
 ---
 

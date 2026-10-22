@@ -18,7 +18,7 @@ python main.py        # 开发服务器，默认端口 22222
 
 注意：重构期间 `requirements.txt` 与启动流程可能存在已知问题，遇到安装或启动失败请先搜索已有 Issue，再决定是否新开。
 
-- 默认管理员口令仅用于本地开发。JWT 私钥、`SECRET_KEY` 等敏感配置不要提交到仓库，使用环境变量提供。
+- 默认管理员口令仅用于本地开发。production 环境真正必填的是 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD`，两者必须通过环境变量提供，缺失会导致进程直接退出。`SECRET_KEY` 与 `PASSWORD_SALT` 当前不参与任何签名或加密，可留空。无论是否必填，任何密钥都不要提交到仓库。
 
 ## 分支与 Pull Request 流程
 
