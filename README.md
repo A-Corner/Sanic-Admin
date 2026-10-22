@@ -55,7 +55,7 @@ Every entry below is traced to code in this repository and was verified by runni
 
 Each resource module declares its own field allow-lists as **module-level constants** — `ACCOUNT_CREATE_FIELDS` / `ACCOUNT_UPDATE_FIELDS` in `account.py`, `ROLE_CREATE_FIELDS` / `ROLE_UPDATE_FIELDS` in `role.py`, `WRITABLE_FIELDS` in `setting.py` — and filters the payload against them, so a request cannot mass-assign fields outside the list. Access is gated with the `check_permissions` / `check_roles` decorators from `app/auth/authorization.py`.
 
-> The `/v1` API blueprint is mounted: `app/api/__init__.py` assembles the resource blueprints with `Blueprint.group(...)`, and the generated OpenAPI spec lists **57 paths**. Verified live — `GET /api/v1/settings` answers 200 with a paginated body, and `GET /api/v1/settings/key/<key>` for a missing key answers 404 with `RESOURCE_NOT_FOUND`.
+> The `/v1` API blueprint is mounted: `app/api/__init__.py` assembles the resource blueprints with `Blueprint.group(...)`, and the generated OpenAPI spec lists **66 paths**. Verified live — `GET /api/v1/settings` answers 200 with a paginated body, and `GET /api/v1/settings/key/<key>` for a missing key answers 404 with `RESOURCE_NOT_FOUND`.
 
 ### API documentation
 
@@ -68,7 +68,7 @@ Each resource module declares its own field allow-lists as **module-level consta
 |---|---|
 | `GET /swagger` | 302 → `/swagger/index.html` → **200** (Swagger UI) |
 | `GET /redoc` | **200** (ReDoc) |
-| `GET /swagger.json` | **200** — an OpenAPI 3.0.3 spec with **57 paths** |
+| `GET /swagger.json` | **200** — an OpenAPI 3.0.3 spec with **66 paths** |
 | `GET /docs/` | 302 → `/swagger` |
 | `GET /docs/models`, `/docs/tags`, `/docs/paths`, `/docs/redoc` | **200** |
 
