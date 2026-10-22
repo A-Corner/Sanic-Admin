@@ -25,6 +25,7 @@ from sanic.views import HTTPMethodView
 
 from app.api import APIResponse, v1_bp
 from app.api.responses import APIError
+from app.api.resources.route_methods import register_view
 from app.api.validators import parse_pagination
 from app.auth.authorization import check_permissions
 from app.models import SystemSetting
@@ -527,12 +528,19 @@ class SettingBulkResource(HTTPMethodView):
 
 
 # 注册路由（显式指定路由名：同一个 view 类注册两次时 Sanic 会报路由名重复）
+# 用 ``register_view``（而不是 ``v1_bp.add_route``）：后者遇到 ``HTTPMethodView``
+# 处理器时会**忽略传入的 methods**，按视图类反推方法集；而 Sanic 23.6 对
+# **动态路径**的方法不匹配会把 ``NoMethod`` 转成 ``NotFound`` → **404**
+# （谎报资源不存在）。``register_view`` 用 ``Blueprint.route`` 原样注册方法，
+# 并给其余方法挂 405 兜底，详见 ``app/api/resources/route_methods.py``。
 setting_resource = SettingResource()
 setting_item_resource = SettingItemResource()
 setting_by_key_resource = SettingByKeyResource()
 setting_bulk_resource = SettingBulkResource()
 
-v1_bp.add_route(setting_resource.as_view(), "/settings", methods=["GET", "POST"], name="setting_collection")
-v1_bp.add_route(setting_item_resource.as_view(), "/settings/<setting_id:int>", methods=["GET", "PUT", "DELETE"], name="setting_item")
-v1_bp.add_route(setting_by_key_resource.as_view(), "/settings/key/<key:str>", methods=["GET", "PUT"], name="setting_by_key")
-v1_bp.add_route(setting_bulk_resource.as_view(), "/settings/bulk", methods=["GET", "PUT"], name="setting_bulk")
+register_view(v1_bp, "/settings", setting_resource, ["GET", "POST"], "setting_collection")
+register_view(v1_bp, "/settings/<setting_id:int>", setting_item_resource,
+              ["GET", "PUT", "DELETE"], "setting_item")
+register_view(v1_bp, "/settings/key/<key:str>", setting_by_key_resource,
+              ["GET", "PUT"], "setting_by_key")
+register_view(v1_bp, "/settings/bulk", setting_bulk_resource, ["GET", "PUT"], "setting_bulk")
