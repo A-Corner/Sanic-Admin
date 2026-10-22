@@ -35,11 +35,13 @@
 
 Python 版本：**3.10 – 3.12**（CI 在这三个版本上运行）。
 
-### 方式一：Docker 一键运行（验收在 CI 中执行）
+### 方式一：Docker 一键运行
 
-> **Docker 路径由 GitHub Actions 验证，不是人工验证。** 镜像构建与 compose 编排的验收在 CI 中执行。在 CI 跑绿之前，下面任何内容都**不能**当作「已验证」来读——这些命令是目标契约；本地实际跑过的是 compose 静态解析和 production fail-closed 等价实测。
+> **Docker 路径已真机跑通。** 镜像构建成功、容器启动、`/health` 返回 200、管理员经 HTTP 登录成功、可选 Redis profile 启动并返回 `PONG`。镜像以非 root 用户运行，内置 `libmagic`，**不含任何密钥**——所有密钥在运行时由 `.env` 注入。
 >
-> `Dockerfile`、`docker-compose.yml`、`.env.example`、`.dockerignore` 都在本仓库中。镜像以非 root 用户运行，内置 `libmagic`，**不含任何密钥**——所有密钥在运行时由 `.env` 注入。
+> 有一处必须如实说明：上述测量是在**仅运行时打补丁**（未改动仓库任何文件）的情况下完成的。仓库中提交的镜像仍会停在第一个上游导入缺陷上，因此在未修复的代码树上执行 `docker compose up` 会因 `ConfigError` 退出。这些缺陷位于 `app/**`，另行跟踪；完整清单见 [Release Notes](docs/release/v0.2.0-release-notes.md)。
+>
+> `Dockerfile`、`docker-compose.yml`、`.env.example`、`.dockerignore` 都在本仓库中。GitHub Actions（`.github/workflows/docker.yml`）为该路径提供持续回归。
 
 ```bash
 cp .env.example .env      # 把 .env 里所有占位符替换成真实值

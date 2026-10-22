@@ -114,11 +114,13 @@ The only documentation endpoint that answers today is the `sanic-ext` default at
   - Alpine: `apk add libmagic`
 - Docker (only for the container path below).
 
-### Option A — Docker one-command run (validation runs in CI)
+### Option A — Docker one-command run
 
-> **The Docker path is validated by GitHub Actions, not by hand.** The image build and the compose orchestration are exercised in CI. Until those runs are green, do not read anything below as "verified" — the commands are the intended contract, and the local checks that *were* run are the compose static parse and the production fail-closed equivalence.
+> **The Docker path has been run for real.** The image was built, the container was started, `/health` answered 200, an administrator logged in over HTTP, and the optional Redis profile was brought up and answered `PONG`. The image runs as a non-root user, installs `libmagic`, and carries **no secrets** — every secret is injected at run time through `.env`.
 >
-> `Dockerfile`, `docker-compose.yml`, `.env.example` and `.dockerignore` are in this repository. The image runs as a non-root user, installs `libmagic`, and carries **no secrets** — every secret is injected at run time through `.env`.
+> One caveat, stated plainly: the container was started with the upstream import defects patched *at runtime only* (no repository file was changed). The image as committed still stops at the first of those defects, so on an unpatched tree `docker compose up` will exit with a `ConfigError` naming the missing import. Those defects live in `app/**` and are tracked separately; see the [release notes](docs/release/v0.2.0-release-notes.md) for the full list.
+>
+> `Dockerfile`, `docker-compose.yml`, `.env.example` and `.dockerignore` are in this repository. GitHub Actions (`.github/workflows/docker.yml`) keeps this path under continuous regression.
 
 ```bash
 cp .env.example .env      # then replace every placeholder value in .env
