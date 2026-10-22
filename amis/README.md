@@ -15,23 +15,28 @@ M1 起，本目录**由后端直接托管**（同源），不再依赖 Node 开�
 * API 调用用绝对路径（`/auth/...`、`/api/v1/...`）；
 * 会话由后端通过 HttpOnly 的 `session` Cookie 下发，浏览器自动带上，**不涉及 CORS**。
 
-### 需要在 `app/__init__.py` 里加的代码
-
-> `app/__init__.py` 不属于本目录的维护范围，由集成方（主编）在集成时接上。
+### 后端托管的实现（已在 `app/__init__.py` 中落地）
 
 ```python
 # app/__init__.py —— create_app() 内，静态目录挂载那一段旁边
 # 托管 AMIS 管理界面（与 API 同源，便于复用 HttpOnly 会话 Cookie）
-AMIS_DIR = app.config.get("AMIS_DIR")
-if AMIS_DIR and os.path.isdir(AMIS_DIR):
-    app.static("/amis", AMIS_DIR, index="login.html")
+# AMIS_DIR 置空或目录不存在时不挂载（生产环境可据此关闭管理界面）
+# name='amis' 是必需的：Sanic 23.6 拒绝重名路由，/static 与 /amis 若都用
+# 默认名 'static'，服务启动时直接抛 Duplicate route names detected。
+amis_dir = app.config.get("AMIS_DIR")
+if amis_dir and os.path.isdir(amis_dir):
+    app.static("/amis", amis_dir, index="login.html", name="amis")
 ```
 
-### 需要新增的配置项
+访问路径：**<http://127.0.0.1:22222/amis/login.html>**。
+`/amis/`（带尾斜杠）会显示登录页；`/amis`（不带尾斜杠）返回 404 —— Sanic 的
+`DirectoryHandler` 只在路径带尾斜杠时才做 index 查找。
+
+### 配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `AMIS_DIR` | str | `str(BASE_DIR / "amis")` | AMIS 静态资源目录；置空字符串或不存在的目录则不挂载（生产环境可据此关闭管理界面） |
+| `AMIS_DIR` | str | `str(BASE_DIR / "amis")` | AMIS 静态资源目录；置空字符串或不存在的目录则不挂载（生产环境可据此关闭管理界面）。**支持 `AMIS_DIR` 环境变量覆盖**（容器内为 `/app/amis`） |
 
 对应 `app/config.py`（`DefaultConfig`）：
 
@@ -44,12 +49,16 @@ AMIS_DIR = str(BASE_DIR / "amis")
 
 ## 二、开发用 Node 服务器（保留，勿删）
 
-`server.js` 是一个**零依赖**的 Node 开发服务器，用于"后端还没接好静态托管"时
-本地预览界面。它会：
+`server.js` 是一个**零依赖**的 Node 开发服务器。后端已直接托管 `amis/` 目录，
+它**不再是运行必需**，仅保留供本地预览 / 调试界面。它会：
 
 * 静态托管本目录下的页面与资源；
-* 把 `/auth` `/capt` `/api` `/health` `/uploads` `/refapi` `/account`
+* 把 `/auth` `/capt` `/api` `/health` `/refapi` `/account`
   反向代理到后端，使浏览器同源访问。
+
+> 注意：它**不代理** `/uploads` —— 后端已移除上传目录的静态挂载（否则任何人都能
+> 直接下载他人上传的文件），上传文件下载走需要鉴权的
+> `GET /api/v1/files/<id>/download`。
 
 ```bash
 npm start                       # 默认 http://127.0.0.1:3000
