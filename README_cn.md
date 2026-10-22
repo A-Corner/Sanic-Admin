@@ -124,14 +124,13 @@ pytest
 | [README.md](README.md) | **完整版 README（英文）**：特性证据表、已知限制、完整文档索引 |
 | [docs/configuration.md](docs/configuration.md) | 全部环境变量说明 |
 | [docs/architecture.md](docs/architecture.md) | 架构与模块划分 |
-| [docs/release/v0.2.0-iteration-plan.md](docs/release/v0.2.0-iteration-plan.md) | v0.2.0 范围、里程碑与发布门禁 |
-| [docs/release/v0.2.0-release-notes.md](docs/release/v0.2.0-release-notes.md) | v0.2.0 Release Notes（草稿） |
+| [docs/release/v0.2.0-release-notes.md](docs/release/v0.2.0-release-notes.md) | v0.2.0 Release Notes（草稿）：版本范围、逐项验证方式与已知限制 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南与 PR 流程 |
 | [SECURITY.md](SECURITY.md) | 安全漏洞私下报告渠道 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
 | [CHANGELOG.md](CHANGELOG.md) | 变更日志 |
 
-> **TODO(M1)**：`docs/configuration.md`、`docs/architecture.md`、`docs/release/v0.2.0-iteration-plan.md` 由并行的文档迭代交付，当前分支中**尚未存在**。上面的链接是目标契约，待其落地后即可访问。
+> v0.2.0 的版本范围、每一项功能的验证方式与已知限制，见 [Release Notes](docs/release/v0.2.0-release-notes.md)。上面的「配置」小节是摘要，完整的环境变量参考在 `docs/configuration.md`，内容直接对照 `app/config.py` 写成。
 
 ---
 

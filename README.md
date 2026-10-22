@@ -210,14 +210,13 @@ The handful that matter most:
 |---|---|
 | [docs/configuration.md](docs/configuration.md) | Every environment variable, its default and its per-environment behaviour |
 | [docs/architecture.md](docs/architecture.md) | Module layout, request flow and data model |
-| [docs/release/v0.2.0-iteration-plan.md](docs/release/v0.2.0-iteration-plan.md) | Scope, milestones and release gates for v0.2.0 |
-| [docs/release/v0.2.0-release-notes.md](docs/release/v0.2.0-release-notes.md) | v0.2.0 release notes (draft) |
+| [docs/release/v0.2.0-release-notes.md](docs/release/v0.2.0-release-notes.md) | v0.2.0 release notes: scope, what was verified and the known limitations |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, branch and PR workflow, code style |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability privately |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 |
 | [CHANGELOG.md](CHANGELOG.md) | Keep a Changelog format |
 
-> **TODO(M1)**: `docs/configuration.md`, `docs/architecture.md` and `docs/release/v0.2.0-iteration-plan.md` are delivered by the parallel documentation iteration and are **not yet present in this branch**. The links above are the intended contract and will resolve once that work lands; the configuration reference table in the *Configuration* section of this README is the interim substitute and is written directly from `app/config.py`.
+> The v0.2.0 scope, the verification performed for each item and the known limitations are described in the [release notes](docs/release/v0.2.0-release-notes.md). The configuration reference table in the *Configuration* section above is a summary; `docs/configuration.md` is the complete reference and is written directly from `app/config.py`.
 
 ---
 
