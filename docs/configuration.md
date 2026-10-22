@@ -130,10 +130,18 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 | `SANIC_ENV` | 运行环境：`development` / `testing` / `production` | `development` | 否（但生产必须显式设为 `production`） |
 | `HOST` | 监听地址 | `127.0.0.1` | 否 |
 | `PORT` | 监听端口 | `22222` | 否 |
+| `AMIS_DIR` | AMIS 管理界面的静态资源目录。M1 起由后端同源托管在 `/amis` 下，浏览器访问 `http://127.0.0.1:22222/amis/login.html` 即为登录页，与 API 同源，不涉及 CORS。目录为空或不存在则不挂载（生产环境可据此关闭管理界面） | `str(BASE_DIR / "amis")`，即项目根下的 `amis/` | 否 |
 
 `WORKERS`（1）、`AUTO_RELOAD`（False）、`AUTO_RELOAD`、`MAX_CONTENT_LENGTH`（16 MB）、
 `COMPRESSION_MIN_LENGTH`（1024）、`COMPRESSION_LEVEL`（6）、`DEFAULT_PAGE_SIZE`（10）、
 `MAX_PAGE_SIZE`（100）、`LOG_DIR`、`LOG_LEVEL`（INFO）均为类常量，**不可通过环境变量覆盖**。
+
+> **> 待 M1 交付后核实**：`AMIS_DIR` 在 M1 的 `amis/README.md` 契约里被列为
+> `DefaultConfig` 的类常量（`app/config.py` 中 `AMIS_DIR = str(BASE_DIR / "amis")`），
+> 由 `app/__init__.py` 用 `app.config.get("AMIS_DIR")` 读取后 `app.static("/amis", …, index="login.html")` 挂载。
+> **但该契约未把 `AMIS_DIR` 列入 `get_config()` 的环境变量覆盖列表**，因此当前它
+> 实际上不可通过环境变量改写——`.env.example` 中的 `AMIS_DIR` 一行要等
+> `app/config.py` 补上 env 覆盖后才生效。回填时按 M1 的最终实现核对。
 
 > 生产部署提示：`HOST` 默认是 `127.0.0.1`，只监听回环。对外提供服务需要显式设为 `0.0.0.0`
 > 或由反向代理转发。

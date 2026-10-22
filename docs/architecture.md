@@ -740,6 +740,22 @@ v1_bp.add_route(article_resource.as_view(), "/articles/<article_id:int>",
 
 ### 6.2 路由怎么挂
 
+**主路径（M1 起）：由后端同源托管。** 应用把 `amis/` 目录挂在 `/amis` 下，并以 `login.html` 作为索引，
+因此管理界面的入口是 **`http://127.0.0.1:22222/amis/login.html`**。页面与 API 同源，
+`HttpOnly` 的 `session` Cookie 由浏览器自动携带，不涉及 CORS。
+
+挂载代码（由集成方在 `app/__init__.py` 中接入，`amis/` 目录本身不负责）：
+
+```python
+AMIS_DIR = app.config.get("AMIS_DIR")
+if AMIS_DIR and os.path.isdir(AMIS_DIR):
+    app.static("/amis", AMIS_DIR, index="login.html")
+```
+
+`AMIS_DIR` 默认指向应用旁的 `amis/` 目录；置空或指向不存在的目录则不挂载，
+生产环境可据此关闭管理界面。**该配置项在 M1 的 `amis/README.md` 契约中被列为 `DefaultConfig`
+类常量，尚未列入 `get_config()` 的环境变量覆盖列表**——回填时需按 M1 的最终实现核对。
+
 **【读码确认】** `amis/pages/site.json` 的菜单节点用 `schemaApi` 引用页面 JSON：
 
 ```json
@@ -795,7 +811,10 @@ v1_bp.add_route(article_resource.as_view(), "/articles/<article_id:int>",
 > 并删除 `Origin` 头做同源转发。因此 M1 之后 `/refapi/*` 是代理前缀而非后端真实路径，
 > 前端 JSON 里的 `api.url` 用相对路径 + 代理前缀即可，不必写绝对地址。
 
-### 6.4 开发服务器
+### 6.4 开发服务器（可选）
+
+**这是可选的开发辅助，不是正式接入方式。** 正式方式是 §6.2 的后端同源托管
+（`http://127.0.0.1:22222/amis/login.html`）。Node 服务器只在「后端还没接好静态托管」时用于本地预览界面。
 
 **【读码确认】** 当前基线 `amis/server.js` 用 Express：
 

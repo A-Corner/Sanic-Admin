@@ -70,10 +70,13 @@ The only documentation endpoint that answers today is the `sanic-ext` default at
 
 ### Admin console (AMIS)
 
-- The AMIS SDK and page definitions live in `amis/` (`amis/sdk/`, `amis/pages/*.json`, `amis/site.html`).
-- `amis/server.js` is a small Express host used for local AMIS authoring.
+**The console is served by the backend itself.** Open **http://127.0.0.1:22222/amis/login.html** — the AMIS pages are mounted by the Sanic application under `/amis`, so the page and the API are same-origin and the `HttpOnly` session cookie is sent automatically, with no CORS involved.
 
-> `TODO(M1)`: the AMIS → backend wiring (login → dashboard → account list) is being delivered in the M1 iteration on a separate branch (`sa-oss/b7`, `feat(amis): 前端对接新后端登录与鉴权接口`). It is **not** merged into this baseline, and the AMIS console is **not** mounted by the Sanic application on this snapshot (`app/web/routes.py` defines `register_web_blueprints` but nothing calls it, and it renders `frontend/templates`, which does not exist).
+- The AMIS SDK and page definitions live in `amis/` (`amis/sdk/`, `amis/pages/*.json`, `amis/index.html`, `amis/login.html`).
+- The static directory is configured by `AMIS_DIR` (default: the `amis/` folder next to the application). Point it at an empty value or a missing directory and the console is not mounted — a way to switch the admin UI off in production.
+- `amis/server.js` is a **zero-dependency Node development server** that proxies `/auth`, `/capt`, `/api`, `/health` and friends to the backend. It is **optional**: it exists for previewing pages while the backend is being worked on. The normal path is the backend-hosted one above.
+
+> `TODO(M1)`: the backend-hosted console (`app/static("/amis", …, index="login.html")` plus the `AMIS_DIR` setting) is being delivered in the M1 iteration — the AMIS page definitions and the same-origin rewiring are on `sa-oss/m1-e` (`feat(amis): 后端同源托管 AMIS，菜单对齐真实 API`). It is **not** merged into this baseline, where the console is **not** mounted at all (`app/web/routes.py` defines `register_web_blueprints` but nothing calls it, and it renders `frontend/templates`, which does not exist). The exact final path is to be confirmed against the M1 delivery.
 
 ### Caching
 
@@ -146,6 +149,8 @@ python main.py
 ```
 
 The server listens on **http://localhost:22222**.
+
+Then open the admin console at **http://127.0.0.1:22222/amis/login.html** and sign in with the administrator account. The console is served by the backend itself, so the page and the API are same-origin. `TODO(M1)`: the backend-hosted console is delivered with the M1 closure — on this baseline the path is not mounted yet.
 
 Verify it is up:
 
