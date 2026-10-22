@@ -25,6 +25,7 @@ from sanic.views import HTTPMethodView
 
 from app.api import APIResponse, v1_bp
 from app.api.responses import APIError
+from app.api.validators import parse_pagination
 from app.auth.authorization import check_permissions
 from app.models import SystemSetting
 
@@ -48,6 +49,74 @@ VALUE_TYPES = ("string", "int", "float", "bool", "json")
 
 #: 分页上限
 MAX_PAGE_SIZE = 100
+
+#: ``description`` 字段长度上限（与模型 ``CharField(max_length=255)`` 对齐）
+DESCRIPTION_MAX_LENGTH = 255
+
+#: ``category`` 字段长度上限（与模型 ``CharField(max_length=50)`` 对齐）
+CATEGORY_MAX_LENGTH = 50
+
+#: 布尔字段的合法字符串取值（供 ``is_public`` 解析）
+_TRUE_STRINGS = ("true", "1", "yes", "on")
+_FALSE_STRINGS = ("false", "0", "no", "off")
+
+
+def _parse_bool(value: Any) -> Optional[bool]:
+    """
+    解析布尔字段。
+
+    **不能直接用 ``bool(value)``**：``bool("false")`` 是 ``True``（非空字符串为真），
+    客户端传 JSON 字符串 ``"false"`` 会被当成 True 写进库。
+
+    支持：真正的布尔值、``"true"/"false"``、``"1"/"0"``、``"yes"/"no"``、
+    ``"on"/"off"``（大小写不敏感），以及数值 0/1。
+
+    Args:
+        value: 原始值
+
+    Returns:
+        Optional[bool]: 解析结果；无法解析时返回 None
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_STRINGS:
+            return True
+        if text in _FALSE_STRINGS:
+            return False
+    return None
+
+
+def _validate_text_fields(data: Dict[str, Any]) -> Optional[str]:
+    """
+    校验 ``description`` / ``category`` 这类文本字段。
+
+    检查项：
+
+    * 必须是字符串（否则会被字符串化落库，如 dict 变成 ``"{'a': 1}"``）；
+    * 长度不超过模型字段上限（超长会被数据库截断或报错）。
+
+    Args:
+        data: 白名单提取后的待写入数据
+
+    Returns:
+        Optional[str]: 错误描述；校验通过返回 None
+    """
+    for field, max_length in (("description", DESCRIPTION_MAX_LENGTH),
+                              ("category", CATEGORY_MAX_LENGTH)):
+        if field not in data:
+            continue
+        value = data[field]
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return f"{field} 必须是字符串"
+        if len(value) > max_length:
+            return f"{field} 长度不能超过 {max_length} 个字符"
+    return None
 
 
 def _bad_request(message: str, details: Any = None):
@@ -169,8 +238,9 @@ class SettingResource(HTTPMethodView):
     @check_permissions("setting", "read")
     async def get(self, request: Request):
         """获取设置列表。"""
-        page = _positive_int(request.args.get("page"), 1)
-        page_size = min(_positive_int(request.args.get("page_size"), 20), MAX_PAGE_SIZE)
+        # 用 parse_pagination 而不是自带的 _positive_int：页码被钳制到 MAX_PAGE，
+        # 否则超大 page 会让 OFFSET 溢出 SQLite 整数范围 → IntegrityError → 500。
+        page, page_size = parse_pagination(request, 20, MAX_PAGE_SIZE)
 
         query = SystemSetting.filter(deleted=False)
         category = request.args.get("category")
@@ -218,21 +288,49 @@ class SettingResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
-        if await SystemSetting.filter(key=key).exists():
+        text_error = _validate_text_fields(data)
+        if text_error:
+            return _bad_request(text_error)
+
+        # is_public 显式解析：bool("false") 是 True，直接 bool() 会把
+        # 客户端传的字符串 "false" 存成 True。
+        is_public = _parse_bool(data.get("is_public", False))
+        if is_public is None:
+            return _bad_request("is_public 必须是布尔值或 'true'/'false' 字符串")
+
+        # key 在模型上是唯一列，软删除的记录**仍然占用** key。
+        # 因此这里不过滤 deleted：
+        #   * 未删除的同 key 已存在 → 409（语义正确）；
+        #   * 只有软删除的同 key → 把那条记录"复活"（清掉 deleted 并写入新值），
+        #     否则新建会撞唯一约束（IntegrityError → 500），
+        #     且软删除后同 key 永远无法重建（原先 exists() 不过滤 deleted → 死锁 409）。
+        existing = await SystemSetting.filter(key=key).first()
+        if existing is not None and not existing.deleted:
             return APIResponse.error(
                 message=f"设置键 '{key}' 已存在",
                 error_code=APIError.CONFLICT,
                 status_code=409,
             )
 
-        setting = await SystemSetting.create(
-            key=key,
-            value=_store_value(data["value"], value_type),
-            value_type=value_type,
-            description=data.get("description"),
-            category=data.get("category", "general"),
-            is_public=bool(data.get("is_public", False)),
-        )
+        if existing is not None:
+            # 复活软删除的同 key 记录
+            existing.value = _store_value(data["value"], value_type)
+            existing.value_type = value_type
+            existing.description = data.get("description")
+            existing.category = data.get("category", "general")
+            existing.is_public = is_public
+            existing.deleted = False
+            await existing.save()
+            setting = existing
+        else:
+            setting = await SystemSetting.create(
+                key=key,
+                value=_store_value(data["value"], value_type),
+                value_type=value_type,
+                description=data.get("description"),
+                category=data.get("category", "general"),
+                is_public=is_public,
+            )
         return APIResponse.created(
             data=format_setting(setting),
             message="创建系统设置成功",
@@ -279,6 +377,10 @@ class SettingItemResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
+        text_error = _validate_text_fields(data)
+        if text_error:
+            return _bad_request(text_error)
+
         setting.value = _store_value(data["value"], value_type)
         setting.value_type = value_type
         if "description" in data:
@@ -286,7 +388,11 @@ class SettingItemResource(HTTPMethodView):
         if "category" in data:
             setting.category = data["category"]
         if "is_public" in data:
-            setting.is_public = bool(data["is_public"])
+            # 显式解析：bool("false") 是 True，会把字符串 "false" 存成 True
+            is_public = _parse_bool(data["is_public"])
+            if is_public is None:
+                return _bad_request("is_public 必须是布尔值或 'true'/'false' 字符串")
+            setting.is_public = is_public
         await setting.save()
 
         return APIResponse.success(data=format_setting(setting), message="更新系统设置成功")
@@ -337,6 +443,10 @@ class SettingByKeyResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
+        text_error = _validate_text_fields(data)
+        if text_error:
+            return _bad_request(text_error)
+
         setting.value = _store_value(data["value"], value_type)
         setting.value_type = value_type
         if "description" in data:
@@ -344,7 +454,11 @@ class SettingByKeyResource(HTTPMethodView):
         if "category" in data:
             setting.category = data["category"]
         if "is_public" in data:
-            setting.is_public = bool(data["is_public"])
+            # 显式解析：bool("false") 是 True，会把字符串 "false" 存成 True
+            is_public = _parse_bool(data["is_public"])
+            if is_public is None:
+                return _bad_request("is_public 必须是布尔值或 'true'/'false' 字符串")
+            setting.is_public = is_public
         await setting.save()
 
         return APIResponse.success(data=format_setting(setting), message="更新系统设置成功")
@@ -410,15 +524,6 @@ class SettingBulkResource(HTTPMethodView):
             data={"updated": updated, "errors": errors},
             message=f"已成功更新 {len(updated)} 项设置，{len(errors)} 项失败",
         )
-
-
-def _positive_int(value: Any, default: int) -> int:
-    """把请求参数解析为正整数，非法时回落到默认值。"""
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return default
-    return number if number > 0 else default
 
 
 # 注册路由（显式指定路由名：同一个 view 类注册两次时 Sanic 会报路由名重复）
