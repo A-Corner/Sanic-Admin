@@ -5,7 +5,62 @@
 
 ## [Unreleased]
 
-v0.2.0 迭代 M1（功能闭环）的变更汇总。v0.2.0 尚未发布。
+<!-- 下一版变更写在这里。 -->
+
+## [0.2.1] — 2026-10-22
+
+v0.2.0 的维护补丁版本，不含新功能。除下列修复外，公开 API、配置契约与部署路径均未变化。
+完整的改动说明与实测证据见 [v0.2.1 发布说明](docs/release/v0.2.1-release-notes.md)。
+
+测试规模：**95 → 157 例**（新增 4 个测试文件）。路由表实测 **115 条路由 / 76 个不同 path**，
+OpenAPI 规范内 **67 条 path**。
+
+### Fixed
+
+**API 文档**
+- OpenAPI 规范不再收进 405 兜底路由的方法。此前 `/api/v1/logs` 在规范里显示
+  `delete/get/patch/post/put`，而该路径实际只支持 `GET`；`/api/v1/roles` 等 39 个路径
+  同样被塞入了不存在的方法。修复后规范只列出真实支持的方法
+  （`/api/v1/logs` 只剩 `get`，`/api/v1/settings` 保留真实的 `get` 与 `post`）。
+  该缺陷在 v0.2.0 中同样存在（当时影响 14 个路径），不是 v0.2.1 引入的；
+  v0.2.1 把兜底覆盖面扩到 39 个路径，因此一并修掉。
+  兜底路由本身仍在路由表中（115 条里的 39 条），只是不再写进规范。
+
+**AMIS 静态挂载**（以下两项是 v0.2.1 引入的回归，v0.2.0 整目录托管时不存在）
+- AMIS 的 `public/` 子目录未挂载，导致仪表盘 logo 加载 404、显示为破图
+  （`amis/index.html` 引用 `public/logo.png`）。改为枚举磁盘上实际存在的子目录逐个挂载，
+  不再使用硬编码清单，避免将来新增资源目录时再次漏挂。
+- AMIS 与 `/static` 的裸目录路径（如 `/amis/css/`）由 404 变成 500 ——
+  Sanic 23.6 的 `DirectoryHandler` 会抛未捕获的 `IsADirectoryError`，
+  等于开了一个无需鉴权即可外部触发的 500 面。改用返回 404 的目录处理器。
+  AMIS 的四个开发文件（`server.js`、`package.json`、`nodemon.json`、`README.md`）仍为 404。
+
+**系统设置接口**
+- `category: null` 触发 500（`category` 在模型里不允许 null，未捕获的校验异常）。
+- `value: null` 被落库成字面量 `"None"`，读回来又是一个「合法」的配置值 ——
+  此前 `value_type: string` 分支完全缺失，null 穿过校验后被 `str()` 化。
+  现所有 `value_type` 一律拒绝 null，并补上 string 分支
+  （此前 JSON 对象也能当 string 存入，被存成 `"{'a': 1}"`）。
+- `is_public` 的 400 文案已列出全部可接受取值（`true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`，
+  大小写不敏感），此前只写了 `'true'/'false'`。
+
+### Changed
+
+- 分页参数集中到 `parse_pagination`：`page` 超出数据库整数范围时钳制到上限并返回 200，
+  不再 500。
+- 方法不匹配一律返回 405 并带 `Allow` 头（`log`、`cache`、`dashboard` 等资源也一并接入
+  `register_view`）；405 兜底路由覆盖 39 个路径。
+
+### Notes
+
+- AMIS 改用枚举子目录挂载的代价：**将来新增的开发子目录会被自动公开**。
+  v0.3 需要补黑名单，或改回显式白名单。
+- 设置项 `value` 仍无业务长度上限（框架实际上限为 100MB），且 `MAX_CONTENT_LENGTH`
+  配置项在 Sanic 23.6 下不被读取；两项留到 v0.3。
+
+## [0.2.0] — 2026-10-22
+
+v0.2.0 迭代 M1（功能闭环）的变更汇总。
 
 ### Added
 

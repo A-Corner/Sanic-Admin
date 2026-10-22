@@ -2,7 +2,7 @@
 
 > **Project status — read this first**
 >
-> - Sanic-Admin is being rebuilt for **v0.2.0**. Every statement below was verified by running it on the release candidate (`release/v0.2.0`, base `8750d51`); anything that could not be verified is listed under *Known limitations* in the [release notes](docs/release/v0.2.0-release-notes.md).
+> - Sanic-Admin was rebuilt for **v0.2.0** (released 2026-10-22) and carries maintenance fixes in **v0.2.1**. Every statement below was verified by running it on the release candidate (`release/v0.2.1`, base `d9e284a`); anything that could not be verified is listed under *Known limitations* in the [release notes](docs/release/v0.2.0-release-notes.md).
 > - **Not production-ready yet.** Do not deploy this to a public environment.
 > - **No credentials are baked into the repository.** There is no default administrator password. The first-run administrator password is generated at startup (development only) or must be supplied via `INITIAL_ADMIN_PASSWORD`.
 > - Secrets are **environment variables only** — the repository contains none. The JWT signing key and the initial administrator password are the two that production requires; a sample key that existed in the repository history must be treated as compromised and rotated.
@@ -214,7 +214,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **Current test status:** `pytest` reports **`95 passed`, 0 failed, 0 errors** (collection: 95 tests, ~90 s; about 6 minutes with `--cov=app`). Coverage over `app/` is **50 %** — the suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
+> **Current test status:** `pytest` reports **`157 passed`, 0 failed, 0 errors** (collection: 157 tests, ~65 s; about 80 s with `--cov=app`). Coverage over `app/` is **52 %** — the suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
 
 ---
 
