@@ -10,9 +10,6 @@ OpenAPI 规范不应包含 405 兜底路由引入的"实际不支持的方法"�
 
 修复：``app/docs/openapi.py`` 的 ``_process_route`` 跳过这类兜底路由。
 """
-import json
-
-import pytest
 
 
 async def _get_spec(client):

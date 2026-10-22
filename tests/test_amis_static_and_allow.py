@@ -7,15 +7,10 @@ L2：AMIS 目录下的开发文件（server.js、package.json、nodemon.json、R
     不应被静态访问；含空字节的路径不应导致 500。
 L4：405 响应应带 Allow 头，列出该 URI 实际支持的方法。
 """
-import asyncio
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
-from app import create_app
-from app.config import config_to_dict, get_config
 from app import AMIS_PRIVATE_FILES
 
 #: 不应对外公开的 AMIS 开发文件
