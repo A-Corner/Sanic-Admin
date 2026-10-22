@@ -13,7 +13,8 @@ from app.auth.authorization import requires_permission
 from app.cache.decorators import cached
 from typing import Dict, Any
 from tortoise.functions import Count, Sum
-from datetime import datetime, timedelta
+from datetime import timedelta
+from app.services.utils import utcnow
 import platform
 import psutil
 
@@ -55,7 +56,7 @@ class DashboardSummaryResource(HTTPMethodView):
         total_roles = await Role.all().count()
         
         # 获取最近注册趋势
-        now = datetime.now()
+        now = utcnow()
         last_week = now - timedelta(days=7)
         
         # 按天统计最近一周的注册用户
@@ -161,7 +162,7 @@ class DashboardActivitiesResource(HTTPMethodView):
             days = 7
         
         # 计算时间范围
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=days)
         
         # 获取总操作日志数
@@ -269,7 +270,7 @@ class DashboardStorageResource(HTTPMethodView):
         recent_files = await UploadedFile.filter(deleted=False).order_by('-created_at').limit(10)
         
         # 计算存储增长趋势
-        now = datetime.now()
+        now = utcnow()
         last_month = now - timedelta(days=30)
         
         # 按周统计最近一个月的文件增长

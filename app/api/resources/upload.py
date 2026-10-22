@@ -7,10 +7,15 @@
 安全要点：
 * 存储文件名完全由服务端生成（uuid + 由检测到的 MIME 推导出的扩展名），不使用客户端文件名；
   客户端文件名只作为展示用元数据（取 basename 并清理控制字符）。
-* 分类（category）只接受固定白名单；最终路径在写入/读取/删除前都用 realpath 校验必须位于 UPLOAD_DIR 之内。
+* 客户端文件名含路径穿越片段（``../``、``%2e%2e``、绝对路径、null 字节）时**直接拒绝**，
+  不给"上传成功却夹带路径"的错觉。
+* 分类（category）只接受固定白名单；最终路径在写入/读取/删除前都用 realpath 校验必须位于
+  UPLOAD_DIR 之内（同时拒绝 URL 编码的路径分隔符与符号链接逃逸）。
 * 文件内容用 libmagic 检测真实类型，只允许白名单类型；大小有上限。
 * 上传目录不对外静态托管：下载走需要鉴权的 ``GET /api/v1/files/<id>/download``，并强制
   ``Content-Disposition: attachment`` 与 ``X-Content-Type-Options: nosniff``。
+* 响应只给相对路径与下载 URL，不泄露服务器绝对路径。
+
 权限：上传/列表/下载使用资源 ``file`` 的 upload/read 操作，删除使用 delete（他人文件需 manage）；
 头像是自助操作，登录即可（只接受图片）。
 """
@@ -25,6 +30,7 @@ from sanic import response
 from sanic.log import logger
 from sanic.request import Request
 from sanic.views import HTTPMethodView
+from tortoise.expressions import F
 
 from app.api import APIResponse, v1_bp
 from app.api.responses import APIError
@@ -52,6 +58,39 @@ ALLOWED_TYPES: Dict[str, str] = {
 }
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif"}
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# URL 编码的路径分隔符（%2f/%5c 及其大小写形式）：解码后即成为分隔符
+_URL_SEP_RE = re.compile(r"%2f|%5c", re.IGNORECASE)
+# 客户端文件名里出现这些片段即为可疑的路径穿越尝试
+_TRAVERSAL_RE = re.compile(r"(^|[\\/])\.\.([\\/]|$)|%2e%2e", re.IGNORECASE)
+
+
+def is_suspicious_filename(name: Optional[str]) -> bool:
+    """
+    客户端提供的文件名是否含路径穿越尝试。
+
+    拒绝以下形态（不区分操作系统）：
+
+    * 含 ``..`` 路径片段（``../``、``..\\``、``a/../b``）；
+    * 含 URL 编码的 ``..``（``%2e%2e``）或 URL 编码的路径分隔符（``%2f``/``%5c``）；
+    * 是绝对路径（以 ``/`` 或 ``\\`` 开头，或形如 ``C:\\...``）；
+    * 含 null 字节。
+
+    存储文件名完全由服务端生成（uuid + MIME 推导扩展名），客户端文件名只作展示，
+    但**含穿越片段的文件名一律拒绝**——不给人"上传成功"却夹带路径的错觉，
+    也避免下游任何把展示名当路径使用的代码被误导。
+    """
+    if not name:
+        return False
+    if "\x00" in name:
+        return True
+    if _TRAVERSAL_RE.search(name) or _URL_SEP_RE.search(name):
+        return True
+    # 绝对路径：/etc/passwd 或 C:\windows\...
+    if name.startswith(("/", "\\")):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", name):
+        return True
+    return False
 
 
 class UploadError(Exception):
@@ -69,9 +108,20 @@ def get_upload_root() -> str:
 def safe_upload_path(relative_path: str) -> str:
     """
     把相对上传目录的路径解析为绝对路径；解析后不在上传目录内（路径穿越、符号链接逃逸）则抛 ValueError。
+
+    拒绝的输入（均抛 ValueError）：
+    * 空路径；
+    * 含 null 字节（``\\x00``）的路径；
+    * 绝对路径（``/etc/passwd``）；
+    * 含 URL 编码分隔符（``%2f`` / ``%5c`` 及其大小写形式）的路径——
+      上层若把这类值直接当文件名解码，会还原成 ``../`` 从而绕过 realpath 校验；
+    * 解析后落在 UPLOAD_DIR 之外的路径（``../`` 穿越、符号链接逃逸）。
     """
     root = get_upload_root()
     if not relative_path or "\x00" in relative_path or os.path.isabs(relative_path):
+        raise ValueError("非法的文件路径")
+    # URL 编码的路径分隔符：解码后即为分隔符，必须在 realpath 之前拒绝
+    if _URL_SEP_RE.search(relative_path):
         raise ValueError("非法的文件路径")
     full = os.path.realpath(os.path.join(root, relative_path))
     if full != root and not full.startswith(root + os.sep):
@@ -84,6 +134,38 @@ def sanitize_filename(name: Optional[str]) -> str:
     name = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
     name = _CONTROL_CHARS_RE.sub("", name).strip().strip(".")
     return (name or "file")[:200]
+
+
+def download_filename(name: Optional[str]) -> str:
+    """
+    生成用于 ``Content-Disposition`` 的文件名。
+
+    ``sanitize_filename`` 已去掉路径与控制字符，但引号会破坏
+    ``Content-Disposition: attachment; filename="..."`` 的引号串结构，
+    因此这里再剔除引号与分号。
+    """
+    return sanitize_filename(name).replace('"', "").replace(";", "").strip() or "file"
+
+
+def _iter_uploaded_files(files) -> list:
+    """
+    把 ``request.files`` 里某个字段的值统一成 list。
+
+    ``request.files`` 的值是 Sanic 的 ``RequestParameters``，其 ``get()`` 返回**第一个**
+    元素而不是列表（``getlist()`` 才返回列表）。直接对 ``get()`` 的结果取 ``[0]``
+    会拿到 ``File`` 元组的第一个字段（即 MIME 类型字符串）而不是文件对象。
+    """
+    if not files:
+        return []
+    if isinstance(files, (list, tuple)):
+        # Sanic 的 File 是 NamedTuple（tuple 子类），必须先判 list/tuple 再判 File
+        if hasattr(files, "body") and hasattr(files, "name"):
+            return [files]
+        return list(files)
+    getlist = getattr(files, "getlist", None)
+    if callable(getlist):
+        return list(getlist())
+    return [files]
 
 
 def _parse_positive_int(value, default: int, maximum: Optional[int] = None) -> int:
@@ -100,6 +182,9 @@ async def store_upload(file, account, category: str, *, allowed: Optional[set] =
     """校验并保存一个上传文件，返回数据库记录。校验失败抛 UploadError。"""
     if category not in ALLOWED_CATEGORIES:
         raise UploadError(f"不支持的文件分类，可选: {', '.join(ALLOWED_CATEGORIES)}")
+    # 客户端文件名含路径穿越片段一律拒绝（存储名由服务端生成，不含客户端输入）
+    if is_suspicious_filename(getattr(file, "name", None)):
+        raise UploadError("文件名不合法")
     body = file.body or b""
     if not body:
         raise UploadError("文件为空")
@@ -171,7 +256,7 @@ class FileUploadResource(HTTPMethodView):
 
         uploaded, errors = [], []
         for _field, files in request.files.items():
-            for file in (files if isinstance(files, list) else [files]):
+            for file in _iter_uploaded_files(files):
                 try:
                     uploaded.append(file_info(await store_upload(file, account, category)))
                 except UploadError as exc:
@@ -188,17 +273,24 @@ class FileUploadResource(HTTPMethodView):
 
 
 class AvatarUploadResource:
-    """头像上传（自助操作，登录即可）：``POST /api/v1/upload/avatar``"""
+    """
+    头像上传（自助操作）：``POST /api/v1/upload/avatar``
+
+    语义：**只要求登录**（``authenticate_request``），不要求 ``file:upload`` 权限——
+    头像属于账户自身的资料，普通用户也必须能改自己的头像。
+    头像只能写到当前登录账户自己的 Profile 上，不接受客户端指定账户。
+    """
 
     async def post(self, request: Request):
         session = await authenticate_request(request)
         account = session.bearer
         files = request.files.get("avatar") if request.files else None
-        if not files:
+        candidates = _iter_uploaded_files(files)
+        if not candidates:
             return APIResponse.error(message="请求中未包含头像文件", error_code="NO_AVATAR_UPLOADED",
                                      status_code=400)
         try:
-            record = await store_upload(files[0], account, "avatar",
+            record = await store_upload(candidates[0], account, "avatar",
                                         allowed=IMAGE_TYPES, max_size=MAX_AVATAR_SIZE)
         except UploadError as exc:
             return APIResponse.error(message=f"头像上传失败: {exc}", error_code="AVATAR_UPLOAD_FAILED",
@@ -247,7 +339,18 @@ class FileListResource:
 
 
 class FileDownloadResource:
-    """文件下载：``GET /api/v1/files/<id>/download``（需要登录；头像对所有登录用户可见）"""
+    """
+    文件下载：``GET /api/v1/files/<id>/download``
+
+    归属判定（任一成立即放行）：
+
+    1. ``record.category == "avatar"``——头像是账户对外展示的形象，登录用户可见；
+    2. ``record.account_id == account.id``——**上传者本人**；
+    3. ``has_permission(account, "file", "read")``——持有 file 读权限者可下载全部文件。
+
+    不满足以上任一条返回 403。下载路径**不**用文件 id 拼路径，而是取数据库记录里的
+    相对 ``file_path``，再经 ``safe_upload_path`` 做 realpath 越界校验。
+    """
 
     async def get(self, request: Request, file_id: int):
         session = await authenticate_request(request)
@@ -273,18 +376,31 @@ class FileDownloadResource:
         if not os.path.isfile(full_path):
             return APIResponse.error(message="文件不存在", error_code="FILE_NOT_FOUND", status_code=404)
 
-        record.download_count += 1
-        await record.save(update_fields=["download_count"])
+        # 原子自增，避免并发下载丢计数
+        await UploadedFile.filter(id=record.id).update(download_count=F("download_count") + 1)
         return await response.file(
             full_path,
-            filename=sanitize_filename(record.filename),
+            filename=download_filename(record.filename),
             mime_type=record.file_type or "application/octet-stream",
-            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+            # no_store=True 让 Sanic 生成唯一的 cache-control: no-store；
+            # 若手工再传 Cache-Control 会与框架生成的头重复。
+            no_store=True,
+            headers={"X-Content-Type-Options": "nosniff"},
         )
 
 
 class FileDeleteResource:
-    """文件删除：``DELETE /api/v1/files/<id>``"""
+    """
+    文件删除：``DELETE /api/v1/files/<id>``
+
+    归属判定：
+
+    * 删除**自己的**文件：只需 ``file:delete`` 权限；
+    * 删除**他人**的文件：额外需要 ``file:manage`` 权限，否则 403。
+
+    磁盘文件与数据库记录保持一致：先删物理文件，再软删除记录
+    （``remove_stored_file`` 在路径非法或文件缺失时只记日志，不阻断记录删除）。
+    """
 
     @requires_permission("file:delete")
     async def delete(self, request: Request, file_id: int):
@@ -294,10 +410,11 @@ class FileDeleteResource:
             return APIResponse.error(message="文件不存在", error_code="FILE_NOT_FOUND", status_code=404)
         if record.account_id != account.id and not await check_permissions(
                 "file", "manage", request=request, check_only=True):
-            return APIResponse.error(message="无权删除此文件", error_code="PERMISSION_DENIED",
+            return APIResponse.error(message="无权删除此文件", error_code=APIError.FORBIDDEN,
                                      status_code=403)
         remove_stored_file(record)
-        await record.delete()
+        record.deleted = True
+        await record.save(update_fields=["deleted"])
         return APIResponse.success(message="文件删除成功")
 
 

@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from tortoise.functions import Count, Sum
 from tortoise.expressions import Q
 from datetime import datetime, timedelta
+from app.services.utils import utcnow
 
 
 class UserActivityResource(HTTPMethodView):
@@ -40,7 +41,7 @@ class UserActivityResource(HTTPMethodView):
             days = 30
         
         # 计算时间范围
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=days)
         
         # 获取登录操作日志
@@ -149,7 +150,7 @@ class UserActivityResource(HTTPMethodView):
         Returns:
             Dict[str, Any]: 留存率数据
         """
-        now = datetime.now()
+        now = utcnow()
         retention_data = {}
         
         # 计算1天、7天、14天、30天留存率
@@ -211,7 +212,7 @@ class FeatureUsageResource(HTTPMethodView):
             days = 30
         
         # 计算时间范围
-        now = datetime.now()
+        now = utcnow()
         start_date = now - timedelta(days=days)
         
         # 按资源类型和操作统计API调用
@@ -317,7 +318,7 @@ class FeatureUsageResource(HTTPMethodView):
         Returns:
             List[Dict[str, Any]]: 趋势数据
         """
-        now = datetime.now()
+        now = utcnow()
         trend_data = []
         
         # 按天统计API调用次数
@@ -460,7 +461,7 @@ class PermissionAnalysisResource(HTTPMethodView):
         # 获取操作日志中的权限验证记录
         permission_logs = await OperationLog.filter(
             operation_type="permission",
-            created_at__gte=datetime.now() - timedelta(days=30)
+            created_at__gte=utcnow() - timedelta(days=30)
         ).all()
         
         # 统计权限验证成功和失败次数
