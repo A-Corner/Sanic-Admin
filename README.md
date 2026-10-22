@@ -2,10 +2,10 @@
 
 > **Project status — read this first**
 >
-> - Sanic-Admin is being rebuilt for **v0.2.0**. The baseline described below is what is verified on the current `sa-oss/integration` snapshot; parts of the management API are still being closed out and are marked `TODO(M1)` below.
+> - Sanic-Admin is being rebuilt for **v0.2.0**. Every statement below was verified by running it on the release candidate (`release/v0.2.0`, base `8750d51`); anything that could not be verified is listed under *Known limitations* in the [release notes](docs/release/v0.2.0-release-notes.md).
 > - **Not production-ready yet.** Do not deploy this to a public environment.
 > - **No credentials are baked into the repository.** There is no default administrator password. The first-run administrator password is generated at startup (development only) or must be supplied via `INITIAL_ADMIN_PASSWORD`.
-> - The JWT signing key, `SECRET_KEY` and the password salt are **environment variables only**. Sample keys that existed in the repository history must be treated as compromised and rotated.
+> - Secrets are **environment variables only** — the repository contains none. The JWT signing key and the initial administrator password are the two that production requires; a sample key that existed in the repository history must be treated as compromised and rotated.
 > - Report security issues privately — see [SECURITY.md](SECURITY.md).
 
 Sanic-Admin is a backend administration framework built on **Sanic** (async Python web framework) and **Tortoise ORM**, with **RBAC** authorization and **RS256-signed JWT** sessions. The admin console is built with **AMIS**, a low-code framework driven by JSON page definitions.
@@ -14,7 +14,7 @@ Sanic-Admin is a backend administration framework built on **Sanic** (async Pyth
 
 ## Features
 
-Every entry below is traced to code in this repository. Items that are not yet verified are marked `TODO(M1)`.
+Every entry below is traced to code in this repository and was verified by running it.
 
 ### Authentication and sessions
 
@@ -37,7 +37,7 @@ Every entry below is traced to code in this repository. Items that are not yet v
 | `is_admin` accounts hold every permission | `app/auth/authorization.py` — `has_role` |
 | Per-resource permission check decorators on the management API | `app/api/resources/*.py` — `check_permissions` / `check_roles` |
 
-> The management API surface for role and account CRUD is being closed out in the M1 iteration; the HTTP endpoints are marked `TODO(M1)` below.
+> The management API is mounted under `/api/v1` and was exercised live: the role, account, profile, settings, log and upload CRUD endpoints answer, and the permission checks are enforced (an unauthenticated request is rejected with 401, an under-privileged one with 403).
 
 ### Management API
 
@@ -55,18 +55,24 @@ Every entry below is traced to code in this repository. Items that are not yet v
 
 Each resource declares its own field allow-lists (`allowed_create_fields` / `allowed_update_fields`), search and filter fields, and required fields, and gates access with the `check_permissions` / `check_roles` decorators from `app/auth/authorization.py`.
 
-> `TODO(M1)`: the `/v1` API blueprint is not yet mounted on the baseline snapshot — `app/api/__init__.py` fails with `AttributeError: 'BlueprintGroup' object has no attribute 'add_blueprint'` on Sanic 23.6, so `app/__init__.py` logs `[降级] API v1 路由 未启用`. The resource classes and their permission checks are in the tree but not yet reachable over HTTP. Verified: `/api/v1/health` returns HTTP 404 on the baseline.
+> The `/v1` API blueprint is mounted: `app/api/__init__.py` assembles the resource blueprints with `Blueprint.group(...)`, and the generated OpenAPI spec lists **57 paths**. Verified live — `GET /api/v1/settings` answers 200 with a paginated body, and `GET /api/v1/settings/key/<key>` for a missing key answers 404 with `RESOURCE_NOT_FOUND`.
 
 ### API documentation
-
-> **TODO(M1) — this feature is not yet available on the current baseline.** The implementation exists in the tree, but the routes are not registered.
 
 - OpenAPI 3.0 spec generation and the `@api_tags` / `@api_summary` / `@api_description` / `@api_body` / `@api_response` decorator family — `app/docs/decorators.py`, `app/docs/openapi.py`, `app/docs/models.py`.
 - A Swagger UI page and a ReDoc page — `app/docs/swagger.py`, `app/docs/routes.py`.
 
-The wiring is missing: `setup_docs()` in `app/docs/__init__.py` has **no call site** in `app/__init__.py`, so `GET /swagger`, `GET /redoc` and `GET /swagger.json` all return **HTTP 404** (verified by `curl` against a running server). The `ENABLE_API_DOCS` setting — `True` in development, `False` in production — and the `setup_docs(app)` call site at `app/__init__.py:74-76` are introduced by the `sa-oss/m1` branch and are **not** on this baseline.
+`setup_docs()` is wired in `app/__init__.py` and is controlled by `ENABLE_API_DOCS`, which defaults to **on in development** and **off in production**. Verified against a running server in development:
 
-The only documentation endpoint that answers today is the `sanic-ext` default at `/docs` (ReDoc, HTTP 200) with its spec at `/docs/openapi.json` (HTTP 200) — that is a *different* generator from `app/docs/`, and it only contains the routes that are actually registered.
+| Endpoint | Result |
+|---|---|
+| `GET /swagger` | 302 → `/swagger/index.html` → **200** (Swagger UI) |
+| `GET /redoc` | **200** (ReDoc) |
+| `GET /swagger.json` | **200** — an OpenAPI 3.0.3 spec with **57 paths** |
+| `GET /docs/` | 302 → `/swagger` |
+| `GET /docs/models`, `/docs/tags`, `/docs/paths`, `/docs/redoc` | **200** |
+
+In production the same routes return 404 unless `ENABLE_API_DOCS=true` is set explicitly. Note that `sanic-ext` also serves an OpenAPI document of its own at `/docs/openapi.json` (200 in production, 56 paths) — that is a *different* generator from `app/docs/`, and it lists only the routes Sanic has registered.
 
 ### Admin console (AMIS)
 
@@ -74,9 +80,9 @@ The only documentation endpoint that answers today is the `sanic-ext` default at
 
 - The AMIS SDK and page definitions live in `amis/` (`amis/sdk/`, `amis/pages/*.json`, `amis/index.html`, `amis/login.html`).
 - The static directory is configured by `AMIS_DIR` (default: the `amis/` folder next to the application). Point it at an empty value or a missing directory and the console is not mounted — a way to switch the admin UI off in production.
-- `amis/server.js` is a **zero-dependency Node development server** that proxies `/auth`, `/capt`, `/api`, `/health` and friends to the backend. It is **optional**: it exists for previewing pages while the backend is being worked on. The normal path is the backend-hosted one above.
+- `amis/server.js` is a **zero-dependency Node development server** that proxies `/auth`, `/capt`, `/api`, `/health` and friends to the backend. It is **optional**: the backend already hosts the console, so this server exists only to preview pages while you work on them.
 
-> `TODO(M1)`: the backend-hosted console (`app/static("/amis", …, index="login.html")` plus the `AMIS_DIR` setting) is being delivered in the M1 iteration — the AMIS page definitions and the same-origin rewiring are on `sa-oss/m1-e` (`feat(amis): 后端同源托管 AMIS，菜单对齐真实 API`). It is **not** merged into this baseline, where the console is **not** mounted at all (`app/web/routes.py` defines `register_web_blueprints` but nothing calls it, and it renders `frontend/templates`, which does not exist). The exact final path is to be confirmed against the M1 delivery.
+> The console is mounted by the application itself (`app.static("/amis", ..., index="login.html", name="amis")`). Two details worth knowing: `name="amis"` is required because Sanic 23.6 rejects duplicate route names — `/static` and `/amis` would otherwise both default to the name `static` and the service would refuse to start; and the path needs its trailing slash — `/amis/` shows the login page, while bare `/amis` returns 404, because Sanic's `DirectoryHandler` only performs the index lookup for paths ending in `/`.
 
 ### Caching
 
@@ -90,7 +96,7 @@ The only documentation endpoint that answers today is the `sanic-ext` default at
 
 | Control | Evidence |
 |---|---|
-| Production fails closed when required secrets are missing | `app/config.py` — `_env_secret` raises `ConfigError`; verified: `SANIC_ENV=production python main.py` prints `配置错误: 生产环境必须通过环境变量 SECRET_KEY 提供应用密钥` and exits with **rc=1**. On this baseline the four secret variables were all required; M1 narrows the production requirement to `JWT_PRIVATE_KEY` and `INITIAL_ADMIN_PASSWORD` |
+| Production fails closed when required secrets are missing | `app/config.py` — `_env_secret` raises `ConfigError`. Verified: with `JWT_PRIVATE_KEY` missing, `SANIC_ENV=production python main.py` prints `配置错误: 生产环境必须通过环境变量 JWT_PRIVATE_KEY 提供 JWT 签名私钥` and exits with **rc=1**; the same happens for `INITIAL_ADMIN_PASSWORD`. `SECRET_KEY` and `PASSWORD_SALT` are **not** gates — they take part in no signing or encryption today |
 | No secret, key or default password in the repository | `app/config.py` — all secrets read from environment variables; verified: `git grep -nIE "BEGIN (RSA )?PRIVATE KEY"` finds no key material |
 | Administrator password generated at startup, printed once to stdout in development only | `app/config.py` — `_generate_admin_password` |
 | SQL analysis accepts a single read-only `SELECT`/`WITH` statement and issues only `EXPLAIN` | `app/database/query_analyzer.py` — `validate_readonly_sql`, `_FORBIDDEN_SQL_RE`, `_FORBIDDEN_FUNC_RE`; verified: `DELETE FROM account`, `SELECT 1; DROP TABLE x` and `PRAGMA table_info(account)` are all rejected |
@@ -102,7 +108,7 @@ The only documentation endpoint that answers today is the `sanic-ext` default at
 ### Known security limitations (also listed in the v0.2.0 release notes)
 
 1. **The registration endpoint is vulnerable to account enumeration.** `POST /auth/register` answers with a distinct `该邮箱已被注册` / `该用户名已被注册` / `该手机号已被注册` message when the identifier is taken. The *login* path does not enumerate (it deliberately returns a uniform `用户名或密码错误` and matches timing), but registration does not.
-2. **Per-account two-factor toggling is not implemented.** Two-step verification is a single **global** switch — the server-side configuration `REQUIRE_TWO_FACTOR` (`app/auth/routes.py:95` reads it and ignores any client-supplied parameter). There is no per-account toggle: an administrator cannot enable 2FA for one user and leave it off for another. On this baseline `REQUIRE_TWO_FACTOR` is not yet wired into `app/config.py` (`settings.REQUIRE_TWO_FACTOR` does not exist here); the configuration knob and its call site are added on the `sa-oss/m1` branch, and until then the attribute resolves to `False`, so two-step verification is off. There is also no login rate limiting and no forced password change on first login.
+2. **Per-account two-factor toggling is not implemented.** Two-step verification is a single **global** switch — the server-side configuration `REQUIRE_TWO_FACTOR` (`app/auth/routes.py:95` reads it and ignores any client-supplied parameter), settable through the environment. There is no per-account toggle: an administrator cannot enable 2FA for one user and leave it off for another. The switch defaults to off, so two-step verification is disabled unless it is turned on explicitly. There is also no login rate limiting and no forced password change on first login.
 
 ---
 
@@ -144,13 +150,38 @@ python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-export INITIAL_ADMIN_PASSWORD='<choose-a-strong-password>'   # first-run admin password
+export INITIAL_ADMIN_PASSWORD='<choose-a-strong-password>'   # the administrator PASSWORD (not the e-mail)
 python main.py
 ```
 
-The server listens on **http://localhost:22222**.
+On Windows PowerShell set the password with `$env:INITIAL_ADMIN_PASSWORD='<choose-a-strong-password>'`.
 
-Then open the admin console at **http://127.0.0.1:22222/amis/login.html** and sign in with the administrator account. The console is served by the backend itself, so the page and the API are same-origin. `TODO(M1)`: the backend-hosted console is delivered with the M1 closure — on this baseline the path is not mounted yet.
+The server listens on **http://127.0.0.1:22222** (`127.0.0.1` and `localhost` are the same address).
+
+**The two administrator values are different things:**
+
+| | Value | Where it comes from |
+|---|---|---|
+| **e-mail** (the username you type into the login form) | `SAdmin@Sanic.com` | defaults to this; override with `INITIAL_ADMIN_EMAIL` |
+| **password** | the value you exported as `INITIAL_ADMIN_PASSWORD` | if you did **not** export one, development mode generates a random password and prints it to stdout **once**: |
+
+```text
+[开发环境] 已自动生成临时初始管理员口令（仅显示这一次，重启后失效）:
+    账号: SAdmin@Sanic.com
+    口令: 8VjvxJJhex3EAfzw
+设置环境变量 INITIAL_ADMIN_PASSWORD 可固定口令。
+```
+
+That block is printed by the Sanic **worker process**, so if you redirect the server's output to a log file, search it for `口令:` — it is easy to miss among the startup noise. The generated password stops working after a restart.
+
+**First start takes about 30–40 seconds** while the worker process spins up. Wait until the log shows:
+
+```text
+[INFO] Goin' Fast @ http://127.0.0.1:22222
+[INFO] Starting worker [xxxxx]
+```
+
+Then open the admin console at **http://127.0.0.1:22222/amis/login.html** and sign in with the e-mail and password above. The console is served by the backend itself, so the page and the API are same-origin.
 
 Verify it is up:
 
@@ -181,7 +212,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **Current baseline test status:** the suite does **not** collect cleanly yet. On this snapshot `pytest` reports `20 tests collected, 6 errors` — `tests/test_account_api.py`, `tests/test_auth.py`, `tests/test_cache.py`, `tests/test_db_optimizer.py`, `tests/test_integration.py` and `tests/test_performance.py` fail at import time because they reference modules that no longer exist (`app.models.permission`, `app.cache.backends.memory`). The 20 tests that do collect live in `tests/test_docs/`. This is tracked as part of the M1 test-suite rebuild, not a property of your setup. `ruff check . --select E9,F63,F7,F82` passes.
+> **Current test status:** `pytest` reports **`95 passed`, 0 failed, 0 errors** (collection: 95 tests, ~54 s). Coverage over `app/` is **50 %** — the suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
 
 ---
 
@@ -201,6 +232,8 @@ The handful that matter most:
 | `INITIAL_ADMIN_PASSWORD` | Password for the first-run administrator account. **Required in production.** In development a random one is generated and printed once to stdout if this is unset. |
 | `INITIAL_ADMIN_EMAIL` | Administrator e-mail. Defaults to `SAdmin@Sanic.com`. |
 | `PASSWORD_SALT` | Password salt. Optional — password hashing uses argon2's own random salt. |
+| `ENABLE_API_DOCS` | Mount the Swagger / ReDoc routes. **On in development, off in production.** |
+| `REQUIRE_TWO_FACTOR` | Require the two-step verification after login. Off by default. |
 | `DATABASE_URL` | Tortoise ORM connection string. Defaults to a local SQLite file in development, in-memory SQLite in testing. Falls back to assembling a MySQL URL from `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME`. |
 | `CACHE_TYPE` | `memory` or `redis`. Production defaults to `redis` and refuses to degrade to memory if Redis is unreachable. |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` / `REDIS_PASSWORD` | Redis connection settings. |
@@ -229,7 +262,19 @@ The handful that matter most:
 
 ## Screenshots
 
-<!-- TODO(M1): 替换为 v0.2.0 实际界面截图 -->
+The admin console, served by the backend itself at `http://127.0.0.1:22222/amis/login.html`.
+
+**Login**
+
+![AMIS login page](docs/images/amis-login.png)
+
+**Dashboard**
+
+![AMIS dashboard](docs/images/amis-dashboard.png)
+
+**Account list**
+
+![AMIS account list](docs/images/amis-account-list.png)
 
 <!--
 The `Readme_image*.png` files in the repository root are screenshots of the

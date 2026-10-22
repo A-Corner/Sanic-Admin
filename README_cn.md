@@ -17,9 +17,9 @@
 - **管理 API**：账户、角色、个人资料、系统设置、操作日志、文件上传、仪表盘、缓存、只读 SQL 分析。这些是**类式 CRUD 资源**（继承 `app/api/base.py` 的 `CRUDResource`），不是独立的 `@bp.route` 蓝图装饰器。
 - **缓存**：内存 / Redis 双后端，共用一套接口；Redis 不可达时开发环境降级为内存，**生产环境拒绝降级启动**。
 - **安全基线**：生产环境缺少必需密钥时 **fail-closed**（直接退出，rc=1）；仓库内无密钥；SQL 分析只接受单条 `SELECT`/`WITH`；上传文件使用生成的文件名，不使用原始文件名拼路径。
-- **API 文档**：OpenAPI 3.0 生成器与 `@api_tags` / `@api_summary` / `@api_response` 等装饰器。**`TODO(M1)`：当前基线上文档路由尚未注册**（详见英文版 README）。
+- **API 文档**：OpenAPI 3.0 生成器与 `@api_tags` / `@api_summary` / `@api_response` 等装饰器，由 `ENABLE_API_DOCS` 控制（开发环境开、生产环境关）。实测 `/swagger` 302 跳转后 200、`/redoc` 200、`/swagger.json` 200 且规范含 57 条 path（详见英文版 README）。
 
-**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.2.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；部分 API 与 AMIS 界面仍在收尾，英文版 README 中标注为 `TODO(M1)`。
+**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.2.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；测试覆盖率 50%；若干 404/405 与静态公开文件的边界问题留到 v0.3。
 
 ---
 
@@ -62,15 +62,40 @@ python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-export INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'
+export INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'   # 管理员口令（不是邮箱）
 python main.py
 ```
 
-访问 **http://localhost:22222**。
+Windows PowerShell 用 `$env:INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'` 设置。
 
-管理界面入口在 **http://127.0.0.1:22222/amis/login.html**，用上面的管理员账号登录即可。
-管理界面由后端自己托管，与 API 同源，不涉及 CORS。`TODO(M1)`：后端托管方式随 M1 交付，
-当前基线上该路径尚未挂载。
+服务监听 **http://127.0.0.1:22222**（`127.0.0.1` 与 `localhost` 是同一个地址）。
+
+**管理员的两个值是两回事：**
+
+| | 值 | 来源 |
+|---|---|---|
+| **邮箱**（登录框里填的用户名） | `SAdmin@Sanic.com` | 默认值；可用 `INITIAL_ADMIN_EMAIL` 覆盖 |
+| **口令** | 你 `export` 的 `INITIAL_ADMIN_PASSWORD` | 若**没有** export，开发环境会在启动时随机生成并**只打印一次**： |
+
+```text
+[开发环境] 已自动生成临时初始管理员口令（仅显示这一次，重启后失效）:
+    账号: SAdmin@Sanic.com
+    口令: 8VjvxJJhex3EAfzw
+设置环境变量 INITIAL_ADMIN_PASSWORD 可固定口令。
+```
+
+这段由 Sanic 的 **worker 子进程**打印，若把输出重定向到日志文件，请在文件里搜 `口令:`，否则容易
+在启动日志里漏掉。随机口令在进程重启后失效。
+
+**首次启动约需 30–40 秒**（等待 worker 进程起来）。看到下面两行即表示就绪：
+
+```text
+[INFO] Goin' Fast @ http://127.0.0.1:22222
+[INFO] Starting worker [xxxxx]
+```
+
+管理界面入口在 **http://127.0.0.1:22222/amis/login.html**，用上面的邮箱与口令登录即可。
+管理界面由后端自己托管，与 API 同源，不涉及 CORS。
 
 验证服务：
 
@@ -79,7 +104,7 @@ curl http://127.0.0.1:22222/health
 # {"status":"ok","env":"development"}
 ```
 
-登录（管理员账号默认为 `SAdmin@Sanic.com`，可用 `INITIAL_ADMIN_EMAIL` 覆盖）：
+登录（管理员邮箱默认为 `SAdmin@Sanic.com`，可用 `INITIAL_ADMIN_EMAIL` 覆盖）：
 
 ```bash
 curl -X POST http://127.0.0.1:22222/auth/login \
@@ -90,7 +115,7 @@ curl -X POST http://127.0.0.1:22222/auth/login \
 curl -X POST -b cookies.txt http://127.0.0.1:22222/auth
 ```
 
-> 首次运行若未设置 `INITIAL_ADMIN_PASSWORD`，开发环境会**在启动时随机生成**一个口令并**只在 stdout 打印一次**，重启后失效。生产环境必须通过环境变量提供，缺失时直接退出。
+> 生产环境必须通过环境变量提供 `INITIAL_ADMIN_PASSWORD`，缺失时直接退出。
 
 运行测试：
 
@@ -99,7 +124,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **当前基线测试状态**：`pytest` 报 `20 tests collected, 6 errors`——6 个测试模块在导入阶段失败（引用了已不存在的 `app.models.permission`、`app.cache.backends.memory`）。能收集的 20 个测试都在 `tests/test_docs/`。这是 M1 重建测试套件的待办，不是你的环境问题。
+> **当前测试状态**：`pytest` 报 **`95 passed`，0 失败，0 错误**（收集 95 个用例，约 54 秒）。`app/` 的覆盖率为 **50%**，用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
 
 ---
 
@@ -107,7 +132,7 @@ pytest
 
 全部配置通过环境变量。权威来源是 **`app/config.py`**（每个变量都在那里读取），下表直接取自该文件。
 
-> **TODO(M1)**：完整参考（每个变量、类型、默认值、各环境下的行为）应放在 **[docs/configuration.md](docs/configuration.md)**，由并行的文档迭代交付。在它落地之前，下表是替代方案。
+> 完整参考（每个变量、类型、默认值、各环境下的行为）见 **[docs/configuration.md](docs/configuration.md)**，内容直接对照 `app/config.py` 写成。下表是常用变量摘要。
 
 | 变量 | 说明 |
 |---|---|
@@ -117,6 +142,8 @@ pytest
 | `INITIAL_ADMIN_PASSWORD` | 初始管理员口令，**生产环境必需** |
 | `INITIAL_ADMIN_EMAIL` | 管理员邮箱，默认 `SAdmin@Sanic.com` |
 | `PASSWORD_SALT` | 口令盐，可选——口令哈希用 argon2 自带随机盐 |
+| `ENABLE_API_DOCS` | 是否挂载 Swagger / ReDoc 路由，**开发环境开、生产环境关** |
+| `REQUIRE_TWO_FACTOR` | 登录后是否要求二次验证，默认关 |
 | `DATABASE_URL` | Tortoise ORM 连接串；开发默认本地 SQLite，测试默认内存 SQLite |
 | `CACHE_TYPE` | `memory` 或 `redis`；生产默认 `redis` 且不可降级 |
 | `HOST` / `PORT` | 监听地址与端口，默认 `127.0.0.1` / `22222` |

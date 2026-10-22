@@ -13,7 +13,7 @@
 
 本仓库正处于**重构中段**，`README.md` 明确写了"尚不可用于生产环境"。
 后端骨架（配置 / 中间件 / 模型 / 认证 / 缓存 / 文档装饰器）已可运行，
-但 **API v1 资源层当前整体降级不可用**，测试**收集阶段即 6 个模块报错**。
+**API v1 资源层已挂载并可用**，测试**全绿（95 passed）**。
 
 因此：
 
@@ -93,7 +93,7 @@
 | `app/__init__.py` | 应用工厂、蓝图注册、监听器 | 极高 |
 | `app/models/` | Tortoise 模型；`init_db` 以本包为 models 模块 | 高（改字段需迁移） |
 | `app/auth/` | 认证/授权/验证码/会话 | 高 |
-| `app/api/resources/` | API v1 资源（当前整体降级） | 高 |
+| `app/api/resources/` | API v1 资源（已挂载，含 CRUD / 仪表盘 / 上传 / 数据库分析等 13 个模块） | 高 |
 | `app/middleware/` | 错误处理、安全、认证、压缩 | 中高 |
 | `app/docs/` | OpenAPI 生成与装饰器 | 中 |
 | `app/cache/` | memory/redis 双后端 | 中 |
@@ -210,42 +210,35 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 .venv/bin/pytest --cov=app tests/ --cov-report=xml
 ```
 
-### 3.2 基线真实数字（`9a8f946`，不要改这些数字，改了就说明你动了代码）
+### 3.2 基线真实数字（`8750d51`，不要改这些数字，改了就说明你动了代码）
 
 | 命令 | 真实结果 |
 |---|---|
-| `pytest --collect-only -q` | **20 tests collected, 6 errors** |
-| `pytest -q` | **6 warnings, 6 errors**（`Interrupted: 6 errors during collection`） |
-| `pytest --continue-on-collection-errors -q` | **1 failed, 15 passed, 7 warnings, 10 errors** |
-| `pytest tests/test_docs -q` | **1 failed, 15 passed, 7 warnings, 4 errors** |
-| `pytest tests/test_docs/test_decorators.py -q` | **12 passed, 3 warnings** |
-| `pytest tests/test_docs/test_openapi.py -q` | **1 failed, 3 passed, 1 error** |
-| `pytest tests/test_docs/test_swagger.py -q` | **3 failed** |
-| `pytest --cov=app tests/ --cov-report=xml` | **6 warnings, 6 errors**（同全量） |
+| `pytest --collect-only -q` | **95 tests collected** |
+| `pytest -q` | **95 passed, 88 warnings**（约 54 秒，exit 0） |
+| `pytest --cov=app --cov-report=term -q` | **95 passed**，覆盖率 **50%**（5535 语句 / 2750 未覆盖） |
+| `ruff check . --select E9,F63,F7,F82` | **All checks passed!**（exit 0） |
 
-**6 个收集错误的根因**（全部是 `ModuleNotFoundError`）：
+按文件的用例数：
 
-| 出错模块 | 缺失模块 |
-|---|---|
-| `tests/test_account_api.py` | `app.models.permission` |
-| `tests/test_auth.py` | `app.models.permission` |
-| `tests/test_cache.py` | `app.cache.backends` |
-| `tests/test_db_optimizer.py` | `app.models.permission` |
-| `tests/test_integration.py` | `app.models.permission` |
-| `tests/test_performance.py` | `app.models.permission` |
+| 文件 | 用例数 | 覆盖什么 |
+|---|---|---|
+| `tests/test_account_crud.py` | 14 | 账户 CRUD、字段白名单、权限判定 |
+| `tests/test_auth.py` | 16 | 注册、登录、注销、验证码、二次验证、会话 |
+| `tests/test_authorization.py` | 12 | RBAC 角色与权限合并 |
+| `tests/test_production_failclosed.py` | 6 | production 下缺失必需密钥必须拒绝启动 |
+| `tests/test_role_crud.py` | 12 | 角色 CRUD、成员管理 |
+| `tests/test_sql_readonly.py` | 23 | SQL 分析接口的只读约束 |
+| `tests/test_upload_security.py` | 12 | 上传路径穿越防护 |
 
-**已可运行部分的失败详情**：
+88 条警告全部是 `websockets.connection` 改名与 Sanic `ode.py` 的 `event.s` 属性弃用，无业务告警。
 
-- `test_openapi_spec_generation` — **FAIL**：断言 `"/api/test/" in spec["paths"]`，
-  实际规范里是 `"/api/test"`（无尾斜杠）。断言与实现不一致。
-- `test_openapi_json_endpoint` / `test_swagger_ui_endpoint` / `test_redoc_endpoint` /
-  `test_swagger_json_url_configuration` — **ERROR**：`sanic.exceptions.SanicException:
-  Sanic app name "test_app" already in use.`。`tests/test_docs/test_openapi.py:48` 与
-  `tests/test_docs/test_swagger.py:20` 各自定义了同名 `Sanic("test_app")` fixture，
-  Sanic 的全局 app registry 不允许重名（`Sanic.test_mode` 未开时抛错）。
+**覆盖率洼地**（改动这些模块时请留意）：`app/web/routes.py` 0%，`app/middleware/_headers.py` 11%，
+`app/docs/decorators.py` 13%，`app/database/connection_pool.py` 20%，`app/database/query_optimizer.py` 20%，
+`app/cache/redis.py` 21%，`app/cache/memory.py` 25%，`app/cache/decorators.py` 27%。
 
-> 这 6+5 个问题都属于 §9 的上游任务（M1 / 文档 lane），**不是**你的 PR 该顺手修的。
-> 除非任务书明确要求，否则请在 PR 描述里如实贴 §3.2 的数字。
+> 改代码后请重跑 `pytest -q` 与 `ruff check . --select E9,F63,F7,F82`，两者都是 CI 硬门禁。
+> 新增功能请一并补用例——当前 50% 的覆盖率是本版本已知的短板，不是可以长期维持的状态。
 
 ### 3.3 覆盖率报告
 
@@ -366,38 +359,28 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 ### 5.1 密钥绝不进仓库
 
 - 仓库**不含任何密钥**。`app/config.py` 的密钥只来自环境变量。
-- **生产环境缺任一必需变量 → 直接拒绝启动**（`app/config.py:64-83` 的 `_env_secret()`）。
-  实测四个变量逐个缺失时的行为（每次只缺一个，其余三个合法）：
+- **生产环境缺任一必需变量 → 直接拒绝启动**（`app/config.py` 的 `_env_secret()`）。
+  实测（真实 Redis + SQLite `DATABASE_URL`，每次只缺一个，其余齐备）：
 
   | 缺失变量 | 退出码 | stderr |
   |---|---|---|
-  | `SECRET_KEY` | 1 | `配置错误: 生产环境必须通过环境变量 SECRET_KEY 提供应用密钥` |
-  | `PASSWORD_SALT` | 1 | `配置错误: 生产环境必须通过环境变量 PASSWORD_SALT 提供口令盐` |
   | `JWT_PRIVATE_KEY` | 1 | `配置错误: 生产环境必须通过环境变量 JWT_PRIVATE_KEY 提供 JWT 签名私钥` |
   | `INITIAL_ADMIN_PASSWORD` | 1 | `配置错误: 生产环境必须通过环境变量 INITIAL_ADMIN_PASSWORD 提供初始管理员口令` |
 
-  `main.py:16-18` 捕获 `ConfigError` 并 `sys.exit(f"配置错误: {exc}")`。
+  `main.py` 捕获 `ConfigError` 并 `sys.exit(f"配置错误: {exc}")`。
 
-  > **> 待 M1 交付后核实**：上表是**当前基线**的行为，四个变量在 production 都必填。
-  > M1 已把 `SECRET_KEY` 与 `PASSWORD_SALT` 降为可选（`sa-oss/m1` 的
-  > `app/config.py:326-329` 改为 `os.getenv(var, "")`），理由是这两个变量当前不参与
-  > 任何签名或加密——JWT 用 RS256 私钥，口令哈希用 argon2 自带随机盐。
-  > **M1 之后 production 真正必填的是 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD`**，
-  > 上表的后两行仍然成立，前两行不再成立。回填时需按 M1 的实测值重写本节。
+  > **`SECRET_KEY` 与 `PASSWORD_SALT` 不是生产门禁。** 两者当前不参与任何签名或加密
+  > （JWT 用 RS256 私钥，口令哈希用 argon2 自带随机盐），因此走裸 `os.getenv(var, "")`
+  > 而不经过 `_env_secret`（`app/config.py:330-331`）。**实测：两者都缺失时 production
+  > 照常启动**，只有上表两个变量会拦住进程。`tests/test_production_failclosed.py` 的
+  > `REQUIRED_PRODUCTION_VARS` 同样只列这两项。
 
-  > **当前 production 仍起不来**，即使变量齐全——原因不是密钥，而是 §9 #3 的 B1d 缺陷：
-  > `配置错误: 生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）`。
-  >
-  > **注意两次失败的退出点不同，含义也不同**：
-  > - **缺密钥时的 exit 1 发生在「配置校验阶段」，早于 API 导入阶段**。
-  >   它证明的是「**配置门禁有效**」，**不**证明「API 层可用」。
-  > - **四密钥齐备时的 exit 1 发生在「API 导入阶段」**（`app/__init__.py` 的
-  >   `_optional_import` 在 production 下把导入失败升级为 `ConfigError` 而非降级），
-  >   根因是 `BlueprintGroup` 没有 `add_blueprint`。
-  >
-  > **production 全链路启动在 m23 基线上未通过**，阻塞点为 B1d（§9 #3），
-  > 待 M1 合并（`Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`）后复验。
-  > 本文件不为此修改 `app/**`。
+  > **production 另有两道独立于密钥的门禁**，排查启动失败时先分清是哪一道：
+  > - `CACHE_TYPE` 在 production 默认 `redis`，Redis 不可达即
+  >   `ConfigError: production 环境 Redis 缓存不可用，拒绝降级启动`；
+  > - `DATABASE_URL` 默认拼装为 MySQL，而 **`aiomysql` 不在 `requirements.txt` 里**，
+  >   走 MySQL 会先撞 `ModuleNotFoundError: No module named 'aiomysql'`。
+  >   要用 MySQL 得自己补装驱动；只想跑起来就显式给一个 `DATABASE_URL`（SQLite 亦可）。
 - `JWT_PRIVATE_KEY` 是 **RS256 RSA 私钥 PEM**；只给私钥时公钥由私钥推导
   （`load_jwt_keys()`）。给公钥时必须与私钥配对，否则 `ConfigError`。
   PEM 里的换行可以写成字面量 `\n`。
@@ -506,7 +489,7 @@ curl http://127.0.0.1:22230/health
 |---|---|---|
 | compose 静态解析 | 把 `docker-compose.yml` + `.env.example` 复制到临时目录，`.env.example` 当作 `.env`，跑 `docker compose config` | **exit 0**，YAML 合法、变量插值正确（27 个变量全部解析出值，端口映射 `22230→22222`、三个 volume、healthcheck 均正确展开） |
 | Dockerfile 安全项自查 | 逐行读 | 见 §6.4 |
-| production fail-closed | 本机 production 配置 + 环境变量注入实跑 | 缺任一密钥 → exit 1 + `配置错误: …`（§5.1 表）。**该退出在配置校验阶段，早于 API 导入阶段**，只证明配置门禁有效。四密钥齐备 → **仍 exit 1**，根因为 `BlueprintGroup.add_blueprint` 缺失（§9 #3）。**production 全链路启动未通过，待 M1 合并后复验** |
+| production fail-closed | 本机 production 配置 + 环境变量注入实跑（真实 Redis + SQLite `DATABASE_URL`） | 缺 `JWT_PRIVATE_KEY` 或 `INITIAL_ADMIN_PASSWORD` → exit 1 + `配置错误: …`（§5.1 表）。两者齐备 → **服务正常启动**（`Goin' Fast`），`SECRET_KEY`/`PASSWORD_SALT` 缺失不拦进程 |
 
 ### 6.4 Dockerfile 安全项自查（逐条结论 + 依据行号）
 
@@ -612,7 +595,7 @@ app/middleware/error_handler.py 统一异常 → JSON
 
 | 路径 | 状态 |
 |---|---|
-| `/api/v1/*` | **整体降级**：`app/api/__init__.py:22` 调用 `api_bp.add_blueprint(v1_bp)`，但 `Blueprint.group()` 返回的 `BlueprintGroup` 在 Sanic 23.6 **没有 `add_blueprint` 方法**（实测 `AttributeError: 'BlueprintGroup' object has no attribute 'add_blueprint'`）→ `app.api` 导入失败 → `/api/v1` 蓝图不注册 |
+| `/api/v1/*` | **已挂载**：`app/api/__init__.py` 用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 装配。实测 `GET /api/v1/settings` → 200，OpenAPI 规范 57 条 path。注意 `/api/v1/health` 这个路由在代码中**从未存在**，它 404 不代表蓝图没挂载 |
 | `/roles`、`/account`、`/two-step` | `app/auth/routes.py:29-31` 定义了 `two_step_bp`/`role_bp`/`account_bp`，但**没有任何路由挂在上面**（只有 `auth_bp`/`capt_bp` 有装饰器路由） |
 | `/swagger`、`/redoc`、`/swagger.json` | **404**。`app/docs/__init__.py` 提供了 `setup_docs(app)`，但 **`create_app()` 从未调用它**。仓库里也**不存在 `ENABLE_API_DOCS` 这个配置项**（全仓 grep 无命中），所以不能用它来开关 |
 | `/docs`、`/docs/openapi.json` | **200**，但这是 sanic-ext 自带的 OAS，不是 `app/docs/` 生成的。实测它列出的 path 是 `/health` + `/auth*` + `/capt*` 共 10 条 |
@@ -676,36 +659,40 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 
 | # | 事项 | 现状 | 影响 |
 |---|---|---|---|
-| 1 | `app.models.permission` 模块缺失 | `app/models/` 下只有 account/role/session/verification/profile/system_setting/operation_log/uploaded_file | 6 个测试模块收集失败（§3.2） |
-| 2 | `app.cache.backends` 模块缺失 | 实际结构是 `app/cache/{base,memory,redis}.py` | `tests/test_cache.py` 收集失败 |
-| 3 | `BlueprintGroup.add_blueprint` 不存在 | `app/api/__init__.py:22,33,38` 用了该方法。实测（干净 venv + `sanic==23.6.0`）：`Blueprint.group(Blueprint('t'))` → `type: BlueprintGroup`，`hasattr(bg, 'add_blueprint')` → **False**，公开方法只有 `append/blueprints/clear/extend/insert/pop/remove/…` | **整个 `/api/v1` 资源层降级不可用**；`app.api` 导入失败连带 `FileDownloadCounterMiddleware` 降级。M1 已用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 修复（实测该写法可用），待合并 |
-| 4 | `create_app()` 未调用 `setup_docs()` | `app/docs/__init__.py:33` 有现成实现，未接线 | `/swagger`、`/redoc`、`/swagger.json` 全部 404；`README.md` 的文档访问说明与现状不符 |
-| 5 | `tests/test_docs/` 里两个 `Sanic("test_app")` fixture 同名 | `test_openapi.py:48` 与 `test_swagger.py:20` | 4 个测试 ERROR（app registry 重名） |
-| 6 | `test_openapi_spec_generation` 断言尾斜杠 | 断言 `"/api/test/"`，实现给 `"/api/test"` | 1 个测试 FAIL |
-| 7 | `app/auth/routes.py` 的 `two_step_bp`/`role_bp`/`account_bp` 无路由 | 只有 `auth_bp`/`capt_bp` 挂了装饰器 | `/roles`、`/account`、`/two-step` 404 |
-| 8 | `app/web/routes.py` 的 `register_web_blueprints()` 从未调用，且 `frontend/templates/` 不存在 | — | `/login`、`/index` 404 |
-| 9 | `frontend/` 缺 `.eslintrc` / `babel.config.js` | ESLint 用默认 espree 解析 ES Module | `npm run lint` exit 1，8 个 Parsing error |
-| 10 | `amis/index.html` 不存在 | `server.js` 兜底 `sendFile('index.html')` | `npm start` 后 `GET /` → 404 |
-| 11 | production 模式下当前**无法启动** | 实测 `SANIC_ENV=production` + 四变量齐全 → `main.py` exit 1：`生产环境拒绝降级启动：文件下载计数中间件不可用（待 B1d 修复）` | 由 #3 引起。**production 全链路启动在 m23 基线上未通过**，待 M1 合并后复验 |
-| 12 | `.gitignore` 未忽略 `uploads/` | `create_app()` 会创建该目录 | 上传测试文件可能被误提交 |
-| 13 | 真实 `docker compose up` 未能执行 | 本机 Docker daemon 无法启动（特权助手 `com.docker.vmnetd` 需 sudo 密码），也无 podman/nerdctl/lima 等替代运行时 | 容器行为只有静态解析 + 等价路径实测背书，无真实容器运行证据（§6.3） |
+| 1 | `app.models.permission` 模块缺失 | 已由 M1 补齐，权限注册表移到 `app/auth/permissions.py` | 已解决 |
+| 2 | `app.cache.backends` 模块缺失 | 已由 M1 补齐，实际结构 `app/cache/{base,memory,redis}.py` | 已解决 |
+| 3 | `BlueprintGroup.add_blueprint` 不存在 | M1 改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` | 已解决：`/api/v1` 正常挂载，OpenAPI 规范 57 条 path |
+| 4 | `create_app()` 未调用 `setup_docs()` | M1 已接线，由 `ENABLE_API_DOCS` 控制（开发开、生产关） | 已解决：`/swagger` 302→200、`/redoc` 200、`/swagger.json` 200 |
+| 5 | `tests/test_docs/` 两个同名 `Sanic("test_app")` fixture | 测试套件已重建 | 已解决 |
+| 6 | `test_openapi_spec_generation` 尾斜杠断言 | 测试套件已重建 | 已解决 |
+| 7 | `two_step_bp` / `role_bp` / `account_bp` 无路由 | M1 已补齐 | 已解决 |
+| 8 | `app/web/routes.py` 的 `register_web_blueprints()` 从未调用 | 仍未调用；`frontend/templates/` 不存在 | `/login`、`/index` 仍 404。该模块是 Vue 实验线，AMIS 主线不依赖它 |
+| 9 | `frontend/` 缺 `.eslintrc` / `babel.config.js` | 未处理（Vue 实验线不维护） | `npm run lint` exit 1，8 个 Parsing error |
+| 10 | `amis/index.html` | M1 已补齐，`server.js` 兜底可用 | 已解决 |
+| 11 | production 模式启动 | 实测：**四个密钥齐备 + 真实 Redis + SQLite `DATABASE_URL` 时可正常启动**（`Goin' Fast`） | 已解决。但 production 默认 `CACHE_TYPE=redis`，Redis 不可达即拒绝启动；`DATABASE_URL` 默认拼装 MySQL 而 `aiomysql` 不在依赖里 |
+| 12 | `.gitignore` 未忽略 `uploads/` | 未处理 | 上传测试文件可能被误提交 |
+| 13 | 真实 `docker compose up` | 本机 Docker daemon 需特权助手 `com.docker.vmnetd`（sudo 授权）才能启动 | 容器行为由 CI 的 `.github/workflows/docker.yml` 承接 |
 
 ---
 
 ## 10. 已知问题速查（写 PR 描述时可直接引用）
 
-- **pytest 收集失败 6 个**，根因见 §3.2 的表。
-- **已可跑的 20 个用例中**：`1 failed, 15 passed, 4 errors`（`tests/test_docs`），
-  失败/错误原因见 §3.2 末尾。
-- **`/api/v1` 全部 404**（§8.2、§9 #3）。
-- **`/swagger`、`/redoc` 404**（§8.2、§9 #4）——README 写的是设计目标。
+- **pytest 全绿**：`95 passed`，0 失败 0 错误（§3.2）。
+- **覆盖率 50%**（§3.2）——本版本已知的短板。
 - **`ruff check .` 通过**（exit 0）。
-- **`frontend/npm run lint` 失败**（exit 1，8 Parsing error，§9 #9）。
-- **`amis/npm start` 后 `GET /` 404**（§9 #10）。
-- **production 当前起不来**（§9 #11）——**全链路启动未通过**，阻塞点为 B1d，待 M1 合并后复验。
-  注意：缺密钥时的 exit 1 在**配置校验阶段**，只证明配置门禁有效，不证明 API 层可用。
-- **真实 `docker compose up` 未执行**（§6.3、§9 #13）——本机 Docker daemon 起不来，
-  替代验证为 compose 静态解析 + Dockerfile 安全项自查 + production fail-closed 本机等价实测。
+- **`/api/v1` 已挂载**，OpenAPI 规范 57 条 path。注意 `/api/v1/health` 这个路由**在代码中从未存在**，
+  它返回 404 不代表 API 蓝图没挂载。
+- **`/swagger`、`/redoc`、`/swagger.json` 在开发环境可用**；生产环境需显式 `ENABLE_API_DOCS=true`。
+- **`/docs` 是 302 跳转到 `/swagger`**，规范在 `/swagger.json`，**不在** `/docs/openapi.json`（后者 404）。
+- **管理界面在 `/amis/login.html`**（`/amis/` 带尾斜杠显示登录页，`/amis` 不带尾斜杠返回 404）。
+- **`/uploads/*` 返回 404** —— 上传目录不做静态托管，下载走需鉴权的 `GET /api/v1/files/<id>/download`。
+- **部分动态路由的方法不匹配返回 404 而非 405**（例如 `DELETE /api/v1/settings/key/<key>`）——
+  M1 的 405 兜底只覆盖 account / role / profile 三个模块。
+- **`frontend/npm run lint` 失败**（exit 1，8 Parsing error，§9 #9）——Vue 实验线，不维护。
+- **production 缺 `JWT_PRIVATE_KEY` 或 `INITIAL_ADMIN_PASSWORD` 会拒绝启动**；
+  `SECRET_KEY` 与 `PASSWORD_SALT` 不参与门禁（§5.1）。
+- **真实 `docker compose up` 未在本机执行**（§9 #13）——Docker daemon 需 sudo 授权才能启动，
+  容器路径由 CI 承接。
 
 ---
 

@@ -167,7 +167,8 @@ api_bp.add_blueprint(v1_bp)                          # :22
 | `app/api/base.py` | `BaseResource`（分页 / 排序 / 搜索 / 过滤的统一处理）与 `CRUDResource`（标准 GET/POST/PUT/PATCH/DELETE） |
 | `app/api/responses.py` | `APIResponse` 统一响应封装（`success` / `error` / `list` / `created` / `serialize`）+ `APIError` 错误码常量表 |
 | `app/api/validators.py` | 参数校验装饰器：`validate_request` / `validate_path_param`，规则类 `Required` / `Type` / `Length` / `Range` / `Regex` / `Email` / `OneOf` / `Custom` |
-| `app/api/resources/` | 12 个业务资源模块（见 §2.3） |
+| `app/api/resources/` | 13 个业务资源模块（见 §2.3） |
+| `app/api/resources/route_methods.py` | `register_view()`：用 `Blueprint.route` 原样注册方法并为未支持的方法挂 405 兜底，使方法不匹配稳定返回 405 而不是 404/500（仅部分资源采用） |
 | `app/api/routes.py` | 旧版 API 蓝图（`api_bp` + `register_api_blueprints`）。**当前无任何调用点**，且它 import 的 `account_api` / `role_api` 在资源模块中已不存在 |
 | `app/api/example.py` | 文档装饰器用法示例（`example_bp`）。**蓝图未被注册**，纯示例代码 |
 
@@ -197,6 +198,7 @@ api_bp.add_blueprint(v1_bp)                          # :22
 | `app/auth/routes.py` | 认证路由：`POST /auth/login`、`/auth/register`、`/auth/verify`、`/auth/validate-2fa`、`/auth/logout`、`/auth/associated`、`/auth/`（续期）；`GET /capt/request`、`/capt/image` |
 | `app/auth/authentication.py` | 注册、登录、注销、二次验证；`authenticate_request()`；`requires_authentication` 装饰器 |
 | `app/auth/authorization.py` | RBAC：`has_role` / `has_permission` / `get_account_permissions`；`check_roles` / `check_permissions` / `requires_permission` 装饰器 |
+| `app/auth/permissions.py` | 权限注册表：`ALL_PERMISSIONS`（资源 → 允许的动作，`"all"` 表示该资源全部动作）、`admin_all_permissions()`（内置 admin 角色的全量权限）、`effective_permissions()`（授权与校验共用的折叠口径，子资源折叠到基资源） |
 | `app/auth/verification.py` | 验证码会话、两步验证会话、一次性验证令牌（激活 / 改密） |
 
 ### 2.4 `app/cache` —— 缓存
@@ -396,19 +398,34 @@ curl -X POST /auth/associated -H "Authorization: Bearer <JWT>" # 200
 **【读码确认】** `app/auth/authorization.py`：
 
 - 权限数据格式：`{资源: [操作, ...]}`；操作含 `"all"` 表示该资源全部权限（`:5-9` 注释）。
-- `Account.is_admin == True` 的账户**拥有全部权限**（`:78-79`、`:88-89`），是 RBAC 的短路路径。
-- `get_account_permissions()`（`:57-71`）合并账户所有**未删除**角色的权限集合。
-- `has_permission(account, resource, *actions)`（`:84-95`）要求**全部**指定 action 都命中。
+- `Account.is_admin == True` 的账户**拥有全部权限**（`:130`、`:144`），是 RBAC 的短路路径。
+- `get_account_permissions()`（`:63`）合并账户所有**未删除**角色的权限集合。
+- `has_permission(account, resource, *actions)`（`:136`）要求**全部**指定 action 都命中。
 - 三个装饰器：
 
 | 装饰器 | 位置 | 语义 |
 |---|---|---|
-| `@check_roles("admin", ...)` | `:107-120` | 拥有指定角色**之一**即可；无角色 → `RoleRequiredError`(403) |
-| `@check_permissions("role", "read")` | `:123-153` | 需要 `role` 资源的 `read` 权限；也可作函数调用 `check_permissions(..., request=..., check_only=True)` 返回 bool |
-| `@requires_permission("system:database:query")` | `:156-165` | `"资源:操作"` 字符串形式；最后一个冒号之后是操作，之前是资源（如 `system:database` 的 `query`）；不含冒号时按资源的 `all` 判定 |
+| `@check_roles("admin", ...)` | `:164` | 拥有指定角色**之一**即可；无角色 → `RoleRequiredError`(403) |
+| `@check_permissions("role", "read")` | `:180` | 需要 `role` 资源的 `read` 权限；也可作函数调用 `check_permissions(..., request=..., check_only=True)` 返回 bool |
+| `@requires_permission("system:database:query")` | `:213` | `"资源:操作"` 字符串形式；最后一个冒号之后是操作，之前是资源（如 `system:database` 的 `query`）；不含冒号时按资源的 `all` 判定 |
 
 未认证 → 401（`AuthenticationError`）；已认证但权限不足 → 403（`InsufficientPermissionsError`）。
 两者都经 `app/services/exceptions.py` 的 `BaseError.to_dict()` 变成统一 JSON 响应体。
+
+**【读码确认】受保护管理员的判定（`app/api/resources/role.py:160-200`）**
+
+`is_protected_admin(account)` 在满足**任一**条件时返回 True：
+
+1. `account.is_admin` 为 True；
+2. 账户持有某个授予了**全部权限**的角色（该角色的权限覆盖 `app/auth/permissions.py`
+   的 `ALL_PERMISSIONS` 注册表全部资源）。
+
+`actor_may_modify(actor, target)` 与该判定**对称**：管理员形态的账户可以改动任何人，
+非管理员**不能**改动受保护的管理员。这种对称性保证「管理员可以改动自己」——
+若 actor 持有全权限角色，它本身就是管理员形态，不会把自己锁死。
+
+> **因此：持有全权限角色的账户视同管理员。** 判定只看权限覆盖面，不看角色名，
+> 也不要求 `is_admin` 标志位。
 
 ### 3.4 两步验证与验证码
 
