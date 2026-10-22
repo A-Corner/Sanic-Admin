@@ -1,0 +1,150 @@
+{
+  "type": "crud",
+  "id": "role-list",
+  "name": "role",
+  "syncLocation": false,
+  "api": {
+    "method": "get",
+    "url": "/api/v1/roles",
+    "dataType": "json",
+    "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: { items: payload.data.items, total: payload.data.pagination.total } }",
+    "requestAdaptor": "return { ...api, url: api.url + '&page_size=' + (api.query && api.query.perPage || api.query && api.query.page_size || 20), data: {} }"
+  },
+  "columns": [
+    {
+      "type": "text",
+      "label": "ID",
+      "name": "id",
+      "width": 60
+    },
+    {
+      "type": "text",
+      "label": "名称",
+      "name": "name"
+    },
+    {
+      "type": "text",
+      "label": "描述",
+      "name": "description",
+      "placeholder": "-"
+    },
+    {
+      "type": "tpl",
+      "label": "权限",
+      "name": "permissions",
+      "placeholder": "-",
+      "tpl": "<pre style=\"margin:0;white-space:pre-wrap\">${JSON.stringify(permissions, null, 2)}</pre>"
+    },
+    {
+      "type": "date",
+      "label": "创建时间",
+      "name": "created_at"
+    },
+    {
+      "type": "operation",
+      "label": "操作",
+      "buttons": [
+        {
+          "type": "button",
+          "label": "编辑",
+          "level": "link",
+          "actionType": "dialog",
+          "dialog": {
+            "title": "编辑角色",
+            "body": {
+              "type": "form",
+              "initApi": "/api/v1/roles/${id}",
+              "dataType": "json",
+              "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }",
+              "api": {
+                "method": "put",
+                "url": "/api/v1/roles/${id}",
+                "dataType": "json",
+                "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+              },
+              "body": [
+                {
+                  "type": "input-text",
+                  "name": "description",
+                  "label": "描述"
+                },
+                {
+                  "type": "textarea",
+                  "name": "permissions",
+                  "label": "权限",
+                  "description": "JSON 格式，例如 {\"account\": [\"read\"]}",
+                  "value": ""
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "button",
+          "label": "删除",
+          "level": "danger",
+          "actionType": "ajax",
+          "confirmText": "确定要删除该角色吗？",
+          "api": {
+            "method": "delete",
+            "url": "/api/v1/roles/${id}",
+            "dataType": "json",
+            "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+          }
+        }
+      ]
+    }
+  ],
+  "bulkActions": [],
+  "headerToolbar": [
+    {
+      "type": "button",
+      "label": "新增角色",
+      "level": "primary",
+      "actionType": "dialog",
+      "dialog": {
+        "title": "新增角色",
+        "body": {
+          "type": "form",
+          "api": {
+            "method": "post",
+            "url": "/api/v1/roles",
+            "dataType": "json",
+            "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+          },
+          "body": [
+            {
+              "type": "input-text",
+              "name": "name",
+              "label": "名称",
+              "required": true
+            },
+            {
+              "type": "input-text",
+              "name": "description",
+              "label": "描述"
+            },
+            {
+              "type": "textarea",
+              "name": "permissions",
+              "label": "权限",
+              "required": true,
+              "description": "JSON 格式，例如 {\"account\": [\"read\"]}",
+              "value": "{}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "footerToolbar": [
+    {
+      "type": "statistics"
+    },
+    {
+      "type": "pagination"
+    }
+  ],
+  "perPage": 20,
+  "alwaysShowPagination": true
+}
