@@ -193,7 +193,11 @@ ConfigError: production 环境 Redis 缓存不可用，拒绝降级启动
 想用本地文件快速跑一个 production：
 
 ```bash
-export DATABASE_URL='sqlite:///./sanic_admin_prod.sqlite3'
+# 注意只有两个斜杠：Tortoise 把 sqlite 的文件路径解析为 netloc+path，
+# 写成 sqlite:///<名字> 会指向文件系统根目录的 /<名字>（普通用户无权创建，
+# 启动时直接报 unable to open database file）。下面这种写法在当前目录建库——
+# 已实测可启动，且重启后数据保留。
+export DATABASE_URL='sqlite://sanic_admin_prod.sqlite3'
 export CACHE_TYPE=memory
 # PEM 是多行内容；环境变量里必须写成「换行替换为字面量 \n」的单行。
 # 不要用 sed 做这个替换——BSD/GNU 两个方言对 \n 的处理不同，引号会被破坏。

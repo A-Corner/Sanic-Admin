@@ -283,7 +283,11 @@ Either provide a reachable Redis (set `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSW
 For a quick production run against a local file:
 
 ```bash
-export DATABASE_URL='sqlite:///./sanic_admin_prod.sqlite3'
+# Note the two slashes: Tortoise reads the sqlite file path as netloc + path, so
+# sqlite:///<name> points at /<name> in the filesystem ROOT (start-up then fails
+# with "unable to open database file"). The form below creates the file in the
+# current directory — verified, and the data survives a restart.
+export DATABASE_URL='sqlite://sanic_admin_prod.sqlite3'
 export CACHE_TYPE=memory
 # PEM is multi-line; the variable must be a single line with the newlines written
 # as literal "\n". Avoid sed for this — the BSD and GNU dialects disagree on how
