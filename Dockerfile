@@ -43,8 +43,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # 先装依赖再拷代码：代码变更不会让依赖层缓存失效。
+# PIP_INDEX_URL 可在受限网络下由构建方覆盖（--build-arg），默认值即官方源，
+# 因此默认构建行为不变。
+ARG PIP_INDEX_URL=https://pypi.org/simple
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements.txt \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
 
