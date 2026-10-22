@@ -136,12 +136,14 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 `COMPRESSION_MIN_LENGTH`（1024）、`COMPRESSION_LEVEL`（6）、`DEFAULT_PAGE_SIZE`（10）、
 `MAX_PAGE_SIZE`（100）、`LOG_DIR`、`LOG_LEVEL`（INFO）均为类常量，**不可通过环境变量覆盖**。
 
-> **> 待 M1 交付后核实**：`AMIS_DIR` 在 M1 的 `amis/README.md` 契约里被列为
-> `DefaultConfig` 的类常量（`app/config.py` 中 `AMIS_DIR = str(BASE_DIR / "amis")`），
-> 由 `app/__init__.py` 用 `app.config.get("AMIS_DIR")` 读取后 `app.static("/amis", …, index="login.html")` 挂载。
-> **但该契约未把 `AMIS_DIR` 列入 `get_config()` 的环境变量覆盖列表**，因此当前它
-> 实际上不可通过环境变量改写——`.env.example` 中的 `AMIS_DIR` 一行要等
-> `app/config.py` 补上 env 覆盖后才生效。回填时按 M1 的最终实现核对。
+> `AMIS_DIR` 在 `DefaultConfig` 中的默认值是 `str(BASE_DIR / "amis")`，
+> 并可通过环境变量覆盖（`get_config()` 的 env 覆盖列表中包含它）。
+> `app/__init__.py` 用 `app.config.get("AMIS_DIR")` 读取后
+> `app.static("/amis", AMIS_DIR, index="login.html")` 挂载；目录为空或不存在则不挂载。
+>
+> **> 待 M1 交付后核实**：以上按 M1 的 `amis/README.md` 契约写成，落地实现在 M1 的 Lane L 中
+> （`app/config.py` 的 `AMIS_DIR` 配置项 + `app/__init__.py` 的 `/amis` 挂载）。
+> 回填时按 M1 的最终交付实测核对本节与 `.env.example` 的 `AMIS_DIR` 一行。
 
 > 生产部署提示：`HOST` 默认是 `127.0.0.1`，只监听回环。对外提供服务需要显式设为 `0.0.0.0`
 > 或由反向代理转发。

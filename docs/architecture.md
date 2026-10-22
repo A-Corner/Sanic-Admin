@@ -752,9 +752,12 @@ if AMIS_DIR and os.path.isdir(AMIS_DIR):
     app.static("/amis", AMIS_DIR, index="login.html")
 ```
 
-`AMIS_DIR` 默认指向应用旁的 `amis/` 目录；置空或指向不存在的目录则不挂载，
-生产环境可据此关闭管理界面。**该配置项在 M1 的 `amis/README.md` 契约中被列为 `DefaultConfig`
-类常量，尚未列入 `get_config()` 的环境变量覆盖列表**——回填时需按 M1 的最终实现核对。
+`AMIS_DIR` 默认指向应用旁的 `amis/` 目录，并可通过环境变量覆盖；置空或指向不存在的目录则不挂载，
+生产环境可据此关闭管理界面。
+
+> **> 待 M1 交付后核实**：以上按 M1 的 `amis/README.md` 契约写成，落地实现在 M1 的 Lane L 中
+> （`app/config.py` 的 `AMIS_DIR` 配置项 + `app/__init__.py` 的 `/amis` 挂载）。
+> 回填时按 M1 的最终交付实测核对。
 
 **【读码确认】** `amis/pages/site.json` 的菜单节点用 `schemaApi` 引用页面 JSON：
 
