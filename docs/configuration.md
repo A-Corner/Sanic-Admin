@@ -113,7 +113,7 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 |---|---|---|---|
 | `MAIL_SERVER` | SMTP 服务器 | `smtp.example.com` | 否 |
 | `MAIL_PORT` | SMTP 端口 | `587` | 否 |
-| `MAIL_USE_TLS` | 是否启用 TLS。**解析规则是字符串精确比较 `"True"`**（`:322`），写成 `true` / `1` 都会被判为 `False` | `True` | 否 |
+| `MAIL_USE_TLS` | 是否启用 TLS。**解析走 `_bool_env()`**：真值 `1` / `true` / `yes` / `on`；假值 `0` / `false` / `no` / `off` 与**空字符串**；**填其他任何值都会抛 `ConfigError` 导致启动失败** | `True` | 否 |
 | `MAIL_USERNAME` | SMTP 用户名 | 空字符串 | 否 |
 | `MAIL_PASSWORD` | SMTP 口令 | 空字符串 | 否 |
 | `MAIL_DEFAULT_SENDER` | 默认发件人 | 空字符串 | 否 |
@@ -228,6 +228,19 @@ DATABASE_URL=sqlite://:memory:
 sqlite:///Users/vj/GitDir/Sanic-Admin-wt/m23-doc/sanic_admin_dev.sqlite3
 ```
 
+**注意空值不是「用默认值」。** `DATABASE_URL` 的读取是
+`os.getenv("DATABASE_URL", cfg.DATABASE_URL)`——变量**存在但为空**时返回空串，
+而不是回退到类属性上的默认 SQLite 路径。
+
+- **development / testing**：类属性已预置 SQLite 路径，所以只有在你**显式写了
+  `DATABASE_URL=`（空值）** 时才会得到空连接串（`if not cfg.DATABASE_URL` 为真，
+  于是改用 `DB_*` 拼装；而 development 的 `DB_USER` 等默认值会拼出一个 MySQL 串）。
+  **不设置这个变量**才是使用内置 SQLite。
+- **production**：类属性为空，因此不设置时会走 `DB_*` 拼装（`mysql://…`）；
+  显式写空值同样不会回退，而是拼出 MySQL 串。
+
+结论：**要沿用默认值就不要写这一行**；要指定就写一个完整可用的连接串。
+
 ### 4.2 MySQL
 
 ```bash
@@ -281,7 +294,7 @@ await Tortoise.generate_schemas(safe=True)
 `app/models/__init__.py` 导入——`init_db` 以该包为 Tortoise 的 models 模块，
 只有出现在包命名空间里的模型才会被注册（见该文件 `:6-9` 的注释）。
 
-当前 10 张表：`account`、`role`、`account_role`（M2M 中间表）、`authentication_session`、
+当前 11 张表：`account`、`role`、`account_role`（M2M 中间表）、`authentication_session`、
 `two_step_session`、`captcha_session`、`verification_tokens`、`profile`、
 `system_setting`、`operation_log`、`uploaded_file`。
 

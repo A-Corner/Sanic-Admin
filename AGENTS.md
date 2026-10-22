@@ -4,7 +4,7 @@
 人类贡献者请看 [CONTRIBUTING.md](CONTRIBUTING.md)；本文件只覆盖 AI 代理需要额外知道的
 部分（当前基线的真实状态、可验证命令、硬性禁区）。
 
-**所有命令与数字都来自基线 `9a8f946`（分支 `sa-oss/m23-d`）的实测**，不是从文档推断。
+**所有命令与数字都来自发布候选 `release/v0.2.0`（M1 候选 `8750d51`）的实测**，不是从文档推断。
 未在本文件出现的命令，请先自己跑一遍再写进 PR 描述。
 
 ---
@@ -197,11 +197,8 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 # 全量
 .venv/bin/pytest -q
 
-# 忽略收集错误，把能跑的跑完
-.venv/bin/pytest --continue-on-collection-errors -q
-
-# 只跑当前唯一可完整收集的目录
-.venv/bin/pytest tests/test_docs -q
+# 单个测试文件
+.venv/bin/pytest tests/test_auth.py -q
 
 # 单个文件
 .venv/bin/pytest tests/test_docs/test_decorators.py -q
@@ -215,8 +212,8 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 | 命令 | 真实结果 |
 |---|---|
 | `pytest --collect-only -q` | **95 tests collected** |
-| `pytest -q` | **95 passed, 88 warnings**（约 54 秒，exit 0） |
-| `pytest --cov=app --cov-report=term -q` | **95 passed**，覆盖率 **50%**（5535 语句 / 2750 未覆盖） |
+| `pytest -q` | **95 passed, 88 warnings**（约 90 秒，exit 0） |
+| `pytest --cov=app --cov-report=term -q` | **95 passed**，覆盖率 **50%**（5535 语句 / 2750 未覆盖）；加 `--cov` 约 6 分钟 |
 | `ruff check . --select E9,F63,F7,F82` | **All checks passed!**（exit 0） |
 
 按文件的用例数：
@@ -245,7 +242,7 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 ```bash
 .venv/bin/python tests/generate_coverage_report.py
 ```
-未实测（覆盖率需要先解决 §3.2 的收集错误才有意义）。
+已实测：总覆盖率 50%（5535 语句 / 2750 未覆盖），详见 §3.2。
 
 ### 3.4 CI 现状
 
@@ -418,7 +415,9 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 - `app/middleware/error_handler.py`：未捕获异常在 `DEBUG=True` 时才把 `detail` 和
   `traceback` 放进响应体。**不要在生产把 DEBUG 开着**。
 - CSRF：`csrf_protect()` 装饰器要求非 GET 请求的 `X-CSRF-Token` 头与 `csrf_token` cookie
-  一致，不一致返回 403。
+  一致，不一致返回 403。**但目前没有任何路由挂上它**——该装饰器已实现却未启用，
+  当前**没有**实际的 CSRF 防护，依赖的是会话 Cookie 的 `HttpOnly` + `SameSite=Lax`
+  以及 API 用 `Authorization` 头承载凭据。与 `SECURITY.md` 的记载一致。
 
 ### 5.4 其他硬性禁区
 
@@ -445,9 +444,8 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 
 ## 6. 容器化（Docker / compose）
 
-> 本批由并行 lane（`sa-oss/m23-a`）交付 `Dockerfile` / `docker-compose.yml` /
-> `.dockerignore` / `.env.example`。**本文件基线 `9a8f946` 尚无这些文件**，
-> 合并后以下描述成立。
+`Dockerfile` / `docker-compose.yml` / `.dockerignore` / `.env.example` 已随本发布候选合入，
+以下描述对当前分支成立。
 
 ### 6.1 核心设计
 
@@ -554,9 +552,8 @@ curl http://127.0.0.1:22230/health
 完整架构文档见 **[`docs/architecture.md`](docs/architecture.md)**，
 配置项逐条说明见 **[`docs/configuration.md`](docs/configuration.md)**。
 
-> ⚠ `docs/` 目录在基线 `9a8f946` **尚不存在**（由并行 lane `sa-oss/m23-doc` 编写，
-> 已产出 `docs/architecture.md` 与 `docs/configuration.md`）。若该目录已合入，
-> 本节内容以它为准；若尚未合入，以下是本文件实测得到的运行时事实。
+> `docs/architecture.md` 与 `docs/configuration.md` 已随本发布候选合入，
+本节内容以它们为准。
 
 ### 8.1 请求生命周期
 
@@ -569,9 +566,11 @@ app/middleware/__init__.py::register_all_middlewares()
   │    ├─ response 中间件：按 CORS_ALLOWED_ORIGINS 加 CORS 头
   │    └─ request 中间件：OPTIONS → 204（避免未知路径 405）
   ├─ _setup_request_logging()                  # request/response 中间件打 debug 日志
-  ├─ AuthMiddleware()                          # 从 Authorization: Bearer / cookie 取 session_id
-  │                                              → request.ctx.authentication_session
-  └─ FileDownloadCounterMiddleware()            # ⚠ 当前因 app.api 导入失败而降级
+  └─ AuthMiddleware()                          # 从 Authorization: Bearer / cookie 取会话
+                                                 # cookie 名取 AuthenticationSession.cookie_name
+                                                 # → request.ctx.authentication_session
+                                                 # （M1 已移除 FileDownloadCounterMiddleware，
+                                                 #   下载计数改由 upload 资源内部原子自增）
   ↓
 app/middleware/compression.py::configure_compression()
   # Gzip；阈值 COMPRESSION_MIN_LENGTH=1024，级别 COMPRESSION_LEVEL=6
@@ -595,22 +594,35 @@ app/middleware/error_handler.py 统一异常 → JSON
 | `/auth/associated` | POST | 关联会话 |
 | `/capt/request` | GET | 验证码请求 |
 | `/capt/image` | GET | 验证码图片 |
-| `/uploads/<file_uri>` | GET | 上传文件静态服务 |
+| `/amis/*` | GET | AMIS 管理界面（`app.static('/amis', …, index='login.html', name='amis')`），**由后端同源托管** |
 | `/static/*` | GET | `STATIC_DIR` 存在时才挂载（仓库中无 `static/` 目录，实测未挂载） |
 
-**未注册 / 不可用**（实测 404）：
+**`/api/v1/*` 已挂载**：`app/api/__init__.py` 用
+`Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 装配。
+实测 `GET /api/v1/settings` → 200，OpenAPI 规范 57 条 path。
+注意 `/api/v1/health` 这个路由在代码中**从未存在**，它 404 不代表蓝图没挂载。
+
+**无需认证即可访问的端点**（实测）：
+
+| 路径 | 说明 |
+|---|---|
+| `/health` | 健康检查 |
+| `/auth/login`、`/auth/register`、`/auth/verify`、`/auth/validate-2fa` | 认证流程本身 |
+| `/capt/request`、`/capt/image` | 验证码 |
+| `/swagger`、`/swagger/index.html`、`/redoc`、`/swagger.json`、`/docs/*` | API 文档，**受 `ENABLE_API_DOCS` 控制**（development 默认开，production 默认关） |
+| `/amis/*` | 管理界面静态页 |
+
+**实测 404 / 不可用**：
 
 | 路径 | 状态 |
 |---|---|
-| `/api/v1/*` | **已挂载**：`app/api/__init__.py` 用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 装配。实测 `GET /api/v1/settings` → 200，OpenAPI 规范 57 条 path。注意 `/api/v1/health` 这个路由在代码中**从未存在**，它 404 不代表蓝图没挂载 |
-| `/roles`、`/account`、`/two-step` | `app/auth/routes.py:29-31` 定义了 `two_step_bp`/`role_bp`/`account_bp`，但**没有任何路由挂在上面**（只有 `auth_bp`/`capt_bp` 有装饰器路由） |
-| `/swagger`、`/redoc`、`/swagger.json` | **404**。`app/docs/__init__.py` 提供了 `setup_docs(app)`，但 **`create_app()` 从未调用它**。仓库里也**不存在 `ENABLE_API_DOCS` 这个配置项**（全仓 grep 无命中），所以不能用它来开关 |
-| `/docs`、`/docs/openapi.json` | **200**，但这是 sanic-ext 自带的 OAS，不是 `app/docs/` 生成的。实测它列出的 path 是 `/health` + `/auth*` + `/capt*` 共 10 条 |
+| `/uploads/*` | **404** —— 上传目录**不做静态托管**（M1 已移除），文件下载走需鉴权的 `GET /api/v1/files/<id>/download` |
+| `/roles`、`/account`、`/two-step` | `app/auth/routes.py` 定义了 `two_step_bp`/`role_bp`/`account_bp`，但**没有路由挂在上面**（只有 `auth_bp`/`capt_bp` 有装饰器路由） |
+| `/docs/openapi.json` | development 下 **404**（`setup_docs()` 接管了 `/docs` 前缀）；production 下 200，是 sanic-ext 自带的**另一份** OAS |
 | `/login`、`/index` | `app/web/routes.py` 的 `register_web_blueprints()` **从未被调用**；且它渲染的 `frontend/templates/` 目录不存在 |
 
-> 换句话说：**`/swagger` 与 `/redoc` 目前不存在**，`README.md` 里的 "Swagger UI:
-> http://localhost:22222/swagger" 是设计目标而非现状。修好它属于 §9 的上游任务。
-> 在那之前，不要在 PR 描述里写"文档已在 /swagger 可访问"。
+> `README.md` 里的 Swagger 入口（`http://127.0.0.1:22222/swagger`）在 **development 下可用**，
+> production 下需显式设 `ENABLE_API_DOCS=true`。
 
 ### 8.3 配置契约（`app/config.py`）
 

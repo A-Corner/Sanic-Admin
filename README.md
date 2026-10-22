@@ -34,14 +34,14 @@ Every entry below is traced to code in this repository and was verified by runni
 |---|---|
 | Role model with a JSON permission map (`{resource: [actions]}`) | `app/models/role.py` — `Role.permissions` |
 | Permission checks, role checks, role assignment/removal | `app/auth/authorization.py` — `check_permissions`, `check_roles`, `assign_role`, `remove_role`, `get_account_permissions` |
-| `is_admin` accounts hold every permission | `app/auth/authorization.py` — `has_role` |
+| `is_admin` accounts hold every permission | `app/auth/authorization.py` — `has_permission()` short-circuits to `True` for `account.is_admin` (`:144`) |
 | Per-resource permission check decorators on the management API | `app/api/resources/*.py` — `check_permissions` / `check_roles` |
 
 > The management API is mounted under `/api/v1` and was exercised live: the role, account, profile, settings, log and upload CRUD endpoints answer, and the permission checks are enforced (an unauthenticated request is rejected with 401, an under-privileged one with 403).
 
 ### Management API
 
-`app/api/resources/` contains one resource module per domain. These are **class-style CRUD resources** built on a shared `CRUDResource` base (`app/api/base.py`) — they subclass the base and expose `get`/`post`/`put`/`delete` handlers, rather than declaring standalone `@bp.route` blueprint handlers:
+`app/api/resources/` contains one resource module per domain. These are **class-style CRUD resources**: each resource class subclasses Sanic's `HTTPMethodView` and exposes `get`/`post`/`put`/`delete` handlers, rather than declaring standalone `@bp.route` blueprint handlers. The shared `BaseResource` / `CRUDResource` helpers in `app/api/base.py` provide the shared paging, sorting, searching and response-envelope behaviour:
 
 `account` · `role` · `profile` · `setting` · `log` (operation log) · `upload` · `dashboard` · `dashboard_user` · `dashboard_performance` · `cache` · `database` (read-only SQL analysis) · `compression`
 
@@ -53,7 +53,7 @@ Every entry below is traced to code in this repository and was verified by runni
 - **File upload** — `app/api/resources/upload.py`
 - **Dashboard** — `app/api/resources/dashboard.py`, `dashboard_user.py`, `dashboard_performance.py`
 
-Each resource declares its own field allow-lists (`allowed_create_fields` / `allowed_update_fields`), search and filter fields, and required fields, and gates access with the `check_permissions` / `check_roles` decorators from `app/auth/authorization.py`.
+Each resource module declares its own field allow-lists as **module-level constants** — `ACCOUNT_CREATE_FIELDS` / `ACCOUNT_UPDATE_FIELDS` in `account.py`, `ROLE_CREATE_FIELDS` / `ROLE_UPDATE_FIELDS` in `role.py`, `WRITABLE_FIELDS` in `setting.py` — and filters the payload against them, so a request cannot mass-assign fields outside the list. Access is gated with the `check_permissions` / `check_roles` decorators from `app/auth/authorization.py`.
 
 > The `/v1` API blueprint is mounted: `app/api/__init__.py` assembles the resource blueprints with `Blueprint.group(...)`, and the generated OpenAPI spec lists **57 paths**. Verified live — `GET /api/v1/settings` answers 200 with a paginated body, and `GET /api/v1/settings/key/<key>` for a missing key answers 404 with `RESOURCE_NOT_FOUND`.
 
@@ -100,9 +100,9 @@ In production the same routes return 404 unless `ENABLE_API_DOCS=true` is set ex
 | No secret, key or default password in the repository | `app/config.py` — all secrets read from environment variables; verified: `git grep -nIE "BEGIN (RSA )?PRIVATE KEY"` returns only the **placeholder** in `.env.example` (body: `change-me-generate-a-real-rsa-private-key…`), which is not a loadable key |
 | Administrator password generated at startup, printed once to stdout in development only | `app/config.py` — `_generate_admin_password` |
 | SQL analysis accepts a single read-only `SELECT`/`WITH` statement and issues only `EXPLAIN` | `app/database/query_analyzer.py` — `validate_readonly_sql`, `_FORBIDDEN_SQL_RE`, `_FORBIDDEN_FUNC_RE`; verified: `DELETE FROM account`, `SELECT 1; DROP TABLE x` and `PRAGMA table_info(account)` are all rejected |
-| Uploads are stored under a generated filename inside a fixed upload directory | `app/api/resources/upload.py` — `_process_file` builds `{timestamp}_{uuid}{ext}`; the original filename is never used as a path |
+| Uploads are stored under a generated filename inside a fixed upload directory | `app/api/resources/upload.py` — `store_upload()` builds `{uuid4().hex}{ext}`; the original filename is never used as a path |
 | CORS driven by an explicit allow-list, `*` never sends credential headers | `app/middleware/security_middleware.py` |
-| CSRF protection decorator for non-`GET` requests | `app/middleware/security_middleware.py` — `csrf_protect` |
+| CSRF protection decorator for non-`GET` requests — **implemented but not enabled** | `app/middleware/security_middleware.py` — `csrf_protect` checks the `X-CSRF-Token` header against the `csrf_token` cookie, but **no route is decorated with it**, so there is currently no CSRF protection in force |
 | Database URL redacted in logs | `app/models/__init__.py` — `_redact_db_url` |
 
 ### Known security limitations (also listed in the v0.2.0 release notes)
@@ -125,11 +125,11 @@ In production the same routes return 404 unless `ENABLE_API_DOCS=true` is set ex
 
 ### Option A — Docker one-command run
 
-> **The Docker path has been run for real.** The image was built, the container was started, `/health` answered 200, an administrator logged in over HTTP, and the optional Redis profile was brought up and answered `PONG`. The image runs as a non-root user, installs `libmagic`, and carries **no secrets** — every secret is injected at run time through `.env`.
+> **The Docker path has been run for real.** On a Linux host with a real Docker daemon the image was built, the container was started, `/health` answered **200**, an administrator logged in over HTTP, the admin console was served at `/amis/login.html`, and the container log contained **no** `[降级]` entries. The image runs as a non-root user, installs `libmagic`, and carries **no secrets** — every secret is injected at run time through `.env`.
 >
-> One caveat, stated plainly: the container was started with the upstream import defects patched *at runtime only* (no repository file was changed). The image as committed still stops at the first of those defects, so on an unpatched tree `docker compose up` will exit with a `ConfigError` naming the missing import. Those defects live in `app/**` and are tracked separately; see the [release notes](docs/release/v0.2.0-release-notes.md) for the full list.
+> Removing `JWT_PRIVATE_KEY` from `.env` makes the container exit with code 1 and a `配置错误:` message — production is fail-closed. `SECRET_KEY` and `PASSWORD_SALT` are not gates; the container starts without them.
 >
-> `Dockerfile`, `docker-compose.yml`, `.env.example` and `.dockerignore` are in this repository. GitHub Actions (`.github/workflows/docker.yml`) keeps this path under continuous regression.
+> `Dockerfile`, `docker-compose.yml`, `.env.example` and `.dockerignore` are in this repository. GitHub Actions (`.github/workflows/docker.yml`) keeps this path under continuous regression. The [release notes](docs/release/v0.2.0-release-notes.md) record the full measurement table, including the two build-environment accommodations needed on a host without IPv6 egress.
 
 ```bash
 cp .env.example .env      # then replace every placeholder value in .env
@@ -172,9 +172,11 @@ The server listens on **http://127.0.0.1:22222** (`127.0.0.1` and `localhost` ar
 设置环境变量 INITIAL_ADMIN_PASSWORD 可固定口令。
 ```
 
-That block is printed by the Sanic **worker process**, so if you redirect the server's output to a log file, search it for `口令:` — it is easy to miss among the startup noise. The generated password stops working after a restart.
+That block is printed by the Sanic **worker process**, so if you redirect the server's output to a log file, search it for `口令:` — it is easy to miss among the startup noise.
 
-**First start takes about 30–40 seconds** while the worker process spins up. Wait until the log shows:
+**Keep the password from the first start.** The account is created only if it does not exist yet, so the password printed on the first run stays valid; on later restarts a *new* random password is printed but **not** applied, because the account already exists. To pin the password across restarts, set `INITIAL_ADMIN_PASSWORD` before the first start.
+
+**The server needs a few seconds to start** (2–6 s measured) while the worker process spins up. Wait until the log shows:
 
 ```text
 [INFO] Goin' Fast @ http://127.0.0.1:22222
