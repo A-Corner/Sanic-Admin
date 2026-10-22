@@ -87,6 +87,28 @@ async def test_all_amis_subdirs_are_mounted(client):
         )
 
 
+async def test_amis_bare_subdir_paths_are_404_not_500(client):
+    """AMIS 子目录的裸路径必须是 404，不能是 500。
+
+    回归：Sanic 的 ``DirectoryHandler`` 在既无 index 又未开 directory_view 时
+    ``raise IsADirectoryError``（未捕获异常 → 500）。访问 ``/amis/css/`` 这类
+    裸目录路径就会命中，等于开了一个可外部触发的 500 面。
+    """
+    subdirs = sorted(
+        d.name for d in AMIS_DIR.iterdir()
+        if d.is_dir() and not d.name.startswith(".")
+    )
+    for sub in subdirs:
+        for path in (f"/amis/{sub}", f"/amis/{sub}/"):
+            response = await client.get(path)
+            assert response.status_code < 500, (
+                f"GET {path} 返回 {response.status_code} —— 裸目录路径不应是 5xx"
+            )
+            assert response.status_code == 404, (
+                f"GET {path} 返回 {response.status_code}，期望 404"
+            )
+
+
 @pytest.mark.parametrize("name", PRIVATE_FILES)
 async def test_amis_dev_files_not_leak_content(client, name):
     """开发文件的正文也不应出现在响应里。"""

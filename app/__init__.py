@@ -12,10 +12,13 @@ development/testing 默认开启，production 默认关闭。
 
 import importlib
 import os
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote
 
 from sanic import Sanic
+from sanic.exceptions import NotFound
+from sanic.handlers.directory import DirectoryHandler
 from sanic.log import logger
 from sanic.response import json as json_response
 
@@ -38,6 +41,25 @@ AMIS_PRIVATE_FILES = frozenset({
 
 #: AMIS 根目录下的入口页面（运行期需要的顶层 HTML）。
 AMIS_ENTRY_PAGES = ("login.html", "index.html")
+
+
+class _NoDirectoryListingHandler(DirectoryHandler):
+    """裸目录路径返回 404，而不是触发 Sanic 默认的 500。
+
+    Sanic 的 ``DirectoryHandler`` 在既无 ``index`` 又未开启 ``directory_view`` 时
+    会 ``raise IsADirectoryError`` —— 那是**未捕获异常**，直接变成 500。
+    访问 ``/amis/css/`` 这类裸目录路径就会命中它，等于开了一个可外部触发的
+    500 面。
+
+    这里覆写 ``handle``：只保留"index 文件命中"与"文件直出"两条正常路径，
+    其余一律 404 —— 静态资源目录不应该被列目录。
+    """
+
+    async def handle(self, request, path):
+        try:
+            return await super().handle(request, path)
+        except IsADirectoryError:
+            raise NotFound("File not found")
 
 
 def _register_amis_static(app: Sanic, amis_dir: str) -> None:
@@ -66,7 +88,14 @@ def _register_amis_static(app: Sanic, amis_dir: str) -> None:
         subdirs = []
     for sub in subdirs:
         sub_path = os.path.join(amis_dir, sub)
-        app.static(f"/amis/{sub}", sub_path, name=f"amis_{sub}")
+        app.static(
+            f"/amis/{sub}",
+            sub_path,
+            name=f"amis_{sub}",
+            directory_handler=_NoDirectoryListingHandler(
+                f"/amis/{sub}", Path(sub_path)
+            ),
+        )
 
     # 根目录下的入口页面单独挂载
     for page in AMIS_ENTRY_PAGES:
