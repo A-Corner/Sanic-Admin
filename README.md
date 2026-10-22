@@ -97,7 +97,7 @@ In production the same routes return 404 unless `ENABLE_API_DOCS=true` is set ex
 | Control | Evidence |
 |---|---|
 | Production fails closed when required secrets are missing | `app/config.py` — `_env_secret` raises `ConfigError`. Verified: with `JWT_PRIVATE_KEY` missing, `SANIC_ENV=production python main.py` prints `配置错误: 生产环境必须通过环境变量 JWT_PRIVATE_KEY 提供 JWT 签名私钥` and exits with **rc=1**; the same happens for `INITIAL_ADMIN_PASSWORD`. `SECRET_KEY` and `PASSWORD_SALT` are **not** gates — they take part in no signing or encryption today |
-| No secret, key or default password in the repository | `app/config.py` — all secrets read from environment variables; verified: `git grep -nIE "BEGIN (RSA )?PRIVATE KEY"` finds no key material |
+| No secret, key or default password in the repository | `app/config.py` — all secrets read from environment variables; verified: `git grep -nIE "BEGIN (RSA )?PRIVATE KEY"` returns only the **placeholder** in `.env.example` (body: `change-me-generate-a-real-rsa-private-key…`), which is not a loadable key |
 | Administrator password generated at startup, printed once to stdout in development only | `app/config.py` — `_generate_admin_password` |
 | SQL analysis accepts a single read-only `SELECT`/`WITH` statement and issues only `EXPLAIN` | `app/database/query_analyzer.py` — `validate_readonly_sql`, `_FORBIDDEN_SQL_RE`, `_FORBIDDEN_FUNC_RE`; verified: `DELETE FROM account`, `SELECT 1; DROP TABLE x` and `PRAGMA table_info(account)` are all rejected |
 | Uploads are stored under a generated filename inside a fixed upload directory | `app/api/resources/upload.py` — `_process_file` builds `{timestamp}_{uuid}{ext}`; the original filename is never used as a path |
