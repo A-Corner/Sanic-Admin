@@ -57,6 +57,12 @@ def create_app(config: Optional[Any] = None) -> Sanic:
     os.makedirs(app.config.UPLOAD_DIR, exist_ok=True)
     if os.path.isdir(app.config.STATIC_DIR):
         app.static('/static', app.config.STATIC_DIR)
+    # 托管 AMIS 管理界面（与 API 同源，便于复用 HttpOnly 会话 Cookie）。
+    # AMIS_DIR 置空或目录不存在时不挂载（生产环境可据此关闭管理界面）。
+    # 显式指定 name，避免与 /static 的默认路由名重复（Sanic 23.6 拒绝重名路由）。
+    amis_dir = app.config.get('AMIS_DIR')
+    if amis_dir and os.path.isdir(amis_dir):
+        app.static('/amis', amis_dir, index='login.html', name='amis')
     app.static('/uploads', app.config.UPLOAD_DIR)
 
     register_all_middlewares(app)

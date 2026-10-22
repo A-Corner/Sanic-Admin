@@ -185,6 +185,8 @@ class DefaultConfig:
     STATIC_DIR = str(BASE_DIR / "static")
     UPLOAD_DIR = str(BASE_DIR / "uploads")
     UPLOAD_FOLDER = UPLOAD_DIR  # 兼容旧名称
+    # AMIS 管理界面静态目录（由后端同源托管；留空则不挂载）
+    AMIS_DIR = str(BASE_DIR / "amis")
     ALLOWED_EXTENSIONS = {"txt", "pdf", "png", "jpg", "jpeg", "gif"}
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
 
@@ -334,6 +336,8 @@ def get_config(name: Optional[str] = None):
             f"/{cfg.DB_NAME}?charset={cfg.DB_CHARSET}"
         )
     cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
+    # 静态目录：AMIS 管理界面（后端同源托管）。置空字符串则不挂载。
+    cfg.AMIS_DIR = os.getenv("AMIS_DIR", cfg.AMIS_DIR)
     cfg.CACHE_TYPE = os.getenv("CACHE_TYPE", cfg.CACHE_TYPE)
     cfg.REDIS_HOST = os.getenv("REDIS_HOST", cfg.REDIS_HOST)
     cfg.REDIS_PORT = _int_env("REDIS_PORT", cfg.REDIS_PORT)
