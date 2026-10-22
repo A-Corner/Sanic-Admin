@@ -14,16 +14,22 @@
   ``INITIAL_ADMIN_*`` 等，全部来自环境变量，仓库内不含任何密钥。
 * ``create_app(config)`` 的 ``config`` 可以是环境名字符串、配置类/对象或字典。
 
-密钥环境变量：
+必需密钥环境变量（production 缺失即拒绝启动）：
 
-* ``SECRET_KEY``：应用密钥。
 * ``JWT_PRIVATE_KEY`` / ``JWT_PUBLIC_KEY``：RS256 PEM（换行可写成字面量 ``\\n``）；
   仅给私钥时公钥由私钥推导。
 * ``INITIAL_ADMIN_PASSWORD``：初始管理员口令。
-* ``PASSWORD_SALT``：口令盐。
 
 development/testing 缺失时自动生成临时值并输出 warning（进程重启后失效）；
 production 缺失时抛出 ``ConfigError``（入口负责退出）。
+
+可选环境变量（缺失不报错，取空字符串）：
+
+* ``SECRET_KEY``：应用密钥。**当前实现中不参与任何签名或加密**——JWT 实际使用
+  ``BaseConfig.SECRET``（RS256 私钥，来自 ``JWT_PRIVATE_KEY``）。设置它不会增强安全性，
+  因此不再作为 production 启动的必需项。
+* ``PASSWORD_SALT``：口令盐。**当前实现中不参与口令哈希**——argon2 的
+  ``PasswordHasher()`` 自行生成随机 salt 并编入哈希串。同样不再作为必需项。
 """
 import logging
 import os
@@ -162,7 +168,7 @@ class DefaultConfig:
     WORKERS = 1
     AUTO_RELOAD = False
 
-    # 密钥（get_config 注入）
+    # 可选密钥（get_config 注入；当前不参与任何签名或哈希，缺失时为空字符串）
     SECRET_KEY = ""
     PASSWORD_SALT = ""
 
@@ -316,9 +322,11 @@ def get_config(name: Optional[str] = None):
     cls = _CONFIG_CLASSES[env]
     cfg = cls()
 
-    # 密钥：只来自环境变量
-    cfg.SECRET_KEY = _env_secret("SECRET_KEY", env, lambda: secrets.token_urlsafe(48), "应用密钥")
-    cfg.PASSWORD_SALT = _env_secret("PASSWORD_SALT", env, lambda: secrets.token_hex(16), "口令盐")
+    # 可选密钥：只来自环境变量，缺失时为空字符串。
+    # 这两个值当前不参与任何签名或加密（JWT 用 JWT_PRIVATE_KEY/RS256，口令哈希用 argon2 自带随机 salt），
+    # 因此不再走 _env_secret 的 production fail-closed 检查——否则只是"必填但无人使用"的假安全项。
+    cfg.SECRET_KEY = os.getenv("SECRET_KEY", "")
+    cfg.PASSWORD_SALT = os.getenv("PASSWORD_SALT", "")
 
     # 通用服务/数据库/缓存环境变量覆盖
     cfg.HOST = os.getenv("HOST", cfg.HOST)
@@ -341,7 +349,7 @@ def get_config(name: Optional[str] = None):
     cfg.REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", cfg.REDIS_PASSWORD)
     cfg.MAIL_SERVER = os.getenv("MAIL_SERVER", cfg.MAIL_SERVER)
     cfg.MAIL_PORT = _int_env("MAIL_PORT", cfg.MAIL_PORT)
-    cfg.MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", str(cfg.MAIL_USE_TLS)) == "True"
+    cfg.MAIL_USE_TLS = _bool_env("MAIL_USE_TLS", cfg.MAIL_USE_TLS)
     cfg.MAIL_USERNAME = os.getenv("MAIL_USERNAME", cfg.MAIL_USERNAME)
     cfg.MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", cfg.MAIL_PASSWORD)
     cfg.MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", cfg.MAIL_DEFAULT_SENDER)
