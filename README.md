@@ -132,7 +132,7 @@ In production the same routes return 404 unless `ENABLE_API_DOCS=true` is set ex
 > `Dockerfile`, `docker-compose.yml`, `.env.example` and `.dockerignore` are in this repository. GitHub Actions (`.github/workflows/docker.yml`) keeps this path under continuous regression. The [release notes](docs/release/v0.2.0-release-notes.md) record the full measurement table, including the two build-environment accommodations needed on a host without IPv6 egress.
 
 ```bash
-cp .env.example .env      # then replace every placeholder value in .env
+cp .env.example .env      # then replace the two startup-required values (see the .env.example header)
 docker compose up -d --build
 ```
 
@@ -148,6 +148,11 @@ docker compose up -d --build
 ```
 
 Without that line the official source `https://pypi.org/simple` is used, so the default behaviour is unchanged.
+
+**Slow apt during the build:** on such networks the Debian mirror (`deb.debian.org`) can be the slow
+part, not pip — one measured build spent roughly 2800 s in `apt-get` fetching the compiler toolchain
+before pip even ran. The image currently has no apt-mirror switch; if you need one, replace the apt
+sources inside the `Dockerfile` yourself. A build argument for this is planned for v0.3.
 
 The container runs with `SANIC_ENV=production`, so it refuses to start unless the secrets are actually supplied through `.env` — "the container came up" is itself evidence that the configuration was supplied correctly.
 
@@ -166,6 +171,12 @@ python main.py
 ```
 
 On Windows PowerShell set the password with `$env:INITIAL_ADMIN_PASSWORD='<choose-a-strong-password>'`.
+
+In development mode that one variable is the whole setup: when `JWT_PRIVATE_KEY` is not set, the
+application generates a temporary signing key at startup and prints a note to that effect
+(`config.py` does the same for the initial password). Production is different — both
+`JWT_PRIVATE_KEY` and `INITIAL_ADMIN_PASSWORD` are hard requirements there (see the quick
+production run below).
 
 The server listens on **http://127.0.0.1:22222** (`127.0.0.1` and `localhost` are the same address).
 
@@ -272,9 +283,17 @@ Either provide a reachable Redis (set `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSW
 For a quick production run against a local file:
 
 ```bash
-export DATABASE_URL='sqlite:///./sanic_admin_prod.sqlite3'
+# Note the two slashes: Tortoise reads the sqlite file path as netloc + path, so
+# sqlite:///<name> points at /<name> in the filesystem ROOT (start-up then fails
+# with "unable to open database file"). The form below creates the file in the
+# current directory — verified, and the data survives a restart.
+export DATABASE_URL='sqlite://sanic_admin_prod.sqlite3'
 export CACHE_TYPE=memory
-export JWT_PRIVATE_KEY="$(openssl genrsa 2048 | sed ':a;N;$!ba;s/\n/\\n/g')"
+# PEM is multi-line; the variable must be a single line with the newlines written
+# as literal "\n". Avoid sed for this — the BSD and GNU dialects disagree on how
+# "\n" is handled and the quoting breaks. The command below uses only openssl and
+# the Python standard library and was tested end to end:
+export JWT_PRIVATE_KEY="$(openssl genrsa 2048 2>/dev/null | python3 -c 'import sys; print(sys.stdin.read().strip().replace(chr(10), chr(92)+"n"))')"
 export INITIAL_ADMIN_PASSWORD='<choose-a-strong-password>'
 python main.py
 ```

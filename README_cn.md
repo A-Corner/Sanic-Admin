@@ -37,14 +37,12 @@ Python 版本：**3.10 – 3.12**（CI 在这三个版本上运行）。
 
 ### 方式一：Docker 一键运行
 
-> **Docker 路径已真机跑通。** 镜像构建成功、容器启动、`/health` 返回 200、管理员经 HTTP 登录成功、可选 Redis profile 启动并返回 `PONG`。镜像以非 root 用户运行，内置 `libmagic`，**不含任何密钥**——所有密钥在运行时由 `.env` 注入。
->
-> 有一处必须如实说明：上述测量是在**仅运行时打补丁**（未改动仓库任何文件）的情况下完成的。仓库中提交的镜像仍会停在第一个上游导入缺陷上，因此在未修复的代码树上执行 `docker compose up` 会因 `ConfigError` 退出。这些缺陷位于 `app/**`，另行跟踪；完整清单见 [Release Notes](docs/release/v0.2.0-release-notes.md)。
+> **Docker 路径已真机跑通（无任何运行时补丁）。** 2026-10-22 在一台真实的 Linux Docker 宿主机上从仓库源码直接构建并验收：`/health` 返回 200、管理员经 HTTP 登录成功、`/amis/login.html` 返回 200、容器日志 `[降级]` 计数为 0、去掉 `JWT_PRIVATE_KEY` 后容器以退出码 1 重启（fail-closed 生效）。构建用时约 49 分钟——绝大部分耗在受限网络的 apt 与 pip 下载上（见下面的换源说明），不是应用本身的问题。镜像以非 root 用户运行，内置 `libmagic`，**不含任何密钥**——所有密钥在运行时由 `.env` 注入。
 >
 > `Dockerfile`、`docker-compose.yml`、`.env.example`、`.dockerignore` 都在本仓库中。GitHub Actions（`.github/workflows/docker.yml`）为该路径提供持续回归。
 
 ```bash
-cp .env.example .env      # 把 .env 里所有占位符替换成真实值
+cp .env.example .env      # 把 .env 顶部「启动必改」的 2 项换成真实值
 docker compose up -d --build
 ```
 
@@ -60,6 +58,10 @@ docker compose up -d --build
 ```
 
 不设这一行时用的是官方源 `https://pypi.org/simple`，默认行为不变。
+
+**构建期 apt 也可能很慢**：同样的受限网络下，Debian 源（`deb.debian.org`）往往比 pip 更慢——
+一次实测仅 apt 拉取编译工具链就花了约 2800 秒。镜像当前没有 apt 换源参数；需要时请自行
+替换 `Dockerfile` 里的 apt 源，v0.3 会提供构建参数。
 
 容器内固定 `SANIC_ENV=production`，因此密钥没通过 `.env` 真正提供时容器会直接拒绝启动——**「容器起来了」本身就是配置已正确提供的证据**。
 
@@ -78,6 +80,10 @@ python main.py
 ```
 
 Windows PowerShell 用 `$env:INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'` 设置。
+
+开发模式下这一个变量就是全部准备：`JWT_PRIVATE_KEY` 未设置时应用会在启动时自动生成
+临时签名私钥并打印提示（`config.py` 对初始口令做同样的处理）。production 不同——
+`JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD` 两项都是硬性要求（见下面的 production 快速启动）。
 
 服务监听 **http://127.0.0.1:22222**（`127.0.0.1` 与 `localhost` 是同一个地址）。
 
@@ -187,9 +193,16 @@ ConfigError: production 环境 Redis 缓存不可用，拒绝降级启动
 想用本地文件快速跑一个 production：
 
 ```bash
-export DATABASE_URL='sqlite:///./sanic_admin_prod.sqlite3'
+# 注意只有两个斜杠：Tortoise 把 sqlite 的文件路径解析为 netloc+path，
+# 写成 sqlite:///<名字> 会指向文件系统根目录的 /<名字>（普通用户无权创建，
+# 启动时直接报 unable to open database file）。下面这种写法在当前目录建库——
+# 已实测可启动，且重启后数据保留。
+export DATABASE_URL='sqlite://sanic_admin_prod.sqlite3'
 export CACHE_TYPE=memory
-export JWT_PRIVATE_KEY="$(openssl genrsa 2048 | sed ':a;N;$!ba;s/\n/\\n/g')"
+# PEM 是多行内容；环境变量里必须写成「换行替换为字面量 \n」的单行。
+# 不要用 sed 做这个替换——BSD/GNU 两个方言对 \n 的处理不同，引号会被破坏。
+# 下面这条命令只用 openssl + python3 标准库，已实测可启动：
+export JWT_PRIVATE_KEY="$(openssl genrsa 2048 2>/dev/null | python3 -c 'import sys; print(sys.stdin.read().strip().replace(chr(10), chr(92)+"n"))')"
 export INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'
 python main.py
 ```

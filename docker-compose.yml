@@ -2,7 +2,7 @@
 # Sanic-Admin 一键运行编排
 #
 # 快速开始：
-#   cp .env.example .env      # 然后把里面所有 change-me-* 换成真实值
+#   cp .env.example .env      # 然后把「启动必改」的 2 项换成真实值（见 .env 顶部说明）
 #   docker compose up -d --build
 #   curl http://127.0.0.1:22230/health
 #
