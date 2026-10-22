@@ -240,7 +240,33 @@ The handful that matter most:
 | `HOST` / `PORT` | Listen address and port. Defaults to `127.0.0.1` and `22222`. |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allow-list. Production defaults to empty (no cross-origin access). |
 
-> `REQUIRE_TWO_FACTOR` and `ENABLE_API_DOCS` are **not** read by the configuration module on this snapshot; they exist on the `sa-oss/m1` branch. Do not rely on them here.
+---
+
+## Deploying
+
+Two settings decide whether a production instance can start at all. Both fail **closed**, which is the right default but surprises people who only set the four secrets.
+
+**1. Redis must be reachable — unless you opt out.** `CACHE_TYPE` defaults to `redis` in production, and the application refuses to degrade to the in-memory cache there:
+
+```
+ConfigError: production 环境 Redis 缓存不可用，拒绝降级启动
+```
+
+Either provide a reachable Redis (set `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD`), or set `CACHE_TYPE=memory` deliberately — in-memory caching is per-process and does not survive a restart or scale beyond one worker.
+
+**2. `DATABASE_URL` must be set, and the default is MySQL.** When `DATABASE_URL` is not given, the application assembles a MySQL URL from `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME`. **`aiomysql` is not in `requirements.txt`**, so a MySQL deployment fails at import time with `ModuleNotFoundError: No module named 'aiomysql'` until you install a driver yourself.
+
+For a quick production run against a local file:
+
+```bash
+export DATABASE_URL='sqlite:///./sanic_admin_prod.sqlite3'
+export CACHE_TYPE=memory
+export JWT_PRIVATE_KEY="$(openssl genrsa 2048 | sed ':a;N;$!ba;s/\n/\\n/g')"
+export INITIAL_ADMIN_PASSWORD='<choose-a-strong-password>'
+python main.py
+```
+
+The secrets are the two that gate startup — `JWT_PRIVATE_KEY` and `INITIAL_ADMIN_PASSWORD`. `SECRET_KEY` and `PASSWORD_SALT` are accepted but currently unused.
 
 ---
 

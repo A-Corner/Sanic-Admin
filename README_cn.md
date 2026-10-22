@@ -150,6 +150,40 @@ pytest
 
 ---
 
+## 部署
+
+有两项设置决定 production 实例能否启动。两者都是**失败即拒绝**（方向正确，但只配了四个密钥的人常在这里意外）。
+
+**1. Redis 必须可达，除非你主动关掉。** production 下 `CACHE_TYPE` 默认 `redis`，
+Redis 不可达时应用拒绝降级为内存缓存：
+
+```
+ConfigError: production 环境 Redis 缓存不可用，拒绝降级启动
+```
+
+要么给出可达的 Redis（设 `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD`），
+要么显式设 `CACHE_TYPE=memory`——内存缓存是进程内的，重启即失效，也不能横向扩展。
+
+**2. `DATABASE_URL` 必须设置，且默认是 MySQL。** 未设置 `DATABASE_URL` 时，
+应用会从 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` 拼出 MySQL 连接串。
+而 **`aiomysql` 不在 `requirements.txt` 里**，所以 MySQL 部署会先在导入阶段报
+`ModuleNotFoundError: No module named 'aiomysql'`，除非你自己装驱动。
+
+想用本地文件快速跑一个 production：
+
+```bash
+export DATABASE_URL='sqlite:///./sanic_admin_prod.sqlite3'
+export CACHE_TYPE=memory
+export JWT_PRIVATE_KEY="$(openssl genrsa 2048 | sed ':a;N;$!ba;s/\n/\\n/g')"
+export INITIAL_ADMIN_PASSWORD='<换成你自己的强口令>'
+python main.py
+```
+
+真正的启动门禁是 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD` 两个；
+`SECRET_KEY` 与 `PASSWORD_SALT` 可以填但当前用不到。
+
+---
+
 ## 文档链接
 
 | 文档 | 内容 |

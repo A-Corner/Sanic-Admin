@@ -247,6 +247,15 @@ DB_NAME=sanic_admin_prod
 连接池参数（`min_size=5` / `max_size=20` / `connect_timeout=10.0` / `retry_limit=3`）
 在 `app/database/connection_pool.py:20-27` 是模块级常量，**不可通过环境变量覆盖**。
 
+> **【已实测】MySQL 需要自带驱动。** `requirements.txt` 里**没有 `aiomysql`**，
+> 而未设置 `DATABASE_URL` 时代码会把 `DB_*` 拼装成 MySQL 连接串。因此在 production 下
+> 直接用默认拼装结果启动，会在导入阶段失败：
+> ```
+> ModuleNotFoundError: No module named 'aiomysql'
+> ```
+> 要用 MySQL 请自行安装驱动（如 `pip install aiomysql`），或改用其他数据库。
+> 只想跑起来就显式给一个 `DATABASE_URL`（SQLite 亦可）。
+
 ### 4.3 PostgreSQL
 
 `DATABASE_URL` 直接指定 Tortoise 的 PostgreSQL scheme：
@@ -296,6 +305,15 @@ await Tortoise.generate_schemas(safe=True)
 路由缓存：装饰器 `app/cache/decorators.py:96` 的 `cached()` **只缓存 GET 请求**，
 且当 `config.ROUTE_CACHE_ENABLED` 为假时直接放行（`:119-120`）。
 development / testing 都把它关掉了，production 保持开启（默认超时 60 秒）。
+
+> **【已实测】production 下 Redis 不可达 = 拒绝启动。** `CACHE_TYPE` 在 production 默认是
+> `redis`，而 Redis 探测失败时 production 抛 `ConfigError`：
+> ```
+> ConfigError: production 环境 Redis 缓存不可用，拒绝降级启动: ConnectionError(...)
+> ```
+> 进程以 exit code 1 退出。**这是与密钥无关的第三道门禁**——即使 `JWT_PRIVATE_KEY` 与
+> `INITIAL_ADMIN_PASSWORD` 都齐备，只要 Redis 不可达就起不来。
+> 要绕开只能显式设 `CACHE_TYPE=memory`，但内存缓存是进程内的，重启失效，也不能多 worker 共享。
 
 ---
 
