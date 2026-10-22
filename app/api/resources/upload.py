@@ -34,6 +34,7 @@ from tortoise.expressions import F
 
 from app.api import APIResponse, v1_bp
 from app.api.responses import APIError
+from app.api.validators import parse_pagination
 from app.auth.authentication import authenticate_request
 from app.auth.authorization import check_permissions, has_permission, requires_permission
 from app.models import Profile, UploadedFile
@@ -166,15 +167,6 @@ def _iter_uploaded_files(files) -> list:
     if callable(getlist):
         return list(getlist())
     return [files]
-
-
-def _parse_positive_int(value, default: int, maximum: Optional[int] = None) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return default
-    number = max(1, number)
-    return min(number, maximum) if maximum else number
 
 
 async def store_upload(file, account, category: str, *, allowed: Optional[set] = None,
@@ -322,8 +314,10 @@ class FileListResource:
     @requires_permission("file:read")
     async def get(self, request: Request):
         account = request.ctx.authentication_session.bearer
-        page = _parse_positive_int(request.args.get("page"), 1)
-        page_size = _parse_positive_int(request.args.get("page_size"), 20, maximum=100)
+        # 用 parse_pagination 而不是自带的 _parse_positive_int：页码被钳制到
+        # MAX_PAGE，否则超大 page 会让 OFFSET 溢出 SQLite 整数范围
+        # → IntegrityError: datatype mismatch → 500。
+        page, page_size = parse_pagination(request, 20, 100)
         query = UploadedFile.filter(deleted=False)
         if request.args.get("category"):
             query = query.filter(category=request.args.get("category"))

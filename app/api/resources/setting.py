@@ -25,6 +25,7 @@ from sanic.views import HTTPMethodView
 
 from app.api import APIResponse, v1_bp
 from app.api.responses import APIError
+from app.api.validators import parse_pagination
 from app.auth.authorization import check_permissions
 from app.models import SystemSetting
 
@@ -237,8 +238,9 @@ class SettingResource(HTTPMethodView):
     @check_permissions("setting", "read")
     async def get(self, request: Request):
         """获取设置列表。"""
-        page = _positive_int(request.args.get("page"), 1)
-        page_size = min(_positive_int(request.args.get("page_size"), 20), MAX_PAGE_SIZE)
+        # 用 parse_pagination 而不是自带的 _positive_int：页码被钳制到 MAX_PAGE，
+        # 否则超大 page 会让 OFFSET 溢出 SQLite 整数范围 → IntegrityError → 500。
+        page, page_size = parse_pagination(request, 20, MAX_PAGE_SIZE)
 
         query = SystemSetting.filter(deleted=False)
         category = request.args.get("category")
@@ -522,15 +524,6 @@ class SettingBulkResource(HTTPMethodView):
             data={"updated": updated, "errors": errors},
             message=f"已成功更新 {len(updated)} 项设置，{len(errors)} 项失败",
         )
-
-
-def _positive_int(value: Any, default: int) -> int:
-    """把请求参数解析为正整数，非法时回落到默认值。"""
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return default
-    return number if number > 0 else default
 
 
 # 注册路由（显式指定路由名：同一个 view 类注册两次时 Sanic 会报路由名重复）
