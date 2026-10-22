@@ -25,8 +25,7 @@ graph TD
             MW3["注册3 请求: 日志<br/>app/middleware/__init__.py:24-27"]
             MW4["注册4 响应: 耗时日志<br/>app/middleware/__init__.py:29-33"]
             MW5["注册5 请求: 认证中间件<br/>auth_middleware.py:41-45"]
-            MW6["注册6 请求: 文件下载计数<br/>api/resources/upload.py:279-312"]
-            MW7["注册7 响应: gzip 压缩<br/>compression.py:180-209"]
+            MW7["注册6 响应: gzip 压缩<br/>compression.py:240-300"]
             MW8["异常处理 (非中间件)<br/>error_handler.py:19-40"]
         end
 
@@ -34,7 +33,7 @@ graph TD
             B1[auth_bp /capt_bp<br/>/auth/* /capt/*<br/>app/auth/routes.py]
             B2[v1_bp<br/>/api/v1/*<br/>app/api/resources/*]
             B3[database_bp / compression_bp<br/>/api/database/* /api/compression/*]
-            B4[静态文件 /static /uploads<br/>app/__init__.py:71-74]
+            B4[静态文件 /static /amis<br/>app/__init__.py:58-67]
         end
 
         subgraph SVC["服务层 app/services + app/auth"]
@@ -77,15 +76,17 @@ graph TD
 
 **【读码确认】** 关键点：
 
-- **中间件的实际注册顺序**（`app/middleware/__init__.py:36-58` 的 `register_all_middlewares`）：
+- **中间件的实际注册顺序**（`app/middleware/__init__.py:36-51` 的 `register_all_middlewares`）：
   1. `setup_error_handlers(app)`（`:43`）——注册异常处理器，不是中间件
   2. `setup_security_middleware(app)`（`:44`）——注册 **CORS 响应中间件** + **OPTIONS 请求中间件**
   3. `_setup_request_logging(app)`（`:45`）——注册 **请求日志** + **响应日志**中间件
   4. `AuthMiddleware()`（`:46`）——注册认证请求中间件
-  5. `FileDownloadCounterMiddleware()`（`:49-56`）——注册文件下载计数请求中间件，**包在 try/except 里**：
-     development/testing 失败只 warning 降级，production 失败抛 `ConfigError` 拒绝启动
 
-  随后 `app/__init__.py:76-81` 再注册 gzip 响应压缩中间件（`configure_compression`）。
+  随后 `app/__init__.py:70-74` 再注册 gzip 响应压缩中间件（`configure_compression`）。
+
+  **【已实测】** M1 已移除 `FileDownloadCounterMiddleware`（原 `:49-56`，包在 try/except 里
+  做 development/testing 降级、production fail-closed）。上传目录不再静态托管，下载计数改由
+  `app/api/resources/upload.py:380` 在资源内部原子自增——因此中间件链少了一环。
 
 - **Sanic 的中间件执行顺序**（实测，见 §1.2）：请求中间件按注册顺序执行；
   响应中间件按**注册逆序**执行。
@@ -93,7 +94,7 @@ graph TD
 - **压缩与 CORS 的先后**：`configure_compression` 在 `register_all_middlewares` **之后**调用，
   所以压缩中间件后注册 ⇒ 在响应阶段**先于** CORS 执行。
   实测大响应（3 KB）的响应头顺序为 `Content-Encoding: gzip` → `Vary: Accept-Encoding`
-  → `Access-Control-Allow-Origin`，两者都正确生效（`compression.py:180-191` 的注释
+  → `Access-Control-Allow-Origin`，两者都正确生效（`compression.py:251` 的注释
   明确说明「返回响应对象会使 Sanic 跳过其余响应中间件（如 CORS 头）」，
   所以压缩中间件必须返回 `None` 原地修改响应——代码确实这么做了）。
 
@@ -119,26 +120,26 @@ RESPONSE 执行顺序: 1. compression_middleware  2. log_response  3. add_cors_h
 
 即：
 
-- **请求阶段**：`OPTIONS 预检短路 → 请求日志 → 认证中间件`（文件下载计数中间件因
-  `app.api` 导入失败而降级，当前基线未进入队列，见 §7）。
+- **请求阶段**：`OPTIONS 预检短路 → 请求日志 → 认证中间件`。
 - **响应阶段**：`gzip 压缩 → 耗时日志 → CORS 头`。
   压缩最早执行、且必须原地修改响应并返回 `None`，
-  否则后面的 CORS 头会被跳过（`compression.py:180-191` 注释已说明此约束）。
+  否则后面的 CORS 头会被跳过（`compression.py:251` 注释已说明此约束）。
 
 ### 1.3 蓝图层级
 
-**【读码确认】** `app/api/__init__.py:16-38`：
+**【读码确认】** `app/api/__init__.py:14-24`：
 
 ```python
-api_bp = Blueprint.group('api', url_prefix='/api')   # :16
-v1_bp = Blueprint('v1', url_prefix='/v1')            # :19
-api_bp.add_blueprint(v1_bp)                          # :22
-# 遍历 app/api/resources/*.py，凡模块有 bp 就加入 api_bp  :25-33
+v1_bp = Blueprint('v1', url_prefix='/v1')                     # :14
+from app.api import resources  # noqa: E402,F401              # :18 自动导入资源模块
+from app.api.resources.compression import bp as compression_bp  # :20
+from app.api.resources.database import bp as database_bp        # :21
+api_bp = Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')  # :24
 ```
 
 最终 URL 前缀为 `/api` + `/v1` = `/api/v1/...`，以及独立的
-`/api/database/...`（`app/api/resources/database.py:29`）、
-`/api/compression/...`（`app/api/resources/compression.py:26`）。
+`/api/database/...`（`app/api/resources/database.py:28`）、
+`/api/compression/...`（`app/api/resources/compression.py:20`）。
 
 **【已实测】** `app/api/__init__.py:24` 用
 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` 装配蓝图组。
@@ -149,7 +150,11 @@ api_bp.add_blueprint(v1_bp)                          # :22
 `AttributeError`，导致整个 `app.api` 包导入失败、API v1 蓝图整体降级。
 M1 已改用上述写法并删除了 `app/api/routes.py`、`app/api/example.py`。
 
-实测：蓝图正常注册，生成的 OpenAPI 规范含 **57 条 path**。
+实测：蓝图正常注册，生成的 OpenAPI 规范含 **57 条 path**；
+`create_app('testing')` 的路由表共 80 条路由（66 个不同 path，其中 39 个在 `/api/v1` 下）。
+
+另有 `_ensure_unique_route_names()`（`app/api/__init__.py:27-55`）为同一个视图注册到多个 URL 时
+补唯一路由名——Sanic 23.6 遇到重名路由会直接抛 `ServerError` 导致进程起不来。
 
 ---
 
@@ -171,28 +176,35 @@ M1 已改用上述写法并删除了 `app/api/routes.py`、`app/api/example.py`�
 | `app/api/base.py` | `BaseResource`（分页 / 排序 / 搜索 / 过滤的统一处理）与 `CRUDResource`（标准 GET/POST/PUT/PATCH/DELETE） |
 | `app/api/responses.py` | `APIResponse` 统一响应封装（`success` / `error` / `list` / `created` / `serialize`）+ `APIError` 错误码常量表 |
 | `app/api/validators.py` | 参数校验装饰器：`validate_request` / `validate_path_param`，规则类 `Required` / `Type` / `Length` / `Range` / `Regex` / `Email` / `OneOf` / `Custom` |
-| `app/api/resources/` | 13 个业务资源模块（见 §2.3） |
+| `app/api/resources/` | 12 个业务资源模块（见 §2.3） |
 | `app/api/resources/route_methods.py` | `register_view()`：用 `Blueprint.route` 原样注册方法并为未支持的方法挂 405 兜底，使方法不匹配稳定返回 405 而不是 404/500（仅部分资源采用） |
-| `app/api/routes.py` | 旧版 API 蓝图（`api_bp` + `register_api_blueprints`）。**当前无任何调用点**，且它 import 的 `account_api` / `role_api` 在资源模块中已不存在 |
-| `app/api/example.py` | 文档装饰器用法示例（`example_bp`）。**蓝图未被注册**，纯示例代码 |
 
-`app/api/resources/` 下的资源清单（**【读码确认】** `app/api/resources/__init__.py:32-59` 的
-`all_resources` 列表，共 25 个资源类）：
+**M1 已删除**（不再存在于仓库中）：`app/api/routes.py`（旧版 API 蓝图）与
+`app/api/example.py`（文档装饰器示例）。它们在 M1 之前是无调用点的死代码，且 import 的
+`account_api` / `role_api` 早已不存在——**不要基于它们扩展**。
+
+`app/api/resources/` 下的资源清单（**【读码确认】** `app/api/resources/__init__.py:36-65` 的
+`all_resources` 列表，共 27 个资源类）：
 
 | 文件 | 资源类 | 注册路径（`v1_bp.add_route`） |
 |---|---|---|
-| `account.py` | `AccountResource` / `AccountPasswordResource` / `AccountMeResource` | `/accounts`、`/accounts/<id>`、`/accounts/<id>/password`、`/accounts/me` |
+| `account.py` | `AccountResource` / `AccountPasswordResource` / `AccountMeResource` / `MyAccountPasswordResource` | `/accounts`、`/accounts/<id>`、`/accounts/<id>/password`、`/accounts/me`、`/accounts/me/password` |
 | `role.py` | `RoleResource` / `RoleMembersResource` / `AccountRolesResource` | `/roles`、`/roles/<id>`、`/roles/<id>/members`、`/accounts/<id>/roles` |
-| `profile.py` | `ProfileResource` / `MyProfileResource` | `/profiles/<id>`、`/me/profile` |
+| `profile.py` | `ProfileResource` / `MyProfileResource` | `/profiles/<id>`、`/profiles`、`/me/profile` |
 | `log.py` | `LogResource` / `LogStatisticsResource` | `/logs`、`/logs/<id>`、`/logs/statistics` |
 | `setting.py` | `SettingResource` / `SettingByKeyResource` / `SettingBulkResource` | `/settings`、`/settings/<id>`、`/settings/key/<key>`、`/settings/bulk` |
-| `upload.py` | `FileUploadResource` / `AvatarUploadResource` / `FileListResource` / `FileDeleteResource` + `FileDownloadCounterMiddleware` | `/upload`、`/upload/<category>`、`/upload/avatar`、`/files`、`/files/<id>` |
+| `upload.py` | `FileUploadResource` / `AvatarUploadResource` / `FileListResource` / `FileDownloadResource` / `FileDeleteResource` | `/upload`、`/upload/<category>`、`/upload/avatar`、`/files`、`/files/<id>/download`、`/files/<id>` |
 | `dashboard.py` | `DashboardSummaryResource` / `DashboardActivitiesResource` / `DashboardStorageResource` | `/dashboard/summary`、`/dashboard/activities`、`/dashboard/storage` |
 | `dashboard_user.py` | `UserActivityResource` / `FeatureUsageResource` / `PermissionAnalysisResource` | `/dashboard/user-activity`、`/dashboard/feature-usage`、`/dashboard/permission-analysis` |
 | `dashboard_performance.py` | `PerformanceResource` / `ExceptionsResource` / `AlertsResource` | `/dashboard/performance`、`/dashboard/exceptions`、`/dashboard/alerts` |
 | `cache.py` | `CacheResource` / `CacheKeysResource` / `CacheKeyResource` | `/cache`、`/cache/keys`、`/cache/keys/<key>` |
 | `database.py` | `QueryLogsResource` / `SlowQueriesResource` / `QueryPlanResource` / `ConnectionPoolResource` / `DatabaseAnalysisResource` | `/api/database/query-logs` 等（独立 `bp`） |
-| `compression.py` | `CompressionStatsResource` 等 | `/api/compression/...`（独立 `bp`） |
+| `compression.py` | `CompressionStatsResource` / `CompressionConfigResource` | `/api/compression/...`（独立 `bp`） |
+
+**【已实测】** `account.py` / `role.py` / `profile.py` 用 `register_view()` 注册（自带 405 兜底），
+其余资源用 `v1_bp.add_route(...)`。`upload.py` 的 `FileDownloadCounterMiddleware` 已随 M1
+移除——下载计数改由 `FileDownloadResource.get()` 内部原子自增
+（`app/api/resources/upload.py:380`），全局中间件不再需要它。
 
 ### 2.3 `app/auth` —— 认证与授权
 
@@ -503,19 +515,18 @@ Sanic-Admin/
 │   │   ├── base.py               # BaseResource / CRUDResource
 │   │   ├── responses.py          # APIResponse / APIError
 │   │   ├── validators.py         # 参数校验装饰器与规则
-│   │   ├── example.py            # 文档装饰器示例（蓝图未注册）
-│   │   ├── routes.py             # 旧版 API 蓝图（无调用点）
-│   │   └── resources/            # 12 个业务资源模块 + __init__.py
+│   │   ├── resources/            # 12 个业务资源模块 + route_methods.py + __init__.py
 │   │       ├── account.py        #   账户 / 改密 / 当前用户
 │   │       ├── role.py           #   角色 / 角色成员 / 账户角色
 │   │       ├── profile.py        #   个人资料 / 我的资料
 │   │       ├── log.py            #   操作日志 / 日志统计
 │   │       ├── setting.py        #   系统设置 / 按键读写 / 批量
-│   │       ├── upload.py         #   文件上传 / 头像 / 列表 / 删除 / 下载计数中间件
+│   │       ├── upload.py         #   文件上传 / 头像 / 列表 / 下载 / 删除
 │   │       ├── dashboard.py      #   概览 / 活动 / 存储
 │   │       ├── dashboard_user.py #   用户活动 / 功能使用 / 权限分析
 │   │       ├── dashboard_performance.py  # 性能 / 异常 / 告警
 │   │       ├── cache.py          #   缓存管理
+│   │       ├── route_methods.py  #   register_view()：405 兜底注册
 │   │       ├── database.py       #   查询日志 / 慢查询 / 执行计划 / 连接池 / 分析（独立 bp）
 │   │       └── compression.py    #   压缩统计与配置（独立 bp）
 │   │
@@ -577,11 +588,11 @@ Sanic-Admin/
 │       └── routes.py             # login_bp / index_bp（Jinja2）
 │
 ├── amis/                         # ── AMIS 前端主线 ─────────────────────────
-│   ├── server.js                 # Express 静态服务器（开发用）
+│   ├── server.js                 # 零依赖 Node 开发服务器（静态托管 + 同源反代）
 │   ├── package.json / nodemon.json
-│   ├── site.html                 # 站点外壳
-│   ├── login.html / login_form.html
-│   ├── pages/                    # AMIS 页面 JSON（site / crud-* / dash_board / login ...）
+│   ├── index.html                # 站点外壳（登录态检查 + 菜单）
+│   ├── login.html                # 静态登录页（POST /auth/login）
+│   ├── pages/                    # AMIS 页面 JSON（site / account-list / role-list / log-list / setting-list / dash_board）
 │   ├── sdk/                      # AMIS SDK（vendored，含 sdk.js / sdk.css）
 │   ├── css/ fonts/ images/ vendor/ js/
 │   └── public/                   # logo.png
