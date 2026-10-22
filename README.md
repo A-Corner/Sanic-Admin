@@ -214,7 +214,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **Current test status:** `pytest` reports **`95 passed`, 0 failed, 0 errors** (collection: 95 tests, ~54 s). Coverage over `app/` is **50 %** — the suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
+> **Current test status:** `pytest` reports **`95 passed`, 0 failed, 0 errors** (collection: 95 tests, ~90 s; about 6 minutes with `--cov=app`). Coverage over `app/` is **50 %** — the suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
 
 ---
 

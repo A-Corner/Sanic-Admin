@@ -1,7 +1,7 @@
 # Sanic-Admin 配置参考
 
 > 适用范围：Sanic-Admin 后端（Sanic 23.6 + Tortoise ORM 0.20 + Redis + PyJWT）。
-> 事实来源：`app/config.py`（394 行，本文中所有行号引用均指该文件在 `sa-oss/m23-doc` 分支上的版本）。
+> 事实来源：`app/config.py`（450 行，本文中所有行号引用均指该文件在 `release/v0.2.0` @ `8750d51` 上的版本）。
 > 标注约定：
 > - **【读码确认】** = 直接读 `app/config.py` 或调用 `get_config()` 实测得到。
 > - 文中标注「**已实测**」的条目，其数据来自在发布候选 `release/v0.2.0`（基线 `8750d51`）上实际执行的命令。
@@ -473,9 +473,11 @@ payload 只有两个字段：
    调用点 `app/auth/authentication.py:166-168`），且错误信息不区分
    「账户不存在」与「口令错误」（统一为「用户名或密码错误」）。
 
-4. **未认证端点**：当前基线只有 `/auth/*`、`/capt/*`、`/health` 和静态文件路由
-   （实测路由表见 `docs/architecture.md` §7）。API v1 蓝图整体导入失败并降级，
-   因此**不存在未加鉴权的业务 API**——但这是因为功能没上线，不是因为鉴权做得好。
+4. **未认证端点**：实测无凭证即可访问的有 `/auth/*`、`/capt/*`、`/health`，
+   以及 **API 文档路由** `/swagger`、`/swagger/index.html`、`/redoc`、`/swagger.json`、
+   `/docs/*`（受 `ENABLE_API_DOCS` 控制，development 默认开启时全部无鉴权）。
+   此外 `/amis/*` 是管理界面的静态页，同样不需要鉴权。
+   （实测路由表见 `docs/architecture.md` §7。）
 
 5. **`/health` 无鉴权**且返回 `{"status":"ok","env":<ENV>}`（`app/__init__.py:83-85`）。
    生产环境会暴露运行环境信息，部署时应由反向代理限制访问。
