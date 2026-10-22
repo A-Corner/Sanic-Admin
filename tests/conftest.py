@@ -74,8 +74,10 @@ for _var in MANAGED_ENV_VARS:
 
 #: 测试固定值（仅测试环境使用，绝非真实凭据）
 os.environ["SANIC_ENV"] = "testing"
-os.environ["SECRET_KEY"] = "test-only-secret-key-not-for-production"
-os.environ["PASSWORD_SALT"] = "test-only-password-salt"
+# 注意：不再设置 SECRET_KEY / PASSWORD_SALT。二者在当前实现中不参与任何签名或
+# 加密（JWT 用 JWT_PRIVATE_KEY 的 RS256 私钥，口令哈希用 argon2 自带的随机 salt），
+# 保留它们只会让读者误以为它们是必需的测试配置项。它们仍列在上面的
+# ``MANAGED_ENV_VARS`` 中，以便把外部环境可能带入的值清干净。
 os.environ["INITIAL_ADMIN_PASSWORD"] = "TestAdminPass123!"
 os.environ["INITIAL_ADMIN_EMAIL"] = "SAdmin@Sanic.com"
 os.environ["REQUIRE_TWO_FACTOR"] = "false"
