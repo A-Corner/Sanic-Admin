@@ -112,7 +112,12 @@ def _validate_text_fields(data: Dict[str, Any]) -> Optional[str]:
             continue
         value = data[field]
         if value is None:
-            continue
+            # ``None`` 是**显式提供的非法值**，不是"未提供该字段"：
+            # category 的模型字段不允许 null（default="general"），
+            # 若放行 None 会在落库时抛 ValidationError → 500。
+            # description 允许 null，但"清空说明"与"不修改"无法区分，
+            # 统一按非法值拒绝更安全。
+            return f"{field} 不能是 null"
         if not isinstance(value, str):
             return f"{field} 必须是字符串"
         if len(value) > max_length:
@@ -182,6 +187,10 @@ def validate_value_type(value: Any, value_type: str) -> Optional[str]:
     """
     校验值是否匹配声明的类型，不匹配时返回错误说明，匹配返回 None。
     """
+    # null 不是合法值：``str(None)`` 会落库成字面量 "None"，
+    # 读回来时又被当作有效配置 —— 配置里出现字符串 "None" 比报错更糟。
+    if value is None:
+        return "value 不能是 null"
     try:
         if value_type == "int":
             int(value)
@@ -195,6 +204,10 @@ def validate_value_type(value: Any, value_type: str) -> Optional[str]:
                 pass  # 已经是 JSON 对象
             else:
                 json.loads(str(value))
+        elif value_type == "string":
+            # string 类型此前没有任何校验分支，导致 value=null 穿过校验
+            if not isinstance(value, str):
+                return "值必须是字符串"
     except (ValueError, TypeError, json.JSONDecodeError):
         return f"值与声明的类型 {value_type} 不匹配"
     return None
