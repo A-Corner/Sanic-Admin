@@ -13,9 +13,9 @@ import time
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
-from tortoise import Tortoise
+from tortoise import Tortoise, connections
 from tortoise.backends.base.client import BaseDBAsyncClient
-from tortoise.exceptions import OperationalError
+from tortoise.exceptions import ConfigurationError, OperationalError
 
 logger = logging.getLogger("app.database")
 
@@ -50,6 +50,27 @@ _pool_lock = asyncio.Lock()
 _health_check_task = None
 
 
+def _iter_connections() -> Dict[str, BaseDBAsyncClient]:
+    """
+    获取当前所有数据库连接，返回 ``{连接名: 连接对象}`` 字典。
+
+    tortoise-orm 0.20.0 已移除 ``Tortoise._connections``，改由 ``connections`` 处理器统一管理。
+    ``connections.all()`` 返回的是连接对象**列表**（不是字典），每个连接对象通过
+    ``connection_name`` 暴露自己的连接名，此处统一归一化为字典，保持既有调用方语义不变。
+
+    若 ``Tortoise.init()`` 尚未执行，``connections`` 没有 db 配置可供枚举，此时降级为空字典。
+    """
+    try:
+        conn_list = connections.all()
+    except ConfigurationError:
+        # Tortoise 尚未初始化，无法枚举连接
+        return {}
+    return {
+        getattr(conn, "connection_name", str(index)): conn
+        for index, conn in enumerate(conn_list)
+    }
+
+
 def set_pool_options(**options) -> Dict[str, Any]:
     """
     设置连接池选项
@@ -78,7 +99,7 @@ def _apply_pool_options() -> None:
     应用连接池选项到当前连接
     """
     # 获取当前所有连接
-    for conn_name, conn in Tortoise._connections.items():
+    for conn_name, conn in _iter_connections().items():
         if hasattr(conn, '_pool'):
             # 根据数据库后端类型设置池选项
             if conn.capabilities.dialect == "mysql":
@@ -142,7 +163,7 @@ async def get_connection_pool() -> Dict[str, Any]:
     await _update_pool_stats()
     
     connections_info = {}
-    for conn_name, conn in Tortoise._connections.items():
+    for conn_name, conn in _iter_connections().items():
         if hasattr(conn, '_pool'):
             connections_info[conn_name] = {
                 "dialect": conn.capabilities.dialect,
@@ -176,7 +197,7 @@ async def _update_pool_stats() -> None:
         active_connections = 0
         idle_connections = 0
         
-        for conn_name, conn in Tortoise._connections.items():
+        for conn_name, conn in _iter_connections().items():
             if hasattr(conn, '_pool'):
                 # 基于连接池类型获取统计信息
                 pool = conn._pool
@@ -289,7 +310,7 @@ async def _perform_health_check() -> None:
     
     all_healthy = True
     
-    for conn_name, conn in Tortoise._connections.items():
+    for conn_name, conn in _iter_connections().items():
         try:
             # 简单连接测试
             await conn.execute_query("SELECT 1")
@@ -314,7 +335,7 @@ async def close_idle_connections() -> int:
     if not Tortoise._inited:
         return closed_count
     
-    for conn_name, conn in Tortoise._connections.items():
+    for conn_name, conn in _iter_connections().items():
         if hasattr(conn, '_pool') and hasattr(conn._pool, 'close'):
             try:
                 # 尝试关闭空闲连接
