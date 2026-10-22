@@ -36,10 +36,8 @@ AMIS_PRIVATE_FILES = frozenset({
     "README.md",
 })
 
-
-def _is_amis_private(path: str) -> bool:
-    """判断 AMIS 下的请求路径是否指向不应对外公开的文件。"""
-    return path.rsplit("/", 1)[-1] in AMIS_PRIVATE_FILES
+#: AMIS 根目录下的入口页面（运行期需要的顶层 HTML）。
+AMIS_ENTRY_PAGES = ("login.html", "index.html")
 
 
 def _register_amis_static(app: Sanic, amis_dir: str) -> None:
@@ -47,22 +45,31 @@ def _register_amis_static(app: Sanic, amis_dir: str) -> None:
     托管 AMIS 管理界面，同时挡住开发文件。
 
     做法：不整目录静态托管（那会把 ``server.js``、``package.json`` 等开发文件
-    一并公开），而是**逐个挂载**运行期真正需要的资源：
+    一并公开），而是分两类挂载：
 
-    * 根目录下的两个入口页面 ``login.html`` / ``index.html`` 单独挂载；
-    * ``pages/``、``sdk/``、``css/``、``js/``、``images/``、``fonts/``、
-      ``vendor/`` 这些子目录按需挂载。
+    * **子目录**：枚举 ``amis_dir`` 下实际存在的所有子目录逐个挂载。枚举而非
+      硬编码清单，是为了避免新增资源目录时漏挂（``public/`` 曾因写死清单而
+      整目录 404，导致 AMIS 仪表盘 logo 加载不到）。
+    * **顶层文件**：只有 ``login.html`` / ``index.html`` 两个入口页面被显式挂载。
 
-    任何不在此清单中的文件（例如 ``server.js``）自然没有对应路由，返回 404。
+    顶层其余文件（``server.js``、``package.json``、``nodemon.json``、
+    ``README.md`` 等开发文件）没有对应路由，自然返回 404。
     """
-    # 运行期需要的子目录
-    for sub in ("pages", "sdk", "css", "js", "images", "fonts", "vendor"):
+    # 所有子目录：枚举实际存在的，避免硬编码清单漏挂
+    try:
+        subdirs = sorted(
+            name for name in os.listdir(amis_dir)
+            if os.path.isdir(os.path.join(amis_dir, name))
+            and not name.startswith(".")
+        )
+    except OSError:
+        subdirs = []
+    for sub in subdirs:
         sub_path = os.path.join(amis_dir, sub)
-        if os.path.isdir(sub_path):
-            app.static(f"/amis/{sub}", sub_path, name=f"amis_{sub}")
+        app.static(f"/amis/{sub}", sub_path, name=f"amis_{sub}")
 
     # 根目录下的入口页面单独挂载
-    for page in ("login.html", "index.html"):
+    for page in AMIS_ENTRY_PAGES:
         page_path = os.path.join(amis_dir, page)
         if os.path.isfile(page_path):
             app.static(f"/amis/{page}", page_path, name=f"amis_page_{page[:-5]}")

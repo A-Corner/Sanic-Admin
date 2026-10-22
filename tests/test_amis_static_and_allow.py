@@ -16,9 +16,13 @@ import pytest
 
 from app import create_app
 from app.config import config_to_dict, get_config
+from app import AMIS_PRIVATE_FILES
 
 #: 不应对外公开的 AMIS 开发文件
 PRIVATE_FILES = ("server.js", "package.json", "nodemon.json", "README.md")
+
+#: AMIS 静态目录（仓库内实际目录）
+AMIS_DIR = Path(__file__).resolve().parent.parent / "amis"
 
 
 # 说明：本文件直接使用 conftest 提供的 ``client`` fixture（httpx.ASGITransport 路线）。
@@ -40,6 +44,47 @@ async def test_amis_dev_files_are_not_public(client, name):
     assert response.status_code == 404, (
         f"/amis/{name} 返回 {response.status_code}，开发文件不应被公开访问"
     )
+
+
+async def test_amis_private_files_constant_matches_dev_files():
+    """AMIS_PRIVATE_FILES 常量应与实际要挡住的开发文件一致，且被真实使用。"""
+    for name in PRIVATE_FILES:
+        assert name in AMIS_PRIVATE_FILES, f"{name} 应在 AMIS_PRIVATE_FILES 里"
+
+
+async def test_amis_public_dir_is_served(client):
+    """``public/`` 目录必须挂载。
+
+    回归：曾因写死子目录清单而漏掉 ``public/``，导致 AMIS 仪表盘的
+    logo（``amis/index.html`` 引用 ``public/logo.png``）整目录 404。
+    """
+    response = await client.get("/amis/public/logo.png")
+    assert response.status_code == 200, (
+        f"/amis/public/logo.png 返回 {response.status_code}，"
+        f"public 目录未被挂载（AMIS 仪表盘 logo 会加载失败）"
+    )
+
+
+async def test_all_amis_subdirs_are_mounted(client):
+    """AMIS 下的**每个**子目录都必须被挂载（防止新增目录时漏挂）。
+
+    枚举磁盘上实际存在的子目录，逐个取其下第一个文件请求 200。
+    """
+    subdirs = sorted(
+        d.name for d in AMIS_DIR.iterdir()
+        if d.is_dir() and not d.name.startswith(".")
+    )
+    assert subdirs, "amis 目录下应当有子目录"
+    for sub in subdirs:
+        files = sorted(f for f in (AMIS_DIR / sub).rglob("*") if f.is_file())
+        if not files:
+            continue
+        rel = files[0].relative_to(AMIS_DIR)
+        response = await client.get(f"/amis/{rel.as_posix()}")
+        assert response.status_code == 200, (
+            f"/amis/{rel.as_posix()} 返回 {response.status_code}，"
+            f"子目录 {sub}/ 未被挂载"
+        )
 
 
 @pytest.mark.parametrize("name", PRIVATE_FILES)
