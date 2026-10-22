@@ -5,8 +5,9 @@
 API参数验证模块，提供请求参数验证功能
 """
 
+import datetime
 import functools
-from typing import Dict, Any, List, Callable, Optional, Union, Type
+from typing import Dict, Any, List, Callable, Union, Type
 from sanic.request import Request
 from app.api.responses import APIResponse, APIError
 
@@ -38,10 +39,24 @@ class Required(ValidationRule):
     """
     def __init__(self, error_message: str = None):
         super().__init__(error_message or "此字段是必需的")
-    
+
     def validate(self, value: Any, field_name: str) -> Union[bool, str]:
         if value is None or (isinstance(value, str) and value.strip() == ""):
             return self.error_message.format(field=field_name)
+        return True
+
+
+class Optional(ValidationRule):
+    """
+    可选字段标记规则。
+
+    本规则恒定通过，只用于在规则表里显式表达"该字段可以不传"；
+    其余规则（Length/Type/OneOf 等）在值为 None 时同样直接通过。
+    """
+    def __init__(self, error_message: str = None):
+        super().__init__(error_message or "此字段是可选的")
+
+    def validate(self, value: Any, field_name: str) -> Union[bool, str]:
         return True
 
 
@@ -211,17 +226,71 @@ class Custom(ValidationRule):
     def __init__(self, validator: Callable[[Any], Union[bool, str]], error_message: str = None):
         self.validator = validator
         super().__init__(error_message or "验证失败")
-    
+
     def validate(self, value: Any, field_name: str) -> Union[bool, str]:
         result = self.validator(value)
-        
+
         if result is True:
             return True
-        
+
         if isinstance(result, str):
             return result
-        
+
         return f"字段{field_name}{self.error_message}"
+
+
+class Date(ValidationRule):
+    """
+    日期验证规则，接受 ``YYYY-MM-DD`` 或 ISO 8601 日期时间。
+    """
+    def __init__(self, error_message: str = None):
+        super().__init__(error_message or "此字段必须是合法的日期（YYYY-MM-DD）")
+
+    def validate(self, value: Any, field_name: str) -> Union[bool, str]:
+        if value is None:
+            return True
+
+        if isinstance(value, datetime.datetime):
+            return True
+        if isinstance(value, datetime.date):
+            return True
+
+        if not isinstance(value, str):
+            return f"字段{field_name}必须是日期字符串"
+
+        text = value.strip()
+        try:
+            datetime.date.fromisoformat(text)
+            return True
+        except ValueError:
+            pass
+
+        try:
+            datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return True
+        except ValueError:
+            return f"字段{field_name}必须是合法的日期（YYYY-MM-DD）"
+
+
+class StringList(ValidationRule):
+    """
+    字符串列表验证规则：值必须是列表，且每个元素都是非空字符串。
+    """
+    def __init__(self, error_message: str = None):
+        super().__init__(error_message or "此字段必须是字符串列表")
+
+    def validate(self, value: Any, field_name: str) -> Union[bool, str]:
+        if value is None:
+            return True
+
+        if not isinstance(value, list):
+            return f"字段{field_name}必须是列表"
+
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                return f"字段{field_name}的每个元素都必须是非空字符串"
+
+        return True
 
 
 def validate_request(rules: Dict[str, List[ValidationRule]], 
@@ -319,7 +388,7 @@ def validate_request(rules: Dict[str, List[ValidationRule]],
 def validate_path_param(param_name: str, rules: List[ValidationRule]):
     """
     路径参数验证装饰器
-    
+
     用法示例:
     ```python
     @app.route('/api/user/<user_id>')
@@ -328,11 +397,11 @@ def validate_path_param(param_name: str, rules: List[ValidationRule]):
         # 参数已验证通过
         pass
     ```
-    
+
     Args:
         param_name: 参数名称
         rules: 验证规则列表
-        
+
     Returns:
         装饰器函数
     """
@@ -341,21 +410,119 @@ def validate_path_param(param_name: str, rules: List[ValidationRule]):
         async def wrapper(request, *args, **kwargs):
             # 获取路径参数值
             param_value = kwargs.get(param_name)
-            
+
             # 应用验证规则
             for rule in rules:
                 result = rule.validate(param_value, param_name)
-                
+
                 if result is not True:
                     return APIResponse.error(
                         message=f"路径参数'{param_name}'验证失败: {result}",
                         error_code=APIError.VALIDATION_ERROR,
                         status_code=400
                     )
-            
+
             # 验证通过，继续处理请求
             return await handler(request, *args, **kwargs)
-        
+
         return wrapper
-    
-    return decorator 
+
+    return decorator
+
+
+def extract_whitelisted(data: Any, allowed_fields: List[str]) -> Dict[str, Any]:
+    """
+    从请求体中按白名单提取字段（防 mass-assignment 的唯一入口）。
+
+    只有 ``allowed_fields`` 中列出的字段会被保留，其余字段（``is_admin``、
+    ``verified``、``deleted``、``id`` 等）一律丢弃，不会传给模型层。
+
+    Args:
+        data: 请求体数据（通常是 ``request.json``）
+        allowed_fields: 允许的字段名白名单
+
+    Returns:
+        Dict[str, Any]: 只含白名单字段的字典
+    """
+    if not isinstance(data, dict):
+        return {}
+
+    allowed = set(allowed_fields or [])
+    return {key: value for key, value in data.items() if key in allowed}
+
+
+def request_payload(request: Request) -> Dict[str, Any]:
+    """
+    读取请求体为字典；请求体不是合法 JSON 对象时返回空字典。
+
+    与 ``request.json`` 的区别：本函数不抛异常，且保证返回 dict。
+    """
+    try:
+        data = request.json
+    except Exception:
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def validate_fields(data: Dict[str, Any],
+                    rules: Dict[str, List[ValidationRule]]) -> Dict[str, List[str]]:
+    """
+    按规则表校验数据，返回 ``{字段: [错误信息, ...]}``；校验通过时返回空字典。
+
+    与 ``validate_request`` 的区别：本函数只做校验、不构造响应、不抛异常，
+    便于资源层把"白名单提取"和"规则校验"分两步做。
+
+    Args:
+        data: 待校验的数据（通常是白名单提取后的字典）
+        rules: 验证规则字典
+
+    Returns:
+        Dict[str, List[str]]: 每个字段的第一个错误信息
+    """
+    errors: Dict[str, List[str]] = {}
+
+    for field, field_rules in (rules or {}).items():
+        value = data.get(field)
+
+        for rule in field_rules:
+            result = rule.validate(value, field)
+
+            if result is not True:
+                errors.setdefault(field, []).append(result)
+                break
+
+    return errors
+
+
+def parse_pagination(request: Request, default_size: int = 20,
+                     max_size: int = 100) -> tuple:
+    """
+    解析分页参数，返回 ``(page, page_size)``；非法取值回退到默认值。
+    """
+    def _int(name, default):
+        raw = request.args.get(name)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    page = max(1, _int("page", 1))
+    page_size = min(max(1, _int("page_size", default_size)), max_size)
+    return page, page_size
+
+
+def parse_bool_arg(request: Request, name: str) -> Any:
+    """
+    解析布尔查询参数；参数缺省时返回 ``None``，非法取值也返回 ``None``。
+    """
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return None
+
+    lowered = str(raw).strip().lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    return None 
