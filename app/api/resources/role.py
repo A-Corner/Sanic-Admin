@@ -34,6 +34,7 @@ from app.auth.permissions import (
     known_actions,
     validate_permissions_dict,
 )
+from app.api.resources.route_methods import register_view
 from app.models import Account, Role
 
 # 创建/更新角色时允许写入的字段（白名单）
@@ -551,26 +552,24 @@ class AccountRolesResource(HTTPMethodView):
 # 显式给出路由名：Sanic 23.6 禁止同名路由，同一个视图注册到多个 URI 时
 # 会得到相同的隐式名，必须逐条命名。
 #
-# **必须用 ``v1_bp.route(...)`` 而不是 ``v1_bp.add_route(...)``**：
-# ``Blueprint.add_route`` 遇到 ``HTTPMethodView`` 处理器时，会**忽略传入的
-# ``methods`` 参数**，改成"按视图类实现了哪些方法来算路由支持哪些方法"。
-# 于是 ``POST /roles/<id>`` 会被注册成支持（``RoleResource`` 实现了 put/delete），
-# 而 ``RoleResource.put`` 要求 ``role_id`` 形参 —— 命中时缺参数 → **500**。
-#
-# ``Blueprint.route(uri, methods=[...])`` 原样使用传入的 methods，
-# 方法不匹配时框架直接返回 **405 Method Not Allowed**。
+# 用 ``register_view``（而不是 ``v1_bp.add_route``）：后者遇到
+# ``HTTPMethodView`` 处理器时会**忽略传入的 methods**，按视图类反推方法集，
+# 导致 ``POST /roles/<id>`` 命中需要 ``role_id`` 的处理函数 → 缺参数 → **500**；
+# 而 Sanic 23.6 对**动态路径**的方法不匹配会把 ``NoMethod`` 转成 ``NotFound``
+# → **404**（谎报不存在）。``register_view`` 用 ``Blueprint.route`` 原样注册
+# 方法，并给其余方法挂 405 兜底，详见 ``app/api/resources/route_methods.py``。
 role_resource = RoleResource()
 role_members_resource = RoleMembersResource()
 account_roles_resource = AccountRolesResource()
 
-v1_bp.route("/roles/<role_id:int>", methods=["GET", "PUT", "DELETE"],
-            name="role_detail")(role_resource.as_view())
-v1_bp.route("/roles", methods=["GET", "POST"], name="role_list")(role_resource.as_view())
-v1_bp.route("/roles/<role_id:int>/members", methods=["GET", "POST"],
-            name="role_members")(role_members_resource.as_view())
-v1_bp.route("/roles/<role_id:int>/members/<account_id:int>", methods=["DELETE"],
-            name="role_member_detail")(role_members_resource.as_view())
-v1_bp.route("/accounts/<account_id:int>/roles", methods=["GET", "POST"],
-            name="account_roles")(account_roles_resource.as_view())
-v1_bp.route("/accounts/<account_id:int>/roles/<role_id:int>", methods=["DELETE"],
-            name="account_role_detail")(account_roles_resource.as_view())
+register_view(v1_bp, "/roles/<role_id:int>", role_resource,
+              ["GET", "PUT", "DELETE"], "role_detail")
+register_view(v1_bp, "/roles", role_resource, ["GET", "POST"], "role_list")
+register_view(v1_bp, "/roles/<role_id:int>/members", role_members_resource,
+              ["GET", "POST"], "role_members")
+register_view(v1_bp, "/roles/<role_id:int>/members/<account_id:int>",
+              role_members_resource, ["DELETE"], "role_member_detail")
+register_view(v1_bp, "/accounts/<account_id:int>/roles", account_roles_resource,
+              ["GET", "POST"], "account_roles")
+register_view(v1_bp, "/accounts/<account_id:int>/roles/<role_id:int>",
+              account_roles_resource, ["DELETE"], "account_role_detail")

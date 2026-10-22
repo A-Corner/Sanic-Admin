@@ -33,6 +33,7 @@ from app.api.validators import (
 )
 from app.auth.authentication import authenticate_request
 from app.auth.authorization import check_permissions, has_permission
+from app.api.resources.route_methods import register_view
 from app.models import Account, Profile
 
 # 允许写入的资料字段（白名单）；account_id/id 等一律不接受
@@ -380,16 +381,16 @@ class MyProfileResource(HTTPMethodView):
 # 显式给出路由名：Sanic 23.6 禁止同名路由，同一个视图注册到多个 URI 时
 # 会得到相同的隐式名，必须逐条命名。
 #
-# **必须用 ``v1_bp.route(...)`` 而不是 ``v1_bp.add_route(...)``**：
-# ``Blueprint.add_route`` 遇到 ``HTTPMethodView`` 处理器时会**忽略传入的
-# ``methods``**，按视图类实现的方法反推，导致路径上出现不该有的方法，
-# 命中时缺参数 → **500**。``Blueprint.route`` 原样使用传入的 methods，
-# 方法不匹配时返回 **405**。
+# 用 ``register_view``（而不是 ``v1_bp.add_route``）：后者遇到
+# ``HTTPMethodView`` 处理器时会**忽略传入的 methods**，按视图类反推方法集，
+# 导致路径上出现不该有的方法，命中时缺参数 → **500**；而 Sanic 23.6 对
+# **动态路径**的方法不匹配会把 ``NoMethod`` 转成 ``NotFound`` → **404**。
+# ``register_view`` 用 ``Blueprint.route`` 原样注册方法，并给其余方法挂 405
+# 兜底，详见 ``app/api/resources/route_methods.py``。
 profile_resource = ProfileResource()
 my_profile_resource = MyProfileResource()
 
-v1_bp.route("/profiles/<profile_id:int>", methods=["GET", "PUT"],
-            name="profile_detail")(profile_resource.as_view())
-v1_bp.route("/profiles", methods=["GET"], name="profile_list")(profile_resource.as_view())
-v1_bp.route("/me/profile", methods=["GET", "PUT"], name="my_profile")(
-    my_profile_resource.as_view())
+register_view(v1_bp, "/profiles/<profile_id:int>", profile_resource,
+              ["GET", "PUT"], "profile_detail")
+register_view(v1_bp, "/profiles", profile_resource, ["GET"], "profile_list")
+register_view(v1_bp, "/me/profile", my_profile_resource, ["GET", "PUT"], "my_profile")
