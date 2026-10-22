@@ -291,9 +291,12 @@ class RoleMembersResource(HTTPMethodView):
                                      status_code=404)
 
         page, page_size = parse_pagination(request)
-        members = await role.accounts.filter(deleted=False).order_by("id")
-        total = await members.count()
-        page_items = await members.offset((page - 1) * page_size).limit(page_size)
+        # 注意：不能先 await 再当 QuerySet 用——await queryset 求值成 list 后，
+        # list.count() 是无参方法（统计元素个数），会抛 TypeError 导致 500。
+        # 这里保留未求值的 QuerySet，用 SQL COUNT 取总数，再按 id 排序分页。
+        query = role.accounts.filter(deleted=False)
+        total = await query.count()
+        page_items = await query.order_by("id").offset((page - 1) * page_size).limit(page_size)
 
         from app.api.resources.account import account_info
         items = [account_info(a) for a in page_items]
