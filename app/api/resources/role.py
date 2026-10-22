@@ -29,7 +29,11 @@ from app.api.validators import (
     validate_fields,
 )
 from app.auth.authorization import check_permissions, get_account_permissions
-from app.auth.permissions import validate_permissions_dict
+from app.auth.permissions import (
+    all_resources,
+    known_actions,
+    validate_permissions_dict,
+)
 from app.models import Account, Role
 
 # 创建/更新角色时允许写入的字段（白名单）
@@ -108,6 +112,90 @@ async def _assignable(actor: Account, role: Role) -> Optional[str]:
         return None
 
     return _permissions_exceed(await _granted_permissions(actor), role.permissions or {})
+
+
+# ---------------------------------------------------------------------------
+# 管理员保护（统一判定）
+# ---------------------------------------------------------------------------
+#
+# 安全要点：受保护的管理员账户不能被非管理员改动。
+#
+# "管理员"有两种形态，**任一**成立即视为受保护的管理员：
+#
+# 1. ``Account.is_admin`` 为 True —— 显式管理员标志；
+# 2. 持有某个**授予了全部权限的角色**（角色的 permissions 覆盖注册表全部资源）——
+#    这种账户在权限上等同于管理员，即使 ``is_admin`` 为 False。
+#
+# 只看 (1) 是不够的：第 2 类账户同样能改角色、改账户，若不被保护，
+# 就能被仅持 ``account:update`` 的非管理员账户撤销 admin 角色 / 改邮箱，
+# 形成提权路径。
+
+def _role_grants_all_permissions(role: Role) -> bool:
+    """
+    该角色是否授予了注册表里的**全部**权限。
+
+    判定口径：角色 permissions 覆盖注册表的每个资源，且每个资源的动作
+    为 ``all`` 或该资源的全部已知动作。
+    """
+    permissions = role.permissions or {}
+    if not isinstance(permissions, dict):
+        return False
+
+    for resource in all_resources():
+        actions = permissions.get(resource)
+        if actions is None:
+            return False
+        if not isinstance(actions, (list, tuple, set)):
+            return False
+
+        normalized = {str(action) for action in actions}
+        allowed = set(known_actions(resource))
+        if "all" not in normalized:
+            if not allowed or not allowed.issubset(normalized):
+                return False
+
+    return True
+
+
+async def is_protected_admin(account: Account) -> bool:
+    """
+    该账户是否是**受保护的管理员**（不允许被非管理员改动）。
+
+    满足任一即返回 True：
+
+    * ``account.is_admin`` 为 True；
+    * 账户持有某个授予了全部权限的角色。
+
+    Args:
+        account: 目标账户
+
+    Returns:
+        bool: 是否为受保护的管理员
+    """
+    if account.is_admin:
+        return True
+
+    roles = await account.roles.filter(deleted=False).all()
+    return any(_role_grants_all_permissions(role) for role in roles)
+
+
+async def actor_may_modify(actor: Account, target: Account) -> bool:
+    """
+    ``actor`` 是否有权改动 ``target``。
+
+    规则（与"受保护的管理员"判定**对称**）：
+
+    * **管理员**（``is_admin`` 标志 或 持有全权限角色）可以改动任何人；
+    * 非管理员**不能**改动受保护的管理员。
+
+    对称性保证"管理员自己可以改动自己"：若 actor 持有全权限角色，
+    它本身就是管理员形态，可以像管理员一样操作；若不是，则它不是受保护
+    的管理员，改动自己（target=actor）自然放行，不会把自己锁死。
+    """
+    if await is_protected_admin(actor):
+        return True
+
+    return not await is_protected_admin(target)
 
 
 class RoleResource(HTTPMethodView):
@@ -332,6 +420,13 @@ class RoleMembersResource(HTTPMethodView):
             return APIResponse.error(message="部分账户不存在", error_code="ACCOUNTS_NOT_FOUND",
                                      status_code=404)
 
+        # 目标账户检查：非管理员不得把受保护的管理员加入/移出角色
+        for account in accounts:
+            if not await actor_may_modify(actor, account):
+                return APIResponse.error(
+                    message=f"无权改动管理员账户 '{account.username}' 的角色",
+                    error_code=APIError.FORBIDDEN, status_code=403)
+
         for account in accounts:
             await role.accounts.add(account)
 
@@ -340,6 +435,7 @@ class RoleMembersResource(HTTPMethodView):
     @check_permissions("role", "update")
     async def delete(self, request: Request, role_id: int, account_id: int):
         """从角色中移除成员。"""
+        actor = request.ctx.authentication_session.bearer
         role = await Role.filter(id=role_id, deleted=False).first()
         if role is None:
             return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND",
@@ -349,6 +445,13 @@ class RoleMembersResource(HTTPMethodView):
         if account is None:
             return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
                                      status_code=404)
+
+        # 目标账户检查：非管理员不得把受保护的管理员移出角色
+        # （否则可借"移除 admin 角色"变相把管理员降权）
+        if not await actor_may_modify(actor, account):
+            return APIResponse.error(
+                message=f"无权改动管理员账户 '{account.username}' 的角色",
+                error_code=APIError.FORBIDDEN, status_code=403)
 
         if not await role.accounts.filter(id=account_id).exists():
             return APIResponse.error(message=f"账户 '{account.username}' 不是角色 '{role.name}' 的成员",
@@ -388,7 +491,7 @@ class AccountRolesResource(HTTPMethodView):
             return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
                                      status_code=404)
 
-        if account.is_admin and not actor.is_admin:
+        if not await actor_may_modify(actor, account):
             return APIResponse.error(message="无权修改管理员账户的角色", error_code=APIError.FORBIDDEN,
                                      status_code=403)
 
@@ -427,7 +530,7 @@ class AccountRolesResource(HTTPMethodView):
             return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
                                      status_code=404)
 
-        if account.is_admin and not actor.is_admin:
+        if not await actor_may_modify(actor, account):
             return APIResponse.error(message="无权修改管理员账户的角色", error_code=APIError.FORBIDDEN,
                                      status_code=403)
 
@@ -447,19 +550,27 @@ class AccountRolesResource(HTTPMethodView):
 # 注册路由
 # 显式给出路由名：Sanic 23.6 禁止同名路由，同一个视图注册到多个 URI 时
 # 会得到相同的隐式名，必须逐条命名。
+#
+# **必须用 ``v1_bp.route(...)`` 而不是 ``v1_bp.add_route(...)``**：
+# ``Blueprint.add_route`` 遇到 ``HTTPMethodView`` 处理器时，会**忽略传入的
+# ``methods`` 参数**，改成"按视图类实现了哪些方法来算路由支持哪些方法"。
+# 于是 ``POST /roles/<id>`` 会被注册成支持（``RoleResource`` 实现了 put/delete），
+# 而 ``RoleResource.put`` 要求 ``role_id`` 形参 —— 命中时缺参数 → **500**。
+#
+# ``Blueprint.route(uri, methods=[...])`` 原样使用传入的 methods，
+# 方法不匹配时框架直接返回 **405 Method Not Allowed**。
 role_resource = RoleResource()
 role_members_resource = RoleMembersResource()
 account_roles_resource = AccountRolesResource()
 
-v1_bp.add_route(role_resource.as_view(), "/roles/<role_id:int>",
-                methods=["GET", "PUT", "DELETE"], name="role_detail")
-v1_bp.add_route(role_resource.as_view(), "/roles", methods=["GET", "POST"], name="role_list")
-v1_bp.add_route(role_members_resource.as_view(), "/roles/<role_id:int>/members",
-                methods=["GET", "POST"], name="role_members")
-v1_bp.add_route(role_members_resource.as_view(),
-                "/roles/<role_id:int>/members/<account_id:int>", methods=["DELETE"],
-                name="role_member_detail")
-v1_bp.add_route(account_roles_resource.as_view(), "/accounts/<account_id:int>/roles",
-                methods=["GET", "POST"], name="account_roles")
-v1_bp.add_route(account_roles_resource.as_view(), "/accounts/<account_id:int>/roles/<role_id:int>",
-                methods=["DELETE"], name="account_role_detail")
+v1_bp.route("/roles/<role_id:int>", methods=["GET", "PUT", "DELETE"],
+            name="role_detail")(role_resource.as_view())
+v1_bp.route("/roles", methods=["GET", "POST"], name="role_list")(role_resource.as_view())
+v1_bp.route("/roles/<role_id:int>/members", methods=["GET", "POST"],
+            name="role_members")(role_members_resource.as_view())
+v1_bp.route("/roles/<role_id:int>/members/<account_id:int>", methods=["DELETE"],
+            name="role_member_detail")(role_members_resource.as_view())
+v1_bp.route("/accounts/<account_id:int>/roles", methods=["GET", "POST"],
+            name="account_roles")(account_roles_resource.as_view())
+v1_bp.route("/accounts/<account_id:int>/roles/<role_id:int>", methods=["DELETE"],
+            name="account_role_detail")(account_roles_resource.as_view())

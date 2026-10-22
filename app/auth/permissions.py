@@ -185,21 +185,33 @@ def effective_permissions(granted: Dict[str, Iterable[str]]) -> Dict[str, Set[st
 #: * ``system:database:connectionpool:manage`` -> 蕴含 ``system:database:connectionpool``（读连接池）；
 #: * ``system:admin`` 不会蕴含任何子资源（``admin`` 不是 manage 型动作）；
 #: * ``system:database:query`` 不会蕴含 ``connectionpool``（query 不是 manage 型动作）。
+#:
+#: **蕴含是单向的**：只有"写"推出"读"，绝不反向。
+#: 只读授权（``{"system:database": ["connectionpool"]}``）**不得**推出写权限
+#: （``connectionpool:manage``），否则只读账户即可执行写操作（潜伏越权）。
 IMPLYING_ACTIONS = ("manage",)
 
 
-def _implied_path(path: str) -> Optional[str]:
+def _implied_paths(path: str) -> Tuple[str, ...]:
     """
-    路径 ``X:manage`` -> 被蕴含的 ``X``；非 manage 型动作返回 None。
+    授权侧动作 ``X:manage`` -> 它蕴含的读动作路径集合；非 manage 型动作返回空元组。
+
+    对 ``X = "connectionpool"``，蕴含的读动作有**两种拼法**：
+
+    * ``"connectionpool"`` —— 裸动作名，这是 ``requires_permission(
+      "system:database:connectionpool")`` 拆分后得到的实际请求形态
+      （resource=``system:database``、action=``connectionpool``）；
+    * ``"connectionpool:read"`` —— 显式的 ``:read`` 形态，
+      对应 ``has_permission(account, "system:database:connectionpool", "read")``。
     """
     if ":" not in path:
-        return None
+        return ()
 
     head, _, tail = path.rpartition(":")
     if tail not in IMPLYING_ACTIONS or not head:
-        return None
+        return ()
 
-    return head
+    return head, f"{head}:read"
 
 
 def permission_granted(effective: Dict[str, Set[str]], resource: str,
@@ -212,10 +224,21 @@ def permission_granted(effective: Dict[str, Set[str]], resource: str,
     * 动作精确命中即通过；
     * 该基资源带 ``all`` 通配则通过；
     * 存在 ``子资源:all`` 通配且动作落在该子资源下也通过；
-    * **蕴含规则**：bucket 中存在 ``X:manage`` 时，``X`` 也被授予（manage 蕴含 read）。
-      这让 ``{"system:database": ["connectionpool"]}`` 与
-      ``{"system:database:connectionpool": ["manage"]}`` 两种授权写法
-      都能覆盖连接池的读与写。
+    * **蕴含规则（单向）**：bucket 中存在 ``X:manage`` 时，请求的只读动作
+      ``X``（或 ``X:read``）也通过（manage 蕴含 read：能改就能看）。
+
+    蕴含**只从 manage 推出 read**，不存在反向蕴含：
+    bucket 中只有只读 ``X`` 时，请求写动作 ``X:manage`` **被拒**
+    （否则只读账户即可执行写操作 = 潜伏越权）。
+
+    因此：
+
+    * ``{"system:database": ["connectionpool"]}`` → 只读连接池通过，
+      写连接池（``connectionpool:manage``）**被拒**；
+    * ``{"system:database": ["connectionpool:manage"]}`` → 读写**都通过**；
+    * ``{"system:database:connectionpool": ["manage"]}``（存量别名）
+      → 读写**都通过**；
+    * ``system:admin`` 不蕴含任何其他动作；``query`` 不蕴含 ``connectionpool``。
     """
     base, path = normalize_permission(resource, action)
     bucket = effective.get(base)
@@ -233,15 +256,14 @@ def permission_granted(effective: Dict[str, Set[str]], resource: str,
             if path.startswith(prefix + ":"):
                 return True
 
-    # 蕴含规则：X:manage 蕴含 X
-    implied = _implied_path(path)
-    if implied is not None and implied in bucket:
-        return True
-
-    # 反向蕴含：bucket 中存在 "X:manage" 时，请求的 "X" 也算被授予
+    # 蕴含规则（单向，只从"写"推出"读"）：
+    # bucket 中存在 "X:manage" 时，请求的只读动作 "X" 也被授予（manage 蕴含 read）。
+    #
+    # 注意方向：这里是**授权侧**的 "X:manage" 推出**请求侧**的 "X"，
+    # 而不是反过来。授权侧只有 "X"（只读）时，请求 "X:manage"（写）**不被授予**，
+    # 否则只读账户即可执行写操作（潜伏越权）。
     for entry in bucket:
-        entry_implied = _implied_path(entry)
-        if entry_implied is not None and entry_implied == path:
+        if path in _implied_paths(entry):
             return True
 
     return False

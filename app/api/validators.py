@@ -495,10 +495,23 @@ def validate_fields(data: Dict[str, Any],
     return errors
 
 
+#: 分页页码上限。
+#:
+#: 计算 OFFSET 时用的是 ``(page - 1) * page_size``；页码无上限时 OFFSET 可以
+#: 超过 SQLite 的 64 位 INTEGER 上限，ORM 拼参数直接抛
+#: ``OverflowError: Python int too large to convert to SQLite INTEGER`` → **500**。
+#: 这里把页码钳制到上限，使 OFFSET 始终落在安全范围内
+#: （上限 10^6 × 每页上限 100 → OFFSET < 10^8）。
+MAX_PAGE = 1_000_000
+
+
 def parse_pagination(request: Request, default_size: int = 20,
                      max_size: int = 100) -> tuple:
     """
     解析分页参数，返回 ``(page, page_size)``；非法取值回退到默认值。
+
+    页码会被钳制到 ``MAX_PAGE``：超大页码会让 OFFSET 溢出数据库整数范围，
+    导致分页查询抛 OverflowError（500）。
     """
     def _int(name, default):
         raw = request.args.get(name)
@@ -507,7 +520,7 @@ def parse_pagination(request: Request, default_size: int = 20,
         except (TypeError, ValueError):
             return default
 
-    page = max(1, _int("page", 1))
+    page = min(max(1, _int("page", 1)), MAX_PAGE)
     page_size = min(max(1, _int("page_size", default_size)), max_size)
     return page, page_size
 
