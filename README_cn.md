@@ -50,6 +50,17 @@ docker compose up -d --build
 
 访问 **http://localhost:22230**（宿主机映射端口；容器内为 22222）。Redis 是可选 profile：`CACHE_TYPE=redis` 时用 `docker compose --profile redis up -d` 启用。
 
+**受限网络（无法直连 pypi.org）**：在 `.env` 里设 `PIP_INDEX_URL` 指向可用的镜像源即可换源，
+然后照常执行 `docker compose up -d --build`，**无需手工加 `--build-arg`**：
+
+```bash
+# 在 .env 里加一行（示例为阿里云镜像源，按所在网络选可用的）
+echo "PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/" >> .env
+docker compose up -d --build
+```
+
+不设这一行时用的是官方源 `https://pypi.org/simple`，默认行为不变。
+
 容器内固定 `SANIC_ENV=production`，因此密钥没通过 `.env` 真正提供时容器会直接拒绝启动——**「容器起来了」本身就是配置已正确提供的证据**。
 
 ### 方式二：pip（已实测）
@@ -128,7 +139,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **当前测试状态**：`pytest` 报 **`157 passed`，0 失败，0 错误**（收集 157 个用例，约 65 秒；加 `--cov` 约 80 秒）。`app/` 的覆盖率为 **52%**，用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
+> **当前测试状态**：`pytest` 报 **`171 passed`，0 失败，0 错误**（收集 171 个用例，约 65 秒；加 `--cov` 约 80 秒）。`app/` 的覆盖率为 **52%**，用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
 
 ---
 

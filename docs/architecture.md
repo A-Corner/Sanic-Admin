@@ -150,26 +150,27 @@ api_bp = Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api') 
 `AttributeError`，导致整个 `app.api` 包导入失败、API v1 蓝图整体降级。
 M1 已改用上述写法并删除了 `app/api/routes.py`、`app/api/example.py`。
 
-实测：蓝图正常注册，生成的 OpenAPI 规范含 **67 条 path**（v0.2.1 候选 `d9e284a` 实测；
+实测：蓝图正常注册，生成的 OpenAPI 规范含 **68 条 path**（v0.2.1 候选 `944a9e2` 实测；
 v0.2.0 的 `a0a6b27` 为 57 条）；
-`create_app('testing')` 的路由表共 **115 条路由**（**76 个不同 path**，其中 39 个在 `/api/v1` 下）。
+`create_app('testing')` 的路由表共 **116 条路由**（**77 个不同 path**，其中 39 个在 `/api/v1` 下）。
 
-> **三个数字各指什么，别混用**（v0.2.1 候选 `d9e284a` 实测）：
+> **三个数字各指什么，别混用**（v0.2.1 候选 `944a9e2` 实测）：
 >
 > | 数字 | 含义 | v0.2.0 | v0.2.1 |
 > |---|---|---|---|
-> | **115 / 80** | `app.router.routes` 的**路由条数** | 80 | 115 |
-> | **76 / 66** | **去重后**的 path 总数 | 66 | 76 |
-> | **67 / 57** | **OpenAPI 规范内**的 path 数 | 57 | 67 |
+> | **116 / 80** | `app.router.routes` 的**路由条数** | 80 | 116 |
+> | **77 / 66** | **去重后**的 path 总数 | 66 | 77 |
+> | **68 / 57** | **OpenAPI 规范内**的 path 数 | 57 | 68 |
 >
-> 76 与 67 数值接近但含义不同：去重 path 含 9 个文档自身的路径
+> 77 与 68 数值接近但含义不同：去重 path 含 9 个文档自身的路径
 > （`/docs`、`/docs/models`、`/docs/paths`、`/docs/redoc`、`/docs/tags`、`/redoc`、
 > `/swagger`、`/swagger.json`、`/swagger/index.html`），它们被 `_SKIP_PREFIXES` 排除在规范外。
-> 另注意 **66（去重 path，v0.2.0）≠ 67（OpenAPI path，v0.2.1）**——数字相近，不同含义。
+> 另注意 **66（去重 path，v0.2.0）≠ 68（OpenAPI path，v0.2.1）**——数字相近，不同含义。
 >
-> 这些数字**绑定具体 commit**：`114 / 75 / 66` 是 v0.2.1 候选 `aa992f3` 的值，
-> v0.2.1 为修复 AMIS 静态挂载缺陷新增了 `public/` 子目录与 `/static` 的目录处理器，
-> 数字随之变为 `115 / 76 / 67`。改动路由表后须重测并同步本文。
+> 这些数字**绑定具体 commit `944a9e2`**。v0.2.1 在此之前修过几轮 AMIS 静态挂载，
+> 每轮都会改动路由表，数字随之变化（`aa992f3` 时是 114/75/66，
+> 修 `public/` 与裸目录 500 后是 115/76/67，恢复裸 `/amis` 为 404 后是 116/77/68）。
+> **改动路由表后须重测并同步本文。**
 
 另有 `_ensure_unique_route_names()`（`app/api/__init__.py:27-55`）为同一个视图注册到多个 URL 时
 补唯一路由名——Sanic 23.6 遇到重名路由会直接抛 `ServerError` 导致进程起不来。
@@ -276,7 +277,7 @@ development / testing 下实测（`ENABLE_API_DOCS=True`）：
 | 端点 | 结果 |
 |---|---|
 | `GET /swagger` | 302 → `/swagger/index.html` → **200**（Swagger UI） |
-| `GET /swagger.json` | **200**，OpenAPI 3.0.3 规范，**67 条 path** |
+| `GET /swagger.json` | **200**，OpenAPI 3.0.3 规范，**68 条 path** |
 | `GET /redoc` | **200**（ReDoc） |
 | `GET /docs` | 302 → `/swagger`（别名） |
 | `GET /docs/models` `/docs/tags` `/docs/paths` `/docs/redoc` | **200** |
@@ -291,7 +292,7 @@ production 下（`ENABLE_API_DOCS=False`，实测）：
 
 **注意**：production 下能访问到的 `/docs` 与 `/docs/openapi.json` 来自 **sanic-ext**，
 是**另一套**生成器（标题 `"API"`），与 `app/docs/` 产出的（标题 `"SanicAdmin"`，
-67 条 path）**不是同一份**。**规范以 `/swagger.json` 为准**；production 想暴露本模块的规范
+68 条 path）**不是同一份**。**规范以 `/swagger.json` 为准**；production 想暴露本模块的规范
 需显式设 `ENABLE_API_DOCS=true`。
 
 ### 2.7 `app/middleware` —— 中间件
@@ -961,8 +962,8 @@ const DENY = new Set(['server.js', 'package.json', 'package-lock.json', 'nodemon
 
 ## 7. 已知缺口（M1 前后对比）
 
-**【已实测】** 在 v0.2.1 候选 `aa992f3` 上实际启动应用（`create_app('testing')`），
-路由表共 **115 条路由 / 76 个不同 path**，其中 **39 个 path 在 `/api/v1` 下**，
+**【已实测】** 在 v0.2.1 候选 `944a9e2` 上实际启动应用（`create_app('testing')`），
+路由表共 **116 条路由 / 77 个不同 path**，其中 **39 个 path 在 `/api/v1` 下**，
 另有 `/api/database/*`、`/api/compression/*`、`/auth/*`、`/capt/*`、`/health`、
 `/swagger*`、`/redoc`、`/docs/*`、`/static/*`、`/amis/*`。
 
@@ -983,7 +984,7 @@ M1 之前的基线上，`/api/v1/*` **全部不存在**，启动日志给出两�
 
 | # | 问题 | 位置 | 状态（截至 `8750d51`） |
 |---|---|---|---|
-| 1 | `Blueprint.group()` 在 sanic 23.6.0 中无 `add_blueprint` | `app/api/__init__.py:24` | **已修复**：改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`；实测 API v1 正常挂载，OpenAPI 规范 67 条 path |
+| 1 | `Blueprint.group()` 在 sanic 23.6.0 中无 `add_blueprint` | `app/api/__init__.py:24` | **已修复**：改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')`；实测 API v1 正常挂载，OpenAPI 规范 68 条 path |
 | 2 | `app/utils/` 包不存在（`from app.utils.validator import validate_request`） | `app/api/resources/database.py`、`compression.py` | **已修复**：两个模块已整体重写，改用 `app/api/responses.py` 的 `APIResponse` / `APIError`，各自实现 `_bad_request()` 做参数校验（`database.py:34`、`compression.py:26`）——**并未**改用 `app/api/validators.py` |
 | 3 | `from app.models import File` | `dashboard.py:11`、`dashboard_user.py:11` | **已修复**：模型名为 `UploadedFile`；`dashboard_user.py:11` 只导入 `Account` / `Role` / `OperationLog` |
 | 4 | `from app.api.base import response`（`response` 在 `app/api/base.py` 中不存在） | `database.py:16`、`compression.py:16` | **已修复**：改用 `from app.api.responses import APIResponse, APIError` |
@@ -1044,7 +1045,7 @@ main.py  requirements.txt  SECURITY.md  .github/workflows/ci.yml  tests/conftest
 | 实测项 | 结果 |
 |---|---|
 | `import app.api` | ✅ 成功（无 `BlueprintGroup.add_blueprint` 报错） |
-| `create_app('testing')` 后的完整路由表 | 115 条路由 / 76 个不同 path，其中 39 个在 `/api/v1` 下 |
+| `create_app('testing')` 后的完整路由表 | 116 条路由 / 77 个不同 path，其中 39 个在 `/api/v1` 下 |
 | OpenAPI 规范 path 数 | **66**（`GET /swagger.json` 实测） |
 | `app.config` 生效值（development） | `ENV=development`、`DEBUG=True`、`CACHE_TYPE=memory`、`DATABASE_URL=sqlite://<root>/sanic_admin_dev.sqlite3`、`CORS_ALLOWED_ORIGINS=['*']`、`SESSION_COOKIE_SECURE=False`、`ROUTE_CACHE_ENABLED=False`、`DB_NAME=sanic_admin_dev` |
 | production 真正必填的环境变量 | 仅 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD`；`SECRET_KEY` / `PASSWORD_SALT` 缺失时**照常启动**（`app/config.py:330-331` 已是 `os.getenv(var, "")`） |
@@ -1053,7 +1054,7 @@ main.py  requirements.txt  SECURITY.md  .github/workflows/ci.yml  tests/conftest
 | `GET /health` | ✅ 200，`{"status":"ok","env":"testing"}` |
 | `GET /swagger` | 302 → `/swagger/index.html` → 200（Swagger UI） |
 | `GET /redoc` | ✅ 200 |
-| `GET /swagger.json` | ✅ 200，OpenAPI 3.0.3 规范，67 条 path |
+| `GET /swagger.json` | ✅ 200，OpenAPI 3.0.3 规范，68 条 path |
 | `GET /docs` | 302 → `/swagger` |
 | `GET /docs/openapi.json` | 404（`app/docs/routes.py` 不注册它；该路径由 sanic-ext 提供，只在 `ENABLE_API_DOCS=false` 时可达） |
 | `GET /amis/` / `GET /amis/login.html` | ✅ 200，登录页 HTML |
@@ -1066,7 +1067,7 @@ main.py  requirements.txt  SECURITY.md  .github/workflows/ci.yml  tests/conftest
 | gzip（3 KB 响应 + `Accept-Encoding: gzip`） | ✅ `Content-Encoding: gzip` + `Vary: Accept-Encoding`，且 CORS 头仍在 |
 | 小响应（< 1 KB） | ✅ 不压缩 |
 | 中间件顺序（dump `app.request_middleware` / `app.response_middleware`） | 请求：`handle_preflight → log_request → AuthMiddleware`；响应：`compression_middleware → log_response → add_cors_headers` |
-| `pytest` | 157 passed, 0 failed, 0 errors（`app/` 覆盖率 52%） |
+| `pytest` | 171 passed, 0 failed, 0 errors（`app/` 覆盖率 52%） |
 
 **未能实测**：production 下 Redis 不可达的 `ConfigError` 路径、MySQL / PostgreSQL 真实连接。
 这两条依据源码逻辑推断，已在对应章节标注。

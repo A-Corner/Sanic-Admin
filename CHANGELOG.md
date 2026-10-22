@@ -12,8 +12,8 @@
 v0.2.0 的维护补丁版本，不含新功能。除下列修复外，公开 API、配置契约与部署路径均未变化。
 完整的改动说明与实测证据见 [v0.2.1 发布说明](docs/release/v0.2.1-release-notes.md)。
 
-测试规模：**95 → 157 例**（新增 4 个测试文件）。路由表实测 **115 条路由 / 76 个不同 path**，
-OpenAPI 规范内 **67 条 path**。
+测试规模：**95 → 171 例**（新增 4 个测试文件）。路由表实测 **116 条路由 / 77 个不同 path**，
+OpenAPI 规范内 **68 条 path**。
 
 ### Fixed
 
@@ -24,16 +24,22 @@ OpenAPI 规范内 **67 条 path**。
   （`/api/v1/logs` 只剩 `get`，`/api/v1/settings` 保留真实的 `get` 与 `post`）。
   该缺陷在 v0.2.0 中同样存在（当时影响 14 个路径），不是 v0.2.1 引入的；
   v0.2.1 把兜底覆盖面扩到 39 个路径，因此一并修掉。
-  兜底路由本身仍在路由表中（115 条里的 39 条），只是不再写进规范。
+  兜底路由本身仍在路由表中（116 条里的 39 条），只是不再写进规范。
 
-**AMIS 静态挂载**（以下两项是 v0.2.1 引入的回归，v0.2.0 整目录托管时不存在）
+**AMIS 静态挂载**（以下三项是 v0.2.1 引入的回归，v0.2.0 整目录托管时不存在）
 - AMIS 的 `public/` 子目录未挂载，导致仪表盘 logo 加载 404、显示为破图
   （`amis/index.html` 引用 `public/logo.png`）。改为枚举磁盘上实际存在的子目录逐个挂载，
   不再使用硬编码清单，避免将来新增资源目录时再次漏挂。
 - AMIS 与 `/static` 的裸目录路径（如 `/amis/css/`）由 404 变成 500 ——
   Sanic 23.6 的 `DirectoryHandler` 会抛未捕获的 `IsADirectoryError`，
   等于开了一个无需鉴权即可外部触发的 500 面。改用返回 404 的目录处理器。
-  AMIS 的四个开发文件（`server.js`、`package.json`、`nodemon.json`、`README.md`）仍为 404。
+- 裸 `/amis` 由 404 变成 200 —— 入口页原用 `app.static("/amis/", login.html)` 挂载，
+  而 Sanic 会去掉 uri 尾部斜杠再注册，加上全局 `strict_slashes=False` 使
+  `/amis` 与 `/amis/` 等价，裸路径因此命中静态路由。改用 `strict_slashes=True` 的
+  普通路由精确控制：`/amis/` 返回登录页，`/amis/<path>` 提供文件，裸 `/amis` 不匹配
+  任何路由、返回 404（与 v0.2.0 一致）。这是 `docker-acceptance` 报红的根因。
+  AMIS 的四个开发文件（`server.js`、`package.json`、`nodemon.json`、`README.md`）仍为 404，
+  12 种路径穿越与编码绕过变体也全部 404。
 
 **系统设置接口**
 - `category: null` 触发 500（`category` 在模型里不允许 null，未捕获的校验异常）。
@@ -50,6 +56,10 @@ OpenAPI 规范内 **67 条 path**。
   不再 500。
 - 方法不匹配一律返回 405 并带 `Allow` 头（`log`、`cache`、`dashboard` 等资源也一并接入
   `register_view`）；405 兜底路由覆盖 39 个路径。
+- **Docker 构建支持换 pip 源**：`docker-compose.yml` 的 build 段新增
+  `args.PIP_INDEX_URL`。受限网络（无法直连 pypi.org）时在 `.env` 里设
+  `PIP_INDEX_URL` 指向可用镜像源即可，`docker compose up -d --build` 照常执行，
+  无需手工加 `--build-arg`。不设时仍用官方源 `https://pypi.org/simple`，默认行为不变。
 
 ### Notes
 
