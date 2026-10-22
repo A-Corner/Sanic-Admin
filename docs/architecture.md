@@ -997,7 +997,7 @@ app/models/profile.py            app/models/system_setting.py app/models/operati
 app/models/uploaded_file.py
 app/services/__init__.py         app/services/utils.py        app/services/exceptions.py
 app/web/__init__.py              app/web/routes.py
-amis/server.js  amis/package.json  amis/README.md  amis/pages/*.json  amis/site.html
+amis/server.js  amis/package.json  amis/README.md  amis/pages/*.json  amis/index.html  amis/login.html
 frontend/src/router/index.js  frontend/src/api/index.js  frontend/src/utils/request.js
 frontend/.env.development  frontend/.env.production
 main.py  requirements.txt  SECURITY.md  .github/workflows/ci.yml  tests/conftest.py
@@ -1008,21 +1008,30 @@ main.py  requirements.txt  SECURITY.md  .github/workflows/ci.yml  tests/conftest
 
 | 实测项 | 结果 |
 |---|---|
-| `import app.api` | ❌ `AttributeError: 'BlueprintGroup' object has no attribute 'add_blueprint'` |
-| `create_app()` 后的完整路由表 | 11 条（见 §7），无 `/api/v1/*` |
-| `app.config` 生效值 | `ENV=development`、`DEBUG=True`、`CACHE_TYPE=memory`、`DATABASE_URL=sqlite://<root>/sanic_admin_dev.sqlite3`、`CORS_ALLOWED_ORIGINS=['*']`、`SESSION_COOKIE_SECURE=False`、`ROUTE_CACHE_ENABLED=False`、`DB_NAME=sanic_admin_dev` |
-| production 缺 `SECRET_KEY` | ❌ `ConfigError: 生产环境必须通过环境变量 SECRET_KEY 提供应用密钥`（import 阶段即失败） |
-| production 密钥齐备 | ✅ `ENV=production`、`DEBUG=False`、`CACHE_TYPE=redis`、`CORS=[]`、`DB_NAME=sanic_admin_prod`、`SESSION_SECURE=True` |
+| `import app.api` | ✅ 成功（无 `BlueprintGroup.add_blueprint` 报错） |
+| `create_app('testing')` 后的完整路由表 | 80 条路由 / 66 个不同 path，其中 39 个在 `/api/v1` 下 |
+| OpenAPI 规范 path 数 | **57**（`GET /swagger.json` 实测） |
+| `app.config` 生效值（development） | `ENV=development`、`DEBUG=True`、`CACHE_TYPE=memory`、`DATABASE_URL=sqlite://<root>/sanic_admin_dev.sqlite3`、`CORS_ALLOWED_ORIGINS=['*']`、`SESSION_COOKIE_SECURE=False`、`ROUTE_CACHE_ENABLED=False`、`DB_NAME=sanic_admin_dev` |
+| production 真正必填的环境变量 | 仅 `JWT_PRIVATE_KEY` 与 `INITIAL_ADMIN_PASSWORD`；`SECRET_KEY` / `PASSWORD_SALT` 缺失时**照常启动**（`app/config.py:330-331` 已是 `os.getenv(var, "")`） |
 | `POST /auth/login` | ✅ 200，返回账户 JSON + `Set-Cookie: session=<JWT>` + `Authorization: Bearer <JWT>` |
-| `POST /auth/associated`（Cookie） | ✅ 200，返回会话列表 |
-| `POST /auth/associated`（Bearer） | ✅ 200，返回会话列表 |
 | `GET /auth/me` | 404（该路由不存在） |
+| `GET /health` | ✅ 200，`{"status":"ok","env":"testing"}` |
+| `GET /swagger` | 302 → `/swagger/index.html` → 200（Swagger UI） |
+| `GET /redoc` | ✅ 200 |
+| `GET /swagger.json` | ✅ 200，OpenAPI 3.0.3 规范，57 条 path |
+| `GET /docs` | 302 → `/swagger` |
+| `GET /docs/openapi.json` | 404（`app/docs/routes.py` 不注册它；该路径由 sanic-ext 提供，只在 `ENABLE_API_DOCS=false` 时可达） |
+| `GET /amis/` / `GET /amis/login.html` | ✅ 200，登录页 HTML |
+| `GET /amis`（无尾斜杠） | 404（Sanic `DirectoryHandler` 只对带尾斜杠的路径做 index 查找） |
+| `GET /uploads/anything` | 404（上传目录不再静态托管） |
+| `DELETE /api/v1/settings/key/x` | 404 而非 405（405 兜底只覆盖 account / role / profile 三个资源） |
+| `GET /api/v1/settings`（未认证） | 401 `AUTHENTICATION_ERROR` |
 | CORS（`Origin` 头 + `*` 白名单） | ✅ 返回 `Access-Control-Allow-Origin: *`，**不带** `Allow-Credentials` |
 | OPTIONS 预检 | ✅ 204 + CORS 头 |
 | gzip（3 KB 响应 + `Accept-Encoding: gzip`） | ✅ `Content-Encoding: gzip` + `Vary: Accept-Encoding`，且 CORS 头仍在 |
 | 小响应（< 1 KB） | ✅ 不压缩 |
-| 中间件顺序 | 请求：注册顺序；响应：注册逆序（Sanic 源码 `appendleft` + `_run_response_middleware` 的 break 语义印证） |
+| 中间件顺序（dump `app.request_middleware` / `app.response_middleware`） | 请求：`handle_preflight → log_request → AuthMiddleware`；响应：`compression_middleware → log_response → add_cors_headers` |
+| `pytest` | 95 passed, 0 failed, 0 errors（`app/` 覆盖率 50%） |
 
-**未能实测**：production 下 Redis 不可达的 `ConfigError` 路径、MySQL / PostgreSQL 真实连接、
-`/api/v1/*` 全套路由的行为（依赖 M1 修复导入问题）。
-这三条依据源码逻辑推断，已在对应章节标注。
+**未能实测**：production 下 Redis 不可达的 `ConfigError` 路径、MySQL / PostgreSQL 真实连接。
+这两条依据源码逻辑推断，已在对应章节标注。
