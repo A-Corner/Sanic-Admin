@@ -7,7 +7,8 @@ name: Sanic-Admin Docker Acceptance
 #   1. docker build 成功
 #   2. 带测试用环境变量 run 后，GET /health 返回 200
 #   3. POST /auth/login 能登录
-#   4. 缺 JWT_PRIVATE_KEY 时容器必须非零退出（production fail-closed）
+#   4. 管理界面由后端同源托管：/amis/ 与 /amis/login.html 返回 200
+#   5. 缺 JWT_PRIVATE_KEY 时容器必须非零退出（production fail-closed）
 #
 # ── 与 SA-OSS-M23 lane A 的对接契约 ─────────────────────────────────────
 # 本 job 只依赖下列约定，这些约定同时写在下面的常量注释里以便自洽阅读：
@@ -292,6 +293,37 @@ jobs:
             || { echo "::error::登录响应体缺少 status=0"; cat /tmp/login.json; exit 1; }
           echo "验收 3 通过：登录成功并返回会话数据"
 
+      - name: Assert the admin console is served by the backend
+        run: |
+          set -euo pipefail
+          PORT="${{ steps.port.outputs.port }}"
+
+          # 管理界面由后端同源托管在 /amis 下：/amis/（带尾斜杠）显示登录页，
+          # /amis/login.html 是同一个页面。裸 /amis 不带尾斜杠会返回 404，
+          # 因为 Sanic 的 DirectoryHandler 只在路径以 / 结尾时才做 index 查找。
+          for path in "/amis/" "/amis/login.html"; do
+            CODE="$(curl -s -o /tmp/amis.html -w '%{http_code}' --max-time 15 \
+              "http://127.0.0.1:${PORT}${path}")"
+            echo "GET ${path} -> HTTP ${CODE}"
+            if [ "$CODE" != "200" ]; then
+              echo "::error::${path} 期望 200，实际 ${CODE}"
+              ${{ steps.compose.outputs.cli }} -f docker-compose.yml -f docker-compose.ci.yml logs --no-color --tail 100 || true
+              exit 1
+            fi
+            grep -qi "<html" /tmp/amis.html \
+              || { echo "::error::${path} 返回的不是 HTML 登录页"; head -c 300 /tmp/amis.html; exit 1; }
+          done
+
+          # 裸 /amis 应返回 404 —— 这是 DirectoryHandler 的既定行为，断言它以防行为漂移。
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+            "http://127.0.0.1:${PORT}/amis")"
+          echo "GET /amis (无尾斜杠) -> HTTP ${CODE}"
+          if [ "$CODE" != "404" ]; then
+            echo "::error::裸 /amis 期望 404，实际 ${CODE}"
+            exit 1
+          fi
+          echo "验收 4 通过：管理界面由后端同源托管"
+
       - name: Assert production fail-closed when JWT_PRIVATE_KEY is missing
         id: failclosed
         run: |
@@ -367,7 +399,7 @@ jobs:
             echo "::error::缺 JWT_PRIVATE_KEY 时容器却以 0 退出，production 未 fail-closed"
             exit 1
           fi
-          echo "验收 4 通过：缺 JWT_PRIVATE_KEY 时容器非零退出（退出码 ${RC}）"
+          echo "验收 5 通过：缺 JWT_PRIVATE_KEY 时容器非零退出（退出码 ${RC}）"
           {
             echo "exit_code=${RC}"
             echo "note=退出码非零即通过；退出原因可能是缺密钥(ConfigError)，也可能是 B1d 的 BlueprintGroup 缺陷导致的生产环境拒绝降级启动。"
