@@ -2,312 +2,272 @@
 # -*- coding: utf-8 -*-
 
 """
-缓存管理API资源模块，提供缓存查询、清理等操作
+缓存管理 API 资源模块
+
+提供缓存统计、缓存键查询/修改/删除与路由缓存清理。
+
+安全要点：
+
+* 所有接口都要求 ``system:admin`` 权限（``@check_permissions("system", "admin")``），
+  未认证 401、权限不足 403。
+* 只使用缓存后端的公开接口（``app/cache/``），不改动后端实现。
+* 错误响应统一走 ``APIResponse.error``；不把内部异常 ``str(e)`` 透给用户，
+  也不用 ``APIError`` 抛异常（``APIError`` 是错误码常量类，不是异常）。
+* 路由名显式指定，避免同一个 view 类注册两次时 Sanic 报
+  ``Duplicate route names detected`` 导致应用起不来。
 """
+
+import json
+from typing import Any, Dict, List
 
 from sanic.request import Request
 from sanic.views import HTTPMethodView
-from app.api import APIResponse, v1_bp, APIError
+
+from app.api import APIResponse, v1_bp
+from app.api.responses import APIError
 from app.auth.authorization import check_permissions
 from app.cache import get_cache
 from app.cache.decorators import clear_route_cache
-from typing import Dict, Any, List, Optional
+
+#: 缓存键列表分页上限
+MAX_LIMIT = 1000
+
+#: 缓存键预览的最大长度
+PREVIEW_LENGTH = 50
+
+
+def _bad_request(message: str):
+    """统一的 400 响应。"""
+    return APIResponse.error(
+        message=message,
+        error_code=APIError.VALIDATION_ERROR,
+        status_code=400,
+    )
+
+
+def _not_found(message: str):
+    """统一的 404 响应。"""
+    return APIResponse.error(
+        message=message,
+        error_code=APIError.RESOURCE_NOT_FOUND,
+        status_code=404,
+    )
+
+
+def _server_error(message: str = "服务器内部错误"):
+    """统一的 500 响应（不暴露内部异常细节）。"""
+    return APIResponse.error(
+        message=message,
+        error_code=APIError.SERVER_ERROR,
+        status_code=500,
+    )
+
+
+def _positive_int(value: Any, default: int, maximum: int = None) -> int:
+    """把请求参数解析为正整数，非法时回落到默认值。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    if number < 1:
+        return default
+    return min(number, maximum) if maximum else number
+
+
+def _preview(value: Any) -> str:
+    """生成缓存值的简短预览。"""
+    if value is None:
+        return "None"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value[:PREVIEW_LENGTH] + "..." if len(value) > PREVIEW_LENGTH else value
+    if isinstance(value, (list, tuple)):
+        return f"{type(value).__name__}[{len(value)}]"
+    if isinstance(value, dict):
+        return f"dict{{{len(value)}}}"
+    return f"{type(value).__name__} object"
+
+
+def _safe_dump(value: Any) -> str:
+    """把缓存值转成可读字符串；序列化失败时回落到 repr。"""
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return repr(value)
 
 
 class CacheResource(HTTPMethodView):
-    """
-    缓存资源
-    
-    提供缓存信息查询和管理功能
-    """
-    
+    """缓存统计与清理：``/api/v1/cache``"""
+
+    @check_permissions("system", "admin")
     async def get(self, request: Request):
-        """
-        获取缓存统计信息
-        
-        Args:
-            request: Sanic请求对象
-            
-        Returns:
-            Response: Sanic响应，包含缓存统计信息
-        """
-        @check_permissions("system", "admin")
-        async def get_cache_stats(request):
+        """获取缓存统计信息。"""
+        try:
             cache = get_cache()
-            
-            # 获取缓存统计信息
             stats = cache.get_stats()
-            
-            # 获取缓存键数量
             keys_count = len(cache.keys())
-            
-            # 获取缓存类型
-            cache_type = request.app.config.get('CACHE_TYPE', 'memory')
-            
-            return APIResponse.success(data={
-                "cache_type": cache_type,
+        except Exception:
+            return _server_error("获取缓存统计信息失败")
+
+        return APIResponse.success(
+            data={
+                "cache_type": request.app.config.get("CACHE_TYPE", "memory"),
                 "stats": stats,
                 "keys_count": keys_count,
-                "enabled": request.app.config.get('USE_CACHE', True),
-                "route_cache_enabled": request.app.config.get('ROUTE_CACHE_ENABLED', True)
-            }, message="获取缓存统计信息成功")
-        
-        return await get_cache_stats(request)
-    
+                "enabled": request.app.config.get("USE_CACHE", True),
+                "route_cache_enabled": request.app.config.get("ROUTE_CACHE_ENABLED", True),
+            },
+            message="获取缓存统计信息成功",
+        )
+
+    @check_permissions("system", "admin")
     async def delete(self, request: Request):
-        """
-        清除缓存
-        
-        Args:
-            request: Sanic请求对象
-            
-        Returns:
-            Response: Sanic响应，表示操作结果
-        """
-        @check_permissions("system", "admin")
-        async def clear_cache(request):
-            pattern = request.args.get('pattern', '*')
-            cache_type = request.args.get('type', 'all')
-            
-            cache = get_cache()
-            
-            # 根据缓存类型选择清除方式
-            if cache_type == 'route':
-                # 清除路由缓存
-                keys_count = clear_route_cache(pattern)
-                message = f"已清除 {keys_count} 个路由缓存键"
-            elif cache_type == 'all':
-                # 清除所有缓存
-                cache.clear()
-                message = "已清除所有缓存"
+        """清理缓存（``type=route`` 只清路由缓存，``type=all`` 清全部）。"""
+        pattern = request.args.get("pattern", "*")
+        cache_type = request.args.get("type", "all")
+
+        try:
+            if cache_type == "route":
+                count = clear_route_cache(pattern)
+                message = f"已清除 {count} 个路由缓存键"
             else:
-                # 清除指定模式的缓存
-                keys = cache.keys(pattern)
-                keys_count = cache.delete_many(keys)
-                message = f"已清除 {keys_count} 个缓存键"
-            
-            return APIResponse.success(message=message)
-        
-        return await clear_cache(request)
+                cache = get_cache()
+                if cache_type == "all":
+                    cache.clear()
+                    message = "已清除所有缓存"
+                else:
+                    keys = cache.keys(pattern)
+                    count = cache.delete_many(keys)
+                    message = f"已清除 {count} 个缓存键"
+        except Exception:
+            return _server_error("清理缓存失败")
+
+        return APIResponse.success(message=message)
 
 
 class CacheKeysResource(HTTPMethodView):
-    """
-    缓存键资源
-    
-    提供缓存键查询功能
-    """
-    
+    """缓存键列表：``/api/v1/cache/keys``"""
+
+    @check_permissions("system", "admin")
     async def get(self, request: Request):
-        """
-        获取缓存键列表
-        
-        Args:
-            request: Sanic请求对象
-            
-        Returns:
-            Response: Sanic响应，包含缓存键列表
-        """
-        @check_permissions("system", "admin")
-        async def get_cache_keys(request):
-            pattern = request.args.get('pattern', '*')
-            limit = int(request.args.get('limit', '100'))
-            page = int(request.args.get('page', '1'))
-            
-            if page < 1:
-                page = 1
-            if limit < 1 or limit > 1000:
-                limit = 100
-                
-            # 计算分页
-            start = (page - 1) * limit
-            end = start + limit
-                
+        """按模式分页列出缓存键。"""
+        pattern = request.args.get("pattern", "*")
+        page = _positive_int(request.args.get("page"), 1)
+        limit = _positive_int(request.args.get("limit"), 100, MAX_LIMIT)
+
+        try:
             cache = get_cache()
-            
-            # 获取缓存键
             all_keys = cache.keys(pattern)
-            total = len(all_keys)
-            
-            # 分页
-            keys = all_keys[start:end]
-            
-            # 获取键的详细信息
-            keys_info = []
-            for key in keys:
-                ttl = cache.ttl(key)
-                
-                # 获取值的类型和预览
-                value = cache.get(key)
-                value_type = type(value).__name__
-                
-                # 创建值的简短预览
-                if value is None:
-                    preview = "None"
-                elif isinstance(value, (int, float, bool)):
-                    preview = str(value)
-                elif isinstance(value, str):
-                    preview = value[:50] + "..." if len(value) > 50 else value
-                elif isinstance(value, (list, tuple)):
-                    preview = f"{value_type}[{len(value)}]"
-                elif isinstance(value, dict):
-                    preview = f"dict{{{len(value)}}}"
-                else:
-                    preview = f"{value_type} object"
-                
-                keys_info.append({
-                    "key": key,
-                    "ttl": ttl,
-                    "expires_in": "永不过期" if ttl == -1 else f"{ttl}秒" if ttl >= 0 else "已过期",
-                    "value_type": value_type,
-                    "preview": preview
-                })
-            
-            return APIResponse.success(data={
+        except Exception:
+            return _server_error("获取缓存键列表失败")
+
+        total = len(all_keys)
+        start = (page - 1) * limit
+        page_keys = all_keys[start:start + limit]
+
+        keys_info: List[Dict[str, Any]] = []
+        for key in page_keys:
+            ttl = cache.ttl(key)
+            keys_info.append({
+                "key": key,
+                "ttl": ttl,
+                "expires_in": "永不过期" if ttl == -1 else (f"{ttl}秒" if ttl >= 0 else "已过期"),
+                "value_type": type(cache.get(key)).__name__,
+                "preview": _preview(cache.get(key)),
+            })
+
+        return APIResponse.success(
+            data={
                 "keys": keys_info,
                 "total": total,
                 "page": page,
                 "limit": limit,
-                "pages": (total + limit - 1) // limit
-            }, message="获取缓存键列表成功")
-            
-        return await get_cache_keys(request)
+                "pages": (total + limit - 1) // limit if limit else 0,
+            },
+            message="获取缓存键列表成功",
+        )
 
 
 class CacheKeyResource(HTTPMethodView):
-    """
-    单个缓存键资源
-    
-    提供单个缓存键的查询、修改和删除功能
-    """
-    
+    """单个缓存键：``/api/v1/cache/keys/<key>``"""
+
+    @check_permissions("system", "admin")
     async def get(self, request: Request, key: str):
-        """
-        获取单个缓存键的详细信息
-        
-        Args:
-            request: Sanic请求对象
-            key: 缓存键
-            
-        Returns:
-            Response: Sanic响应，包含缓存键详细信息
-        """
-        @check_permissions("system", "admin")
-        async def get_cache_key(request, key):
+        """获取单个缓存键的详细信息。"""
+        try:
             cache = get_cache()
-            
-            # 检查键是否存在
             if not cache.exists(key):
-                raise APIError(f"缓存键 '{key}' 不存在", status=404)
-            
-            # 获取键的详细信息
+                return _not_found(f"缓存键 '{key}' 不存在")
             value = cache.get(key)
             ttl = cache.ttl(key)
-            
-            # 获取值的类型
-            value_type = type(value).__name__
-            
-            # 获取值的字符串表示
-            try:
-                import json
-                if isinstance(value, (dict, list, tuple)):
-                    value_str = json.dumps(value, ensure_ascii=False, indent=2)
-                else:
-                    value_str = str(value)
-            except:
-                value_str = str(value)
-            
-            return APIResponse.success(data={
+        except Exception:
+            return _server_error("获取缓存键信息失败")
+
+        return APIResponse.success(
+            data={
                 "key": key,
                 "ttl": ttl,
-                "expires_in": "永不过期" if ttl == -1 else f"{ttl}秒" if ttl >= 0 else "已过期",
-                "value_type": value_type,
+                "expires_in": "永不过期" if ttl == -1 else (f"{ttl}秒" if ttl >= 0 else "已过期"),
+                "value_type": type(value).__name__,
                 "value": value,
-                "value_str": value_str
-            }, message="获取缓存键详细信息成功")
-            
-        return await get_cache_key(request, key)
-    
-    async def delete(self, request: Request, key: str):
-        """
-        删除单个缓存键
-        
-        Args:
-            request: Sanic请求对象
-            key: 缓存键
-            
-        Returns:
-            Response: Sanic响应，表示操作结果
-        """
-        @check_permissions("system", "admin")
-        async def delete_cache_key(request, key):
-            cache = get_cache()
-            
-            # 检查键是否存在
-            if not cache.exists(key):
-                raise APIError(f"缓存键 '{key}' 不存在", status=404)
-            
-            # 删除键
-            success = cache.delete(key)
-            
-            if success:
-                return APIResponse.success(message=f"缓存键 '{key}' 已删除")
-            else:
-                raise APIError(f"删除缓存键 '{key}' 失败", status=500)
-                
-        return await delete_cache_key(request, key)
-    
+                "value_str": _safe_dump(value),
+            },
+            message="获取缓存键详细信息成功",
+        )
+
+    @check_permissions("system", "admin")
     async def put(self, request: Request, key: str):
-        """
-        更新缓存键的过期时间
-        
-        Args:
-            request: Sanic请求对象
-            key: 缓存键
-            
-        Returns:
-            Response: Sanic响应，表示操作结果
-        """
-        @check_permissions("system", "admin")
-        async def update_cache_key(request, key):
-            # 获取请求数据
-            data = request.json
-            
-            if not data:
-                raise APIError("请求数据不能为空", status=400)
-                
-            # 获取过期时间
-            timeout = data.get('timeout')
-            
-            if timeout is None:
-                raise APIError("缺少必要参数：timeout", status=400)
-                
-            if not isinstance(timeout, int):
-                raise APIError("参数类型错误：timeout必须是整数", status=400)
-                
+        """更新缓存键的过期时间（``timeout<=0`` 表示设为永不过期）。"""
+        body = request.json
+        if not isinstance(body, dict) or not body:
+            return _bad_request("请求体必须是非空的 JSON 对象")
+
+        timeout = body.get("timeout")
+        if timeout is None:
+            return _bad_request("缺少必要参数：timeout")
+        if isinstance(timeout, bool) or not isinstance(timeout, int):
+            return _bad_request("参数类型错误：timeout 必须是整数")
+
+        try:
             cache = get_cache()
-            
-            # 检查键是否存在
             if not cache.exists(key):
-                raise APIError(f"缓存键 '{key}' 不存在", status=404)
-            
-            # 更新过期时间
+                return _not_found(f"缓存键 '{key}' 不存在")
+
             if timeout <= 0:
-                # 如果timeout <= 0，则设置为永不过期
-                value = cache.get(key)
-                success = cache.set(key, value)
+                success = cache.set(key, cache.get(key))
             else:
                 success = cache.expire(key, timeout)
-            
-            if success:
-                return APIResponse.success(message=f"缓存键 '{key}' 过期时间已更新")
-            else:
-                raise APIError(f"更新缓存键 '{key}' 过期时间失败", status=500)
-                
-        return await update_cache_key(request, key)
+        except Exception:
+            return _server_error("更新缓存键失败")
+
+        if not success:
+            return _server_error(f"更新缓存键 '{key}' 过期时间失败")
+        return APIResponse.success(message=f"缓存键 '{key}' 过期时间已更新")
+
+    @check_permissions("system", "admin")
+    async def delete(self, request: Request, key: str):
+        """删除单个缓存键。"""
+        try:
+            cache = get_cache()
+            if not cache.exists(key):
+                return _not_found(f"缓存键 '{key}' 不存在")
+            success = cache.delete(key)
+        except Exception:
+            return _server_error("删除缓存键失败")
+
+        if not success:
+            return _server_error(f"删除缓存键 '{key}' 失败")
+        return APIResponse.success(message=f"缓存键 '{key}' 已删除")
 
 
-# 注册路由
-v1_bp.add_route(CacheResource.as_view(), '/cache')
-v1_bp.add_route(CacheKeysResource.as_view(), '/cache/keys')
-v1_bp.add_route(CacheKeyResource.as_view(), '/cache/keys/<key>') 
+# 注册路由（显式指定路由名，避免 Sanic 的路由名重复检查）
+cache_resource = CacheResource()
+cache_keys_resource = CacheKeysResource()
+cache_key_resource = CacheKeyResource()
+
+v1_bp.add_route(cache_resource.as_view(), "/cache", name="cache_overview")
+v1_bp.add_route(cache_keys_resource.as_view(), "/cache/keys", name="cache_keys")
+v1_bp.add_route(cache_key_resource.as_view(), "/cache/keys/<key:str>", name="cache_key")
