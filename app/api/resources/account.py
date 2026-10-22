@@ -37,6 +37,7 @@ from app.api.validators import (
 )
 from app.auth.authentication import authenticate_request
 from app.auth.authorization import check_permissions, get_account_permissions
+from app.api.resources.route_methods import register_view
 from app.models import Account, AuthenticationSession
 
 # 创建账户时允许写入的字段（白名单）
@@ -458,28 +459,23 @@ class MyAccountPasswordResource(HTTPMethodView):
 # 显式给出路由名：Sanic 23.6 禁止同名路由，同一个视图注册到多个 URI 时
 # 会得到相同的隐式名，必须逐条命名。
 #
-# **必须用 ``v1_bp.route(...)`` 而不是 ``v1_bp.add_route(...)``**：
-# ``Blueprint.add_route`` 遇到 ``HTTPMethodView`` 处理器时，会**忽略传入的
-# ``methods`` 参数**，改成"按视图类实现了哪些方法来算路由支持哪些方法"。
-# 于是 ``add_route(account_resource.as_view(), "/accounts", methods=["GET","POST"])``
-# 实际上会把 ``/accounts`` 注册成 GET/POST/PUT/DELETE 四种方法全支持，
-# 而 ``AccountResource.put`` 的签名要求 ``account_id`` —— 命中 ``PUT /accounts``
-# 时缺参数 → TypeError → **500**（发布版主路径不允许出现 500）。
-#
-# ``Blueprint.route(uri, methods=[...])`` 则原样使用传入的 methods，
-# 方法不匹配时框架直接返回 **405 Method Not Allowed**。
+# 用 ``register_view``（而不是 ``v1_bp.add_route``）：后者遇到
+# ``HTTPMethodView`` 处理器时会**忽略传入的 methods**，按视图类反推方法集，
+# 导致 ``PUT /accounts`` 命中需要 ``account_id`` 的 ``AccountResource.put``
+# → 缺参数 → **500**；而 Sanic 23.6 对**动态路径**的方法不匹配会把
+# ``NoMethod`` 转成 ``NotFound`` → **404**（谎报不存在）。
+# ``register_view`` 用 ``Blueprint.route`` 原样注册方法，并给其余方法挂 405
+# 兜底，详见 ``app/api/resources/route_methods.py``。
 account_resource = AccountResource()
 account_password_resource = AccountPasswordResource()
 account_me_resource = AccountMeResource()
 my_account_password_resource = MyAccountPasswordResource()
 
-v1_bp.route("/accounts/<account_id:int>", methods=["GET", "PUT", "DELETE"],
-            name="account_detail")(account_resource.as_view())
-v1_bp.route("/accounts", methods=["GET", "POST"], name="account_list")(
-    account_resource.as_view())
-v1_bp.route("/accounts/<account_id:int>/password", methods=["PUT"],
-            name="account_password")(account_password_resource.as_view())
-v1_bp.route("/accounts/me", methods=["GET", "PUT"], name="account_me")(
-    account_me_resource.as_view())
-v1_bp.route("/accounts/me/password", methods=["PUT"], name="account_me_password")(
-    my_account_password_resource.as_view())
+register_view(v1_bp, "/accounts/<account_id:int>", account_resource,
+              ["GET", "PUT", "DELETE"], "account_detail")
+register_view(v1_bp, "/accounts", account_resource, ["GET", "POST"], "account_list")
+register_view(v1_bp, "/accounts/<account_id:int>/password", account_password_resource,
+              ["PUT"], "account_password")
+register_view(v1_bp, "/accounts/me", account_me_resource, ["GET", "PUT"], "account_me")
+register_view(v1_bp, "/accounts/me/password", my_account_password_resource,
+              ["PUT"], "account_me_password")
