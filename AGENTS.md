@@ -460,12 +460,12 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
   `useradd --uid 10001 appuser` + `USER appuser` **非 root 运行**；
   `HEALTHCHECK` 用 `curl -fsS http://127.0.0.1:22222/health`。
 - `docker-compose.yml`：`env_file: [.env]` 注入密钥；`environment` 覆盖
-  `SANIC_ENV=production` / `HOST=0.0.0.0` / `PORT=22222`；
+  `SANIC_ENV=production` / `HOST=0.0.0.0` / `PORT=22222` / `AMIS_DIR=/app/amis`；
   宿主机 `22230 → 容器 22222`；`redis` 服务在 `profiles: [redis]` 下，默认不启动。
 - `.dockerignore`：排除 `.env` / `*.pem` / `*.key` / `.git` / `.venv/` / `*.sqlite3` /
   `node_modules/` 等；`!.env.example` 白名单保留样例。
-- `.env.example`：27 个变量，与 `app/config.py` 实际读取的 27 个变量**完全一致**
-  （双向差集为空，实测核对）。
+- `.env.example`：**30 个变量**，与 `app/config.py` 实际读取的 30 个变量**完全一致**
+  （双向差集为空，实测核对；`app/config.py` 是全仓库唯一的环境变量读取点）。
 
 ### 6.2 命令
 
@@ -478,16 +478,23 @@ curl http://127.0.0.1:22230/health
 
 ### 6.3 本机环境限制（实测）
 
-**本机 Docker daemon 无法启动**，因此 `docker compose up` **没有真实执行过**。
-根因：Docker Desktop 需要加载特权助手 `com.docker.vmnetd`
-（`/Library/LaunchDaemons/com.docker.vmnetd.plist`），该 helper 需要 sudo 密码交互授权。
-本机也无 podman / nerdctl / lima / finch / colima 等替代运行时。
+**本机 Docker daemon 无法启动**，因此本轮 `docker compose up` **没有真实执行过**。
+根因：Docker Desktop 需要把特权助手 `com.docker.vmnetd` bootstrap 到 system 域
+（`launchctl print system/com.docker.vmnetd` → `Could not find service`），而这一步需要
+交互式管理员口令——无人值守会话下提权提示弹不出来（`SecurityAgent` 窗口数为 0），
+后端自修复失败后直接崩溃。本机也无 podman / nerdctl / lima / finch / colima 等替代运行时。
+
+**注意**：容器路径此前**已在本机真机跑通过一次**（在 M1 交付之前、应用代码仍有导入缺陷时，
+以仅运行时的补丁绕过；结果见 Release Notes 第 4 条）。本轮未复验是因为 daemon 起不来。
+**容器路径的最终验收由 CI 承接**：`.github/workflows/docker.yml` 会 build 镜像、起容器、
+检查 `/health`、验证管理界面托管、登录，并断言缺 `JWT_PRIVATE_KEY` 时容器非零退出。
+该 job 在合入 `master` 的 PR 上运行。
 
 已做的替代验证（全部实测）：
 
 | 替代项 | 方法 | 真实结果 |
 |---|---|---|
-| compose 静态解析 | 把 `docker-compose.yml` + `.env.example` 复制到临时目录，`.env.example` 当作 `.env`，跑 `docker compose config` | **exit 0**，YAML 合法、变量插值正确（27 个变量全部解析出值，端口映射 `22230→22222`、三个 volume、healthcheck 均正确展开） |
+| compose 静态解析 | 把 `docker-compose.yml` + `.env.example` 复制到临时目录，`.env.example` 当作 `.env`，跑 `docker compose config` | **exit 0**，YAML 合法、变量插值正确（30 个变量全部解析出值，端口映射 `22230→22222`、三个 volume、healthcheck 均正确展开） |
 | Dockerfile 安全项自查 | 逐行读 | 见 §6.4 |
 | production fail-closed | 本机 production 配置 + 环境变量注入实跑（真实 Redis + SQLite `DATABASE_URL`） | 缺 `JWT_PRIVATE_KEY` 或 `INITIAL_ADMIN_PASSWORD` → exit 1 + `配置错误: …`（§5.1 表）。两者齐备 → **服务正常启动**（`Goin' Fast`），`SECRET_KEY`/`PASSWORD_SALT` 缺失不拦进程 |
 
