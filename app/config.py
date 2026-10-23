@@ -194,7 +194,12 @@ class DefaultConfig:
     # AMIS 管理界面静态目录（由后端同源托管；留空则不挂载）
     AMIS_DIR = str(BASE_DIR / "amis")
     ALLOWED_EXTENSIONS = {"txt", "pdf", "png", "jpg", "jpeg", "gif"}
-    MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
+    # 请求体上限：Sanic 实际读取的配置名是 ``REQUEST_MAX_SIZE``（默认 100MB，
+    # 见 sanic/server/protocols/http_protocol.py）。此前的 ``MAX_CONTENT_LENGTH``
+    # 是 Flask 风格的名字，Sanic 23.6 从不读取它（v0.2.1 发布说明已实测：
+    # 真实生效的是 REQUEST_MAX_SIZE，超限时由 http1 抛 PayloadTooLarge），
+    # 为避免"看起来设了上限、实际没生效"的误导，已将其移除。
+    REQUEST_MAX_SIZE = 16 * 1024 * 1024  # 16MB
 
     # 日志配置
     LOG_DIR = str(BASE_DIR / "logs")
