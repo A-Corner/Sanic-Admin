@@ -39,20 +39,28 @@ AMIS_PRIVATE_FILES = frozenset({
     "README.md",
 })
 
+#: 黑名单的**小写**视图：``/amis/SERVER.JS`` 这类大小写变体必须同样挡下——
+#: 黑名单判定发生在文件系统之前，而开发机常见的大小写不敏感文件系统
+#: （macOS 默认、Windows）会把 ``SERVER.JS`` 解析到同一个文件。
+AMIS_PRIVATE_FILES_LOWER = frozenset(name.lower() for name in AMIS_PRIVATE_FILES)
+
 #: AMIS 根目录下的入口页面（运行期需要的顶层 HTML）。
 AMIS_ENTRY_PAGES = ("login.html", "index.html")
 
 
 class _NoDirectoryListingHandler(DirectoryHandler):
-    """裸目录路径返回 404，而不是触发 Sanic 默认的 500。
+    """``/static`` 的裸目录路径返回 404，而不是触发 Sanic 默认的 500。
 
     Sanic 的 ``DirectoryHandler`` 在既无 ``index`` 又未开启 ``directory_view`` 时
     会 ``raise IsADirectoryError`` —— 那是**未捕获异常**，直接变成 500。
-    访问 ``/amis/css/`` 这类裸目录路径就会命中它，等于开了一个可外部触发的
-    500 面。
+    等于开了一个可外部触发的 500 面。
 
     这里覆写 ``handle``：只保留"index 文件命中"与"文件直出"两条正常路径，
     其余一律 404 —— 静态资源目录不应该被列目录。
+
+    （AMIS 不走这个类：``/amis`` 下只注册了普通路由，目录路径由 ``is_file``
+    判定直接 404，见 ``_register_amis_static``。当前仓库没有 ``static/`` 目录，
+    挂在这里属于防御——将来建了目录也不会出现 500 面。）
     """
 
     async def handle(self, request, path):
@@ -62,20 +70,34 @@ class _NoDirectoryListingHandler(DirectoryHandler):
             raise NotFound("File not found")
 
 
-def _register_amis_index(app: Sanic, amis_dir: str) -> None:
-    """挂载 /amis 根路径：``/amis/`` 显示登录页，裸 ``/amis`` 返回 404。
+def _register_amis_static(app: Sanic, amis_dir: str) -> None:
+    """
+    托管 AMIS 管理界面，同时挡住开发文件。
 
-    为什么不用 ``app.static``：Sanic 的 ``app.static(uri, <文件>)`` 会把 uri 的
-    尾部斜杠去掉再注册（``app.static("/amis/", login.html)`` 注册的路由 uri 是
-    ``/amis``），且全局 ``strict_slashes=False`` 使 ``/amis`` 与 ``/amis/``
-    等价 —— 裸 ``/amis`` 会命中并返回 200。
+    用普通路由、**不再配合任何 ``app.static`` 挂载**，一条路径只由一套机制
+    提供。v0.2.1 曾同时保留「逐子目录 ``app.static`` + 顶层页面 ``app.static``」
+    与普通路由两套机制，同一批文件被注册两次（OpenAPI 里 AMIS 相关 path
+    12 条，其中 10 条是与普通路由重复覆盖的静态路由——8 个子目录挂载加
+    2 个顶层页面挂载）；本版本收敛为只有下面两条路由。
 
-    而 v0.2.0 用的是整目录挂载（``app.static("/amis", amis_dir, index=...)``），
-    路由被改写成 ``/amis/<__file_uri__:path>``，裸 ``/amis`` 不匹配 → 404。
-    docker-acceptance 断言的正是这个行为。
+    为什么不用 ``app.static``：
 
-    这里改用普通路由精确控制：``/amis/`` 走登录页，其余路径按静态文件处理，
-    开发文件与路径逃逸一律 404。
+    * ``app.static(uri, <文件>)`` 会把 uri 的尾部斜杠去掉再注册，加上全局
+      ``strict_slashes=False``，裸 ``/amis`` 会命中静态路由返回 200；而
+      v0.2.0 的裸 ``/amis`` 是 404，docker-acceptance 断言的就是这个行为。
+    * ``app.static`` 的目录型挂载由 Sanic 的 ``DirectoryHandler`` 接管目录
+      路径，语义不受这里控制（v0.2.1 曾因此出现裸目录 500 面）。
+
+    行为：
+
+    * ``/amis/``       → 登录页（``login.html``）；
+    * ``/amis/<path>`` → ``amis/`` 下的文件；``server.js`` 等开发文件、
+      目录路径与路径逃逸一律 404；
+    * 裸 ``/amis``     → 不匹配任何路由，404（``strict_slashes=True``）。
+
+    新增子目录或资源文件不需要改这里：``<path>`` 通配 ``amis/`` 下所有文件，
+    不存在"清单漏挂"的问题；代价是将来若在 ``amis/`` 下新增**开发**子目录，
+    它同样会被自动公开——开发文件黑名单只匹配顶层文件名。
     """
     amis_root = Path(amis_dir).resolve()
 
@@ -86,64 +108,28 @@ def _register_amis_index(app: Sanic, amis_dir: str) -> None:
             return json_response({"success": False, "message": "Not found"}, status=404)
         return await file(index_file)
 
-    @app.route("/amis/<path:__rest__>", methods=["GET", "HEAD"], strict_slashes=True)
+    @app.route("/amis/<__rest__:path>", methods=["GET", "HEAD"], strict_slashes=True)
     async def amis_files(request, __rest__):
-        # 开发文件不公开
-        if __rest__.split("/")[0] in AMIS_PRIVATE_FILES:
+        # 黑名单判两次：
+        # ① 原始请求首段（快速路径，防明显命中）；
+        # ② **规范化后的相对路径首段**——这是真正提供文件的依据。
+        #    只判①会被原始 dot-segment 绕过："/amis/./server.js" 的原始首段
+        #    是 "."，而 resolve() 后实际提供的文件就是 server.js（Linux 同样
+        #    中招，与文件系统大小写无关）。必须以"实际提供的文件"为准。
+        #    大小写不敏感：判定发生在文件系统解析之前，大小写不敏感的文件
+        #    系统（macOS/Windows）会把变体名解析到同一个文件。
+        if __rest__.split("/")[0].lower() in AMIS_PRIVATE_FILES_LOWER:
             return json_response({"success": False, "message": "Not found"}, status=404)
         target = (amis_root / __rest__).resolve()
         try:
-            target.relative_to(amis_root)
+            relative = target.relative_to(amis_root)
         except ValueError:
+            return json_response({"success": False, "message": "Not found"}, status=404)
+        if relative.parts and relative.parts[0].lower() in AMIS_PRIVATE_FILES_LOWER:
             return json_response({"success": False, "message": "Not found"}, status=404)
         if not target.is_file():
             return json_response({"success": False, "message": "Not found"}, status=404)
         return await file(target)
-
-
-def _register_amis_static(app: Sanic, amis_dir: str) -> None:
-    """
-    托管 AMIS 管理界面，同时挡住开发文件。
-
-    做法：不整目录静态托管（那会把 ``server.js``、``package.json`` 等开发文件
-    一并公开），而是分两类挂载：
-
-    * **子目录**：枚举 ``amis_dir`` 下实际存在的所有子目录逐个挂载。枚举而非
-      硬编码清单，是为了避免新增资源目录时漏挂（``public/`` 曾因写死清单而
-      整目录 404，导致 AMIS 仪表盘 logo 加载不到）。
-    * **顶层文件**：只有 ``login.html`` / ``index.html`` 两个入口页面被显式挂载。
-
-    顶层其余文件（``server.js``、``package.json``、``nodemon.json``、
-    ``README.md`` 等开发文件）没有对应路由，自然返回 404。
-    """
-    # 所有子目录：枚举实际存在的，避免硬编码清单漏挂
-    try:
-        subdirs = sorted(
-            name for name in os.listdir(amis_dir)
-            if os.path.isdir(os.path.join(amis_dir, name))
-            and not name.startswith(".")
-        )
-    except OSError:
-        subdirs = []
-    for sub in subdirs:
-        sub_path = os.path.join(amis_dir, sub)
-        app.static(
-            f"/amis/{sub}",
-            sub_path,
-            name=f"amis_{sub}",
-            directory_handler=_NoDirectoryListingHandler(
-                f"/amis/{sub}", Path(sub_path)
-            ),
-        )
-
-    # 根目录下的入口页面单独挂载
-    for page in AMIS_ENTRY_PAGES:
-        page_path = os.path.join(amis_dir, page)
-        if os.path.isfile(page_path):
-            app.static(f"/amis/{page}", page_path, name=f"amis_page_{page[:-5]}")
-
-    # /amis/ 显示登录页；裸 /amis 返回 404（与 v0.2.0 行为一致）
-    _register_amis_index(app, amis_dir)
 
 
 

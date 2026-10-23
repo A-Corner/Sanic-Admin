@@ -137,6 +137,28 @@ async def test_amis_index_serves_login_page(client):
     assert "login" in response.text.lower()
 
 
+@pytest.mark.parametrize("path,mime_prefix", [
+    ("/amis/login.html", "text/html"),
+    ("/amis/pages/site.json", "application/json"),
+    ("/amis/sdk/sdk.js", "javascript"),
+    ("/amis/css/main.css", "text/css"),
+    ("/amis/public/logo.png", "image/png"),
+])
+async def test_amis_content_types_are_correct(client, path, mime_prefix):
+    """去重后唯一的文件路由必须给出正确的 Content-Type。
+
+    AMIS 路由去重（v0.3）删掉了逐子目录的 ``app.static`` 挂载，所有文件
+    都由 ``/amis/<path>`` 一条普通路由提供，Content-Type 改由 ``mimetypes``
+    推导——逐类型钉住，防止浏览器把 CSS/JS/JSON 当成下载或纯文本。
+    """
+    response = await client.get(path)
+    assert response.status_code == 200, f"{path} 返回 {response.status_code}"
+    content_type = response.headers.get("content-type", "")
+    assert mime_prefix in content_type.lower(), (
+        f"{path} 的 Content-Type 是 {content_type!r}，应含 {mime_prefix!r}"
+    )
+
+
 async def test_bare_amis_path_is_404(client):
     """裸 ``/amis``（无尾斜杠）必须是 404。
 
