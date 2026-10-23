@@ -232,7 +232,7 @@ def _register_listeners(app: Sanic) -> None:
     cache_pkg = importlib.import_module("app.cache")
 
     @app.listener('before_server_start')
-    async def setup_db(app, loop):
+    async def setup_db(app):
         await models.init_db(app)
         app.ctx.db_ready = True
         logger.info("数据库连接初始化完成")
@@ -243,7 +243,7 @@ def _register_listeners(app: Sanic) -> None:
         await create_initial_admin()
 
     @app.listener('after_server_stop')
-    async def close_db(app, loop):
+    async def close_db(app):
         if getattr(app.ctx, "db_ready", False):
             try:
                 from tortoise import Tortoise

@@ -15,6 +15,7 @@ from sanic.views import HTTPMethodView
 
 from app.api.responses import APIResponse, APIError
 from app.auth.authorization import requires_permission
+from app.api.resources.route_methods import register_view
 from app.middleware import compression as comp
 
 bp = Blueprint("compression", url_prefix="/compression")
@@ -105,5 +106,6 @@ class CompressionConfigResource(HTTPMethodView):
 
 
 # 注册路由
-bp.add_route(CompressionStatsResource.as_view(), "/stats")
-bp.add_route(CompressionConfigResource.as_view(), "/config")
+# register_view：为未支持方法挂 405 兜底（带 Allow 头），与 v1 资源行为一致
+register_view(bp, "/stats", CompressionStatsResource, ["GET"], "compression_stats")
+register_view(bp, "/config", CompressionConfigResource, ["GET", "PUT"], "compression_config")

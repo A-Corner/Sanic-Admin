@@ -2,8 +2,8 @@
 pytest>=7.4,<9
 pytest-asyncio>=0.21,<0.24
 pytest-cov>=4.1
-# 与 Sanic 23.6 配套
-sanic-testing==23.6.0
+# sanic-testing 无 25.x 发布，24.6.0 为最新且对 sanic 无上界约束，兼容 25.12
+sanic-testing==24.6.0
 beautifulsoup4>=4.12
 ruff>=0.5
 # 测试客户端直接用 httpx 的 ASGI transport（sanic-testing 依赖它，这里显式声明）
