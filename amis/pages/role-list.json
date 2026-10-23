@@ -53,14 +53,19 @@
             "title": "编辑角色",
             "body": {
               "type": "form",
-              "initApi": "/api/v1/roles/${id}",
+              "initApi": {
+                "method": "get",
+                "url": "/api/v1/roles/${id}",
+                "adaptor": "payload.data.permissions = JSON.stringify(payload.data.permissions || {}, null, 2); return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+              },
               "dataType": "json",
               "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }",
               "api": {
                 "method": "put",
                 "url": "/api/v1/roles/${id}",
                 "dataType": "json",
-                "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+                "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }",
+                "requestAdaptor": "api.data.permissions = JSON.parse(api.data.permissions); return api;"
               },
               "body": [
                 {
@@ -73,7 +78,13 @@
                   "name": "permissions",
                   "label": "权限",
                   "description": "JSON 格式，例如 {\"account\": [\"read\"]}",
-                  "value": ""
+                  "value": "",
+                  "validations": {
+                    "isJson": true
+                  },
+                  "validationErrors": {
+                    "isJson": "权限必须是合法 JSON"
+                  }
                 }
               ]
             }
@@ -110,7 +121,8 @@
             "method": "post",
             "url": "/api/v1/roles",
             "dataType": "json",
-            "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }"
+            "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: payload.data }",
+            "requestAdaptor": "api.data.permissions = JSON.parse(api.data.permissions); return api;"
           },
           "body": [
             {
@@ -130,7 +142,13 @@
               "label": "权限",
               "required": true,
               "description": "JSON 格式，例如 {\"account\": [\"read\"]}",
-              "value": "{}"
+              "value": "{}",
+              "validations": {
+                "isJson": true
+              },
+              "validationErrors": {
+                "isJson": "权限必须是合法 JSON"
+              }
             }
           ]
         }
