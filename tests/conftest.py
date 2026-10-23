@@ -195,7 +195,10 @@ async def client(app):
     基于 ``httpx.ASGITransport``，直接跑在 Sanic 应用上，不监听真实端口。
     ``httpx.AsyncClient`` 自带 cookie jar，所以登录后 cookie 会自动带上。
     """
-    transport = ASGITransport(app=app)
+    # client：ASGI scope 的直连对端。真实部署必有 socket 对端；不传时
+    # request.remote_addr 为空串，依赖来源 IP 的逻辑（登录限流门控）无法在
+    # 测试通道里走到真实分支。
+    transport = ASGITransport(app=app, client=("127.0.0.1", 54321))
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver", follow_redirects=True
     ) as http_client:
