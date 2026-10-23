@@ -57,6 +57,14 @@ DESCRIPTION_MAX_LENGTH = 255
 #: ``category`` 字段长度上限（与模型 ``CharField(max_length=50)`` 对齐）
 CATEGORY_MAX_LENGTH = 50
 
+#: ``value`` 落库字符串的长度上限。
+#: ``SystemSetting.value`` 是 TextField，数据库层没有长度限制；不设上限时单条
+#: 配置可以膨胀到请求体上限（16MB），读接口会把整行原样回传，足以拖垮列表
+#: 接口，而没有任何真实配置需要这么长。8192 字符足以容纳一段 JSON 或一段
+#: 富文本公告，又只是请求体上限的 1/2048 —— 超过它的 value 只可能是滥用
+#: 或客户端 bug，直接 400。
+VALUE_MAX_LENGTH = 8192
+
 #: 布尔字段的合法字符串取值（供 ``is_public`` 解析）
 _TRUE_STRINGS = ("true", "1", "yes", "on")
 _FALSE_STRINGS = ("false", "0", "no", "off")
@@ -228,6 +236,20 @@ def _store_value(value: Any, value_type: str) -> str:
     return str(value)
 
 
+def _validate_value_length(value: Any, value_type: str) -> Optional[str]:
+    """
+    校验 value **落库后的最终字符串**长度，超限返回错误说明，通过返回 None。
+
+    钳制对象必须是 ``_store_value`` 的产物，而不是请求体里 value 的原始形态：
+    json 类型的 dict/list 会以 ``json.dumps`` 字符串落库，int/float/bool 也会被
+    字符串化，落库长度与请求体里的形态可能不同。以落库产物为准，才能保证
+    "库里不会出现超过上限的 value"。
+    """
+    if len(_store_value(value, value_type)) > VALUE_MAX_LENGTH:
+        return f"value 长度不能超过 {VALUE_MAX_LENGTH} 个字符"
+    return None
+
+
 def _read_payload(request: Request) -> Optional[Dict[str, Any]]:
     """读取 JSON 请求体；不是 JSON 对象时返回 None。"""
     body = request.json
@@ -301,6 +323,11 @@ class SettingResource(HTTPMethodView):
         error = validate_value_type(data["value"], value_type)
         if error:
             return _bad_request(error)
+
+        # value 落库字符串长度上限（四条写路径统一校验）
+        length_error = _validate_value_length(data["value"], value_type)
+        if length_error:
+            return _bad_request(length_error)
 
         text_error = _validate_text_fields(data)
         if text_error:
@@ -391,6 +418,11 @@ class SettingItemResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
+        # value 落库字符串长度上限（四条写路径统一校验）
+        length_error = _validate_value_length(data["value"], value_type)
+        if length_error:
+            return _bad_request(length_error)
+
         text_error = _validate_text_fields(data)
         if text_error:
             return _bad_request(text_error)
@@ -457,6 +489,11 @@ class SettingByKeyResource(HTTPMethodView):
         if error:
             return _bad_request(error)
 
+        # value 落库字符串长度上限（四条写路径统一校验）
+        length_error = _validate_value_length(data["value"], value_type)
+        if length_error:
+            return _bad_request(length_error)
+
         text_error = _validate_text_fields(data)
         if text_error:
             return _bad_request(text_error)
@@ -514,6 +551,17 @@ class SettingBulkResource(HTTPMethodView):
 
         existing = await SystemSetting.filter(key__in=list(settings_data.keys()), deleted=False).all()
         known = {s.key: s for s in existing}
+
+        # value 长度整体预检：任一 value 超限 → 400，整批不落库（四条写路径
+        # 统一返回 400 VALIDATION_ERROR）。不做"跳过超限项、继续更新其余项"，
+        # 避免部分成功掩盖超限写入；不存在的 key 仍走下方逐条错误路径。
+        for key, value in settings_data.items():
+            known_setting = known.get(key)
+            if known_setting is None:
+                continue
+            length_error = _validate_value_length(value, known_setting.value_type)
+            if length_error:
+                return _bad_request(f"{length_error}（key: {key}）")
 
         updated: List[Dict[str, Any]] = []
         errors: List[Dict[str, str]] = []
