@@ -1,8 +1,8 @@
 # 运行时直接依赖（传递依赖由 pip 解析；不再锁死整棵依赖树）
-# Sanic 大版本升级留给 SA-OSS-B6，本批保持 23.6 系列。
-sanic==23.6.0
-sanic-routing==23.6.0
-sanic-ext==23.6.0
+# SA-OSS-V03 spike：sanic 栈升级到 25 系列（sanic 25.12.1 硬性要求 sanic-routing>=23.12.0）
+sanic==25.12.1
+sanic-routing==23.12.0
+sanic-ext==25.12.0
 sanic-jinja2==2022.11.11
 Jinja2>=3.1.2
 tortoise-orm==0.20.0

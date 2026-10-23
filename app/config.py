@@ -194,7 +194,12 @@ class DefaultConfig:
     # AMIS 管理界面静态目录（由后端同源托管；留空则不挂载）
     AMIS_DIR = str(BASE_DIR / "amis")
     ALLOWED_EXTENSIONS = {"txt", "pdf", "png", "jpg", "jpeg", "gif"}
-    MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
+    # 请求体上限：Sanic 实际读取的配置名是 ``REQUEST_MAX_SIZE``（默认 100MB，
+    # 见 sanic/server/protocols/http_protocol.py）。此前的 ``MAX_CONTENT_LENGTH``
+    # 是 Flask 风格的名字，Sanic 23.6 从不读取它（v0.2.1 发布说明已实测：
+    # 真实生效的是 REQUEST_MAX_SIZE，超限时由 http1 抛 PayloadTooLarge），
+    # 为避免"看起来设了上限、实际没生效"的误导，已将其移除。
+    REQUEST_MAX_SIZE = 16 * 1024 * 1024  # 16MB
 
     # 日志配置
     LOG_DIR = str(BASE_DIR / "logs")
@@ -215,6 +220,19 @@ class DefaultConfig:
     # 认证配置
     ACCESS_TOKEN_EXPIRE = 3600  # 1小时，以秒为单位
     REFRESH_TOKEN_EXPIRE = 604800  # 7天，以秒为单位
+
+    # 登录限流：按（提交的用户名/邮箱 + IP）维度统计**登录失败**次数的滑动窗口。
+    # rationale：OWASP Authentication Cheat Sheet 对在线口令猜测的通用基线是
+    # "同一账户维度每 15 分钟允许约 5 次失败"——足以容纳真人输错，又把暴力破解
+    # 压到不可行（1500 次/天 -> 20 次/天）。成功登录即清零计数，避免误伤共享
+    # 出口 IP 下的正常用户。计数存于现有 cache 层（memory/redis 均可用）。
+    LOGIN_RATELIMIT_MAX_ATTEMPTS = 5
+    LOGIN_RATELIMIT_WINDOW_SECONDS = 900  # 15 分钟
+    # 反向代理白名单（逗号分隔 IP/CIDR）。仅当登录请求的 socket 直连对端命中
+    # 此列表时，限流才采信 X-Forwarded-For（从右往左取第一个非可信地址）；
+    # 默认为空 = 恒用直连对端，XFF 可被客户端任意伪造，不可作为限流维度
+    # （EVT-20261023-007-REVIEW F1）。
+    TRUSTED_PROXIES = ""
 
     # 邮件配置
     MAIL_SERVER = "smtp.example.com"

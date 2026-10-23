@@ -14,6 +14,7 @@ from sanic import Blueprint
 from sanic.views import HTTPMethodView
 
 from app.api.responses import APIResponse, APIError
+from app.api.resources.route_methods import register_view
 from app.auth.authorization import requires_permission
 from app.database.connection_pool import (
     get_connection_pool,
@@ -210,8 +211,9 @@ class DatabaseAnalysisResource(HTTPMethodView):
 
 
 # 注册路由
-bp.add_route(QueryLogsResource.as_view(), "/query-logs")
-bp.add_route(SlowQueriesResource.as_view(), "/slow-queries")
-bp.add_route(QueryPlanResource.as_view(), "/query-plan")
-bp.add_route(ConnectionPoolResource.as_view(), "/connection-pool")
-bp.add_route(DatabaseAnalysisResource.as_view(), "/analysis")
+# register_view：为未支持方法挂 405 兜底（带 Allow 头），与 v1 资源行为一致
+register_view(bp, "/query-logs", QueryLogsResource, ["GET"], "database_query_logs")
+register_view(bp, "/slow-queries", SlowQueriesResource, ["GET"], "database_slow_queries")
+register_view(bp, "/query-plan", QueryPlanResource, ["GET", "POST"], "database_query_plan")
+register_view(bp, "/connection-pool", ConnectionPoolResource, ["GET", "PUT"], "database_connection_pool")
+register_view(bp, "/analysis", DatabaseAnalysisResource, ["GET"], "database_analysis")
