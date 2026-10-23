@@ -223,6 +223,11 @@ class DefaultConfig:
     # 出口 IP 下的正常用户。计数存于现有 cache 层（memory/redis 均可用）。
     LOGIN_RATELIMIT_MAX_ATTEMPTS = 5
     LOGIN_RATELIMIT_WINDOW_SECONDS = 900  # 15 分钟
+    # 反向代理白名单（逗号分隔 IP/CIDR）。仅当登录请求的 socket 直连对端命中
+    # 此列表时，限流才采信 X-Forwarded-For（从右往左取第一个非可信地址）；
+    # 默认为空 = 恒用直连对端，XFF 可被客户端任意伪造，不可作为限流维度
+    # （EVT-20261023-007-REVIEW F1）。
+    TRUSTED_PROXIES = ""
 
     # 邮件配置
     MAIL_SERVER = "smtp.example.com"

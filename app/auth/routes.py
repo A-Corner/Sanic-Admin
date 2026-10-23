@@ -16,7 +16,7 @@ from app.auth.authentication import (
     fulfill_second_factor,
     get_session_token,
 )
-from app.auth.rate_limit import LoginRateLimiter, client_ip
+from app.auth.rate_limit import LoginRateLimiter
 from app.auth.verification import (
     request_two_step_verification,
     verify_account,
@@ -99,9 +99,8 @@ async def on_login(request):
     # 未提交登录标识时跳过（参数校验会以 400 拒绝，不属于暴力破解面）。
     limiter = LoginRateLimiter.from_request(request)
     identity = limiter.submitted_identity(request)
-    ip = client_ip(request)
     if identity:
-        await limiter.raise_if_blocked(identity, ip)
+        await limiter.raise_if_blocked(identity, request)
 
     # 是否启用二次验证只由服务端配置决定，忽略客户端参数
     two_factor_authentication = bool(getattr(settings, "REQUIRE_TWO_FACTOR", False))
@@ -112,12 +111,12 @@ async def on_login(request):
     except CredentialsError:
         # 仅凭据错误计入失败次数（未验证/禁用等账户状态问题不属于口令猜测）
         if identity:
-            await limiter.record_failure(identity, ip)
+            await limiter.record_failure(identity, request)
         raise
 
     # 成功登录清零该维度的失败计数
     if identity:
-        await limiter.clear(identity, ip)
+        await limiter.clear(identity, request)
 
     if two_factor_authentication:
         two_step_session = await request_two_step_verification(
