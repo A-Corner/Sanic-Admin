@@ -6,6 +6,9 @@ sanic-ext==25.12.0
 sanic-jinja2==2022.11.11
 Jinja2>=3.1.2
 tortoise-orm==0.20.0
+# 数据库迁移（SA-MIG）：aerich 0.7.2 是与 tortoise 0.20 同代的最后一版；
+# 0.8.1 起要求 tortoise-orm>=0.21，0.8.0 虽未声明上界但面向 0.21 开发，不选。升 tortoise 1.x 时需同步换 aerich
+aerich==0.7.2
 # Sanic 23.6 依赖的 websockets 在 14 起变更了 legacy 接口，先设上限
 websockets>=11.0.3,<14
 # uvloop 0.17 在 Python 3.12 无法编译，0.19 起提供 3.12 wheel
