@@ -86,7 +86,7 @@ __all__ = [
     'AvatarUploadResource',
     'FileListResource',
     'FileDeleteResource',
-    CustomerResource,
+    'CustomerResource',
     # 仪表盘资源
     'DashboardSummaryResource',
     'DashboardActivitiesResource',

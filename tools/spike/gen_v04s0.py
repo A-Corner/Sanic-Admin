@@ -38,7 +38,8 @@ class {Class}(BaseModel):
     """
     {description}
 
-    Attributes:{attr_docs}
+    Attributes:
+{attr_docs}
     """
 {field_defs}
 
@@ -48,7 +49,8 @@ class {Class}(BaseModel):
     @property
     def json(self) -> dict:
         return {{
-            "id": self.id,{json_fields}
+            "id": self.id,
+{json_fields}
             "created_at": str(self.created_at),
             "updated_at": str(self.updated_at),
         }}
@@ -246,11 +248,17 @@ async def test___RESOURCE___crud_roundtrip(client, auth_headers):
     assert updated.status_code == 200
     assert updated.json()["data"]["status"] == "archived"
 
+    detail = await client.get(f"/api/v1/__RESOURCE__s/{{obj_id}}", headers=auth_headers)
+    assert detail.status_code == 200, "更新后取详情应 200"
+
     missing = await client.get(f"/api/v1/__RESOURCE__s/999999", headers=auth_headers)
     assert missing.status_code == 404
 
     deleted = await client.delete(f"/api/v1/__RESOURCE__s/{{obj_id}}", headers=auth_headers)
     assert deleted.status_code == 200
+
+    refetch = await client.get(f"/api/v1/__RESOURCE__s/{{obj_id}}", headers=auth_headers)
+    assert refetch.status_code == 404, "删除后复查应 404"
 
 
 async def test___RESOURCE___create_requires_fields(client, auth_headers):

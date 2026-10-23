@@ -286,6 +286,7 @@ def _concrete_path(path: str) -> str:
         "<profile_id:int>": "1",
         "<setting_id:int>": "1",
         "<log_id:int>": "1",
+        "<customer_id:int>": "1",
         "<key:str>": "sample",
         "<key:string>": "sample",
         "<category:str>": "general",

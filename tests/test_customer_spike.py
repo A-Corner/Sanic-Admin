@@ -42,11 +42,17 @@ async def test_customer_crud_roundtrip(client, auth_headers):
     assert updated.status_code == 200
     assert updated.json()["data"]["status"] == "archived"
 
+    detail = await client.get(f"/api/v1/customers/{obj_id}", headers=auth_headers)
+    assert detail.status_code == 200, "更新后取详情应 200"
+
     missing = await client.get(f"/api/v1/customers/999999", headers=auth_headers)
     assert missing.status_code == 404
 
     deleted = await client.delete(f"/api/v1/customers/{obj_id}", headers=auth_headers)
     assert deleted.status_code == 200
+
+    refetch = await client.get(f"/api/v1/customers/{obj_id}", headers=auth_headers)
+    assert refetch.status_code == 404, "删除后复查应 404"
 
 
 async def test_customer_create_requires_fields(client, auth_headers):

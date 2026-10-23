@@ -10,7 +10,8 @@ class Customer(BaseModel):
     """
     AI-Native spike 示例资源：客户档案（关联账户）
 
-    Attributes:        name: 名称
+    Attributes:
+        name: 名称
         email: 邮箱
         status: 状态
         notes: 备注
@@ -28,7 +29,8 @@ class Customer(BaseModel):
     @property
     def json(self) -> dict:
         return {
-            "id": self.id,            "name": self.name,
+            "id": self.id,
+            "name": self.name,
             "email": self.email,
             "status": self.status,
             "notes": self.notes,
