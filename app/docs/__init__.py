@@ -45,7 +45,7 @@ def setup_docs(app, swagger_url: str = "/swagger", swagger_json_url: str = "/swa
     setup_doc_routes(app, swagger_json_url=swagger_json_url)
 
     @app.listener("before_server_start")
-    async def _build_openapi_spec(app, loop):
+    async def _build_openapi_spec(app):
         setup_openapi(app)
 
 
