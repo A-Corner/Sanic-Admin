@@ -1,0 +1,42 @@
+{
+  "type": "crud",
+  "id": "customer-list",
+  "name": "customer",
+  "syncLocation": false,
+  "api": {
+    "method": "get",
+    "url": "/api/v1/customers",
+    "dataType": "json",
+    "adaptor": "return { status: payload.success ? 0 : 1, msg: payload.message, data: { items: payload.data.items, total: payload.data.pagination.total } }",
+    "requestAdaptor": "return { ...api, url: api.url + '&page_size=' + (api.query && api.query.perPage || api.query && api.query.page_size || 20) }"
+  },
+  "columns": [
+    {
+      "name": "name",
+      "label": "名称"
+    },
+    {
+      "name": "email",
+      "label": "邮箱"
+    },
+    {
+      "name": "status",
+      "label": "状态"
+    },
+    {
+      "name": "account",
+      "label": "所属账户"
+    }
+  ],
+  "filter": {
+    "submitText": "",
+    "controls": [
+      {
+        "type": "text",
+        "name": "keyword",
+        "label": "搜索",
+        "placeholder": "按名称搜索"
+      }
+    ]
+  }
+}

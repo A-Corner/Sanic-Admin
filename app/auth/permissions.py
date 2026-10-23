@@ -45,6 +45,8 @@ ALL_PERMISSIONS: Dict[str, List[str]] = {
     "setting": ["read", "create", "update", "delete"],
     # 文件
     "file": ["upload", "read", "delete", "manage"],
+    # 客户（SA-v04-S0 spike）
+    "customer": ["read", "create", "update", "delete"],
     # 仪表盘
     "dashboard": ["read"],
     # 系统级（含冒号资源名的普通基资源）

@@ -18,6 +18,7 @@ from app.api.resources.role import RoleResource, RoleMembersResource, AccountRol
 from app.api.resources.profile import ProfileResource, MyProfileResource
 from app.api.resources.log import LogResource, LogStatisticsResource
 from app.api.resources.setting import SettingResource, SettingByKeyResource, SettingBulkResource
+from app.api.resources.customer import CustomerResource
 from app.api.resources.upload import (
     FileUploadResource, AvatarUploadResource,
     FileListResource, FileDeleteResource,
@@ -52,6 +53,7 @@ all_resources = [
     AvatarUploadResource,
     FileListResource,
     FileDeleteResource,
+    CustomerResource,
     # 仪表盘资源
     DashboardSummaryResource,
     DashboardActivitiesResource,
@@ -84,6 +86,7 @@ __all__ = [
     'AvatarUploadResource',
     'FileListResource',
     'FileDeleteResource',
+    CustomerResource,
     # 仪表盘资源
     'DashboardSummaryResource',
     'DashboardActivitiesResource',

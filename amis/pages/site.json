@@ -39,6 +39,12 @@
             "url": "/role/list",
             "icon": "fa fa-list",
             "schemaApi": "get:pages/role-list.json?v1"
+          },
+          {
+            "label": "客户列表",
+            "url": "/customer/list",
+            "icon": "fa fa-user-tie",
+            "schemaApi": "get:pages/customer-list.json?v1"
           }
         ]
       },

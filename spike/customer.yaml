@@ -1,0 +1,41 @@
+# SA-v04-S0 spike 示例资源规格
+# 这是 AI-Native 方向的「唯一事实源」实验：模型 / CRUD API / RBAC 权限点 /
+# AMIS 页面 / 测试 都应能从本文件生成。
+resource: customer
+table: customer
+label: 客户
+description: AI-Native spike 示例资源：客户档案（关联账户）
+fields:
+  - name: name
+    type: string
+    max_length: 128
+    required: true
+    label: 名称
+    list: true
+    searchable: true
+  - name: email
+    type: string
+    max_length: 255
+    required: true
+    label: 邮箱
+    list: true
+  - name: status
+    type: string
+    max_length: 16
+    default: active
+    choices: [active, inactive, archived]
+    label: 状态
+    list: true
+  - name: notes
+    type: text
+    label: 备注
+  - name: account
+    type: fk
+    target: account
+    label: 所属账户
+    list: true
+permissions:
+  actions: [read, create, update, delete]
+menu:
+  icon: fa-user-tie
+  order: 60

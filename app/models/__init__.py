@@ -27,6 +27,7 @@ from app.models.profile import Profile
 from app.models.system_setting import SystemSetting
 from app.models.operation_log import OperationLog
 from app.models.uploaded_file import UploadedFile
+from app.models.customer import Customer
 
 
 # 导出所有模型类，方便其他模块导入
@@ -44,6 +45,7 @@ __all__ = [
     'SystemSetting',
     'OperationLog',
     'UploadedFile',
+    'Customer',
     'init_db',
 ]
 
