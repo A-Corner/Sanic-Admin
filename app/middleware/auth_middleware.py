@@ -40,8 +40,34 @@ async def authenticate_request(request: Request) -> None:
         logger.error(f"认证处理时出错: {str(e)}")
 
 
+#: 强制改密拦截的白名单：改密、登出、登录（改密后重登）、会话信息查询。
+#: 拦截面限定在 /api/ 前缀——保护对象是数据面 API；管理台静态页不拦，
+#: 用户仍能打开页面并在 AMIS 里看到 403 提示后走改密对话框。
+
+
+async def enforce_password_change(request: Request) -> None:
+    """
+    首次登录强制改密：must_change_password=True 的会话访问 /api/ 下非白名单
+    路径时返回 403 PASSWORD_CHANGE_REQUIRED，直至完成改密。
+    """
+    session = getattr(request.ctx, "authentication_session", None)
+    if session is None:
+        return
+    bearer = session.bearer
+    if bearer is None or not getattr(bearer, "must_change_password", False):
+        return
+    path = request.path
+    if not path.startswith("/api/"):
+        return
+    from sanic.exceptions import SanicException
+
+    # 由全局错误处理器渲染为统一信封（error=PASSWORD_CHANGE_REQUIRED，403）
+    raise SanicException("首次登录必须修改密码", status_code=403)
+
+
 class AuthMiddleware:
-    """可调用的请求中间件，包装 authenticate_request。"""
+    """可调用的请求中间件：会话提取 + 首次登录强制改密拦截。"""
 
     async def __call__(self, request: Request) -> None:
         await authenticate_request(request)
+        await enforce_password_change(request)

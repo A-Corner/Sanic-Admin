@@ -7,7 +7,7 @@
 from sanic import Blueprint
 from app.config import settings
 from app.models import CaptchaSession, AuthenticationSession
-from app.services.utils import json
+from app.services.utils import get_request_value, json
 from app.auth.authentication import (
     login,
     register,
@@ -23,7 +23,7 @@ from app.auth.verification import (
     request_captcha,
 )
 from app.middleware.security_middleware import issue_csrf_token
-from app.services.exceptions import CredentialsError
+from app.services.exceptions import CredentialsError, ValidationError
 
 
 # 创建认证相关蓝图
@@ -118,6 +118,11 @@ async def on_login(request):
     if identity:
         await limiter.clear(identity, request)
 
+    # 首次登录强制改密标志随登录响应透出（AMIS 登录页据此弹改密对话框）
+    must_change_password = bool(
+        getattr(authentication_session.bearer, "must_change_password", False)
+    )
+
     if two_factor_authentication:
         two_step_session = await request_two_step_verification(
             request, authentication_session.bearer
@@ -128,7 +133,9 @@ async def on_login(request):
         )
         two_step_session.encode(response)
     else:
-        response = json("登录成功!", authentication_session.bearer.json)
+        data = dict(authentication_session.bearer.json)
+        data["must_change_password"] = must_change_password
+        response = json("登录成功!", data)
 
     authentication_session.encode(response)
     # 下发 CSRF token（双提交 cookie + 响应头），此后凭会话 cookie 的写请求须回传
@@ -138,6 +145,52 @@ async def on_login(request):
         secure=bool(request.app.config.get("SESSION_COOKIE_SECURE", True)),
     )
     return response
+
+
+@auth_bp.post("/change-password")
+async def on_change_password(request):
+    """
+    已登录用户修改自己的口令；清除 must_change_password 标志。
+
+    必须携带有效会话（认证中间件已附加 authentication_session）；
+    强制改密拦截（见 security_middleware）放行本端点与 logout，
+    其余 /api/ 请求在标志清除前一律 403。
+    """
+    from app.auth.authentication import MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH, _text_field
+    from app.services.exceptions import SessionValidationError
+
+    session = getattr(request.ctx, "authentication_session", None)
+    if session is None or session.bearer is None:
+        raise SessionValidationError("未登录或会话已失效")
+
+    current_password = _text_field(
+        get_request_value(request, "current_password"), "当前口令", 128
+    )
+    new_password = _text_field(
+        get_request_value(request, "new_password"), "新口令",
+        MAX_PASSWORD_LENGTH, min_len=MIN_PASSWORD_LENGTH,
+    )
+    confirm = get_request_value(request, "confirm_password")
+    if confirm is not None and str(confirm) != new_password:
+        raise ValidationError("两次输入的新口令不一致")
+    if new_password == current_password:
+        raise ValidationError("新口令不能与当前口令相同")
+
+    account = session.bearer
+    if not account.verify_password(current_password):
+        raise CredentialsError("当前口令错误")
+
+    account.set_password(new_password)
+    account.must_change_password = False
+    await account.save(update_fields=["password", "must_change_password"])
+
+    # 安全惯例：改密后作废该账户的全部其它会话（本会话保留，避免把正在
+    # 改密的用户立即登出；其余会话可能是旧口令泄露期间建立的）。
+    await AuthenticationSession.filter(bearer=account, deleted=False, disabled=False).exclude(
+        id=session.id
+    ).update(deleted=True)
+
+    return json("密码修改成功", {"must_change_password": False})
 
 
 # 完成两步验证路由

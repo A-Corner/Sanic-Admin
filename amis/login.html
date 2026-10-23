@@ -70,6 +70,49 @@
                         </a>
                     </div>
                 </form>
+
+                <form class="login100-form validate-form" id="change-password-form" novalidate
+                    style="display:none">
+                    <span class="login100-form-title">
+                        首次登录 - 修改密码
+                    </span>
+
+                    <div class="wrap-input100 validate-input">
+                        <input class="input100" type="password" name="current_password"
+                            placeholder="当前密码" autocomplete="current-password">
+                        <span class="focus-input100"></span>
+                        <span class="symbol-input100">
+                            <i class="fa fa-lock" aria-hidden="true"></i>
+                        </span>
+                    </div>
+
+                    <div class="wrap-input100 validate-input">
+                        <input class="input100" type="password" name="new_password"
+                            placeholder="新密码（至少 8 位）" autocomplete="new-password">
+                        <span class="focus-input100"></span>
+                        <span class="symbol-input100">
+                            <i class="fa fa-lock" aria-hidden="true"></i>
+                        </span>
+                    </div>
+
+                    <div class="wrap-input100 validate-input">
+                        <input class="input100" type="password" name="confirm_password"
+                            placeholder="确认新密码" autocomplete="new-password">
+                        <span class="focus-input100"></span>
+                        <span class="symbol-input100">
+                            <i class="fa fa-lock" aria-hidden="true"></i>
+                        </span>
+                    </div>
+
+                    <div id="change-password-error" role="alert" class="text-center"
+                        style="color:#c80000;min-height:1.5em;margin-top:8px;display:none"></div>
+
+                    <div class="container-login100-form-btn">
+                        <button type="submit" class="login100-form-btn">
+                            修改密码并继续
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
@@ -115,6 +158,13 @@
                 });
                 if (response.ok) {
                     // 会话由后端通过 HttpOnly 的 session Cookie 下发，前端不保存口令或令牌
+                    const body = await response.json().catch(() => ({}));
+                    if (body && body.data && body.data.must_change_password) {
+                        // 首次登录强制改密：隐藏登录表单，进入改密流程
+                        form.style.display = 'none';
+                        document.getElementById('change-password-form').style.display = 'block';
+                        return;
+                    }
                     window.location.href = './index.html';
                     return;
                 }
@@ -129,6 +179,73 @@
                 showError('无法连接后端服务，请确认服务已启动');
             } finally {
                 submitBtn.disabled = false;
+            }
+        });
+
+        // 首次登录强制改密流程（must_change_password=True 时由登录分支进入）
+        const changeForm = document.getElementById('change-password-form');
+        const changeError = document.getElementById('change-password-error');
+
+        function readCookie(name) {
+            const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+            return match ? decodeURIComponent(match[1]) : '';
+        }
+
+        changeForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            changeError.style.display = 'none';
+            const current = changeForm.querySelector('input[name="current_password"]').value;
+            const next = changeForm.querySelector('input[name="new_password"]').value;
+            const confirm = changeForm.querySelector('input[name="confirm_password"]').value;
+            if (!current || !next || !confirm) {
+                changeError.textContent = '请填写全部密码字段';
+                changeError.style.display = 'block';
+                return;
+            }
+            if (next.length < 8) {
+                changeError.textContent = '新密码至少 8 位';
+                changeError.style.display = 'block';
+                return;
+            }
+            if (next !== confirm) {
+                changeError.textContent = '两次输入的新密码不一致';
+                changeError.style.display = 'block';
+                return;
+            }
+            // 双提交 CSRF：登录后后端已下发 csrf_token cookie，回传到请求头
+            const changeBtn = changeForm.querySelector('button[type="submit"]');
+            changeBtn.disabled = true;
+            try {
+                const response = await fetch(API_BASE + '/auth/change-password', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': readCookie('csrf_token')
+                    },
+                    body: JSON.stringify({
+                        current_password: current,
+                        new_password: next,
+                        confirm_password: confirm
+                    })
+                });
+                if (response.ok) {
+                    window.location.href = './index.html';
+                    return;
+                }
+                let msg = '修改失败（HTTP ' + response.status + '）';
+                try {
+                    const body = await response.json();
+                    if (body && (body.message || body.msg)) msg = body.message || body.msg;
+                } catch (e) { /* 非 JSON 响应，使用默认提示 */ }
+                changeError.textContent = msg;
+                changeError.style.display = 'block';
+            } catch (error) {
+                console.error('请求错误', error);
+                changeError.textContent = '无法连接后端服务，请确认服务已启动';
+                changeError.style.display = 'block';
+            } finally {
+                changeBtn.disabled = false;
             }
         });
     </script>
