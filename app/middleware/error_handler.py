@@ -41,14 +41,12 @@ def setup_error_handlers(app: Sanic) -> None:
             # 请求体超过 REQUEST_MAX_SIZE（app/config.py，默认 16MB）时由
             # Sanic http1 抛出 PayloadTooLarge；渲染为统一格式而不是裸文本
             413: "PAYLOAD_TOO_LARGE",
-            403: "PASSWORD_CHANGE_REQUIRED",
         }.get(status_code, "SANIC_ERROR")
         message = {
             404: "请求的资源不存在",
             405: "请求方法不被允许",
             400: "请求参数不合法",
             413: "请求体超过大小上限",
-            403: "首次登录必须修改密码",
         }.get(status_code, "请求处理失败")
         logger.warning(f"框架异常 {status_code}: {str(exception)}")
         return response.json(_error_body(message, error_code), status=status_code)
