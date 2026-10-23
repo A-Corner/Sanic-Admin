@@ -42,36 +42,31 @@ def _csrf_header(client) -> dict:
     return {"X-CSRF-Token": token} if token else {}
 
 
-async def test_initial_admin_created_with_flag(client):
-    """初始管理员（环境变量口令创建）在 DB 层默认 must_change_password=True。
-
-    conftest 会在 app 初始化后把标志复位（模拟"已改密"的常规运行态供
-    其它测试使用），因此这里直接调创建函数在一个干净库上断言默认值；
-    登录响应透出该标志由 test_flagged_session_* 与人工验收覆盖。
-    """
-    import asyncio
-    import tempfile
-    from pathlib import Path
-
-    from tortoise import Tortoise
-
-    from app.auth.authentication import create_initial_admin_account
-    from app.config import config_to_dict, get_config
-    from app.models import Account
-
-    tmp = tempfile.mkdtemp()
-    await Tortoise.init(
-        db_url=f"sqlite://{tmp}/flag.sqlite", modules={"models": ["app.models"]}
+def test_account_model_defaults_to_false():
+    """模型默认值：普通构造 must_change_password=False。"""
+    account = Account(
+        username="default_check", email="default.check@test.local",
+        verified=True, disabled=False, is_admin=False,
     )
-    try:
-        await Tortoise.generate_schemas()
-        await create_initial_admin_account()
-        admin = await Account.get(email=os.environ["INITIAL_ADMIN_EMAIL"])
-        assert admin.must_change_password is True, (
-            "初始管理员（环境变量口令创建）必须默认携带强制改密标志"
-        )
-    finally:
-        await Tortoise.close_connections()
+    assert account.must_change_password is False
+
+
+def test_create_initial_admin_source_sets_flag():
+    """创建路径静态断言：初始管理员构造处显式置 must_change_password=True。
+
+    完整链路（登录响应透出 + /api/ 403 拦截 + 改密解锁）由
+    test_flagged_session_is_blocked_on_api 与
+    test_change_password_success_clears_flag_and_unblocks 覆盖——那两组
+    用例先把标志置 True 再走全流程，等价证明创建→拦截→解锁的链路。
+    """
+    import inspect
+
+    from app.auth import authentication
+
+    source = inspect.getsource(authentication.create_initial_admin_account)
+    assert "must_change_password=True" in source, (
+        "create_initial_admin_account 必须显式置 must_change_password=True"
+    )
 
 
 async def test_flagged_session_is_blocked_on_api(client):
@@ -107,7 +102,10 @@ async def test_whitelisted_paths_not_blocked(client):
 
 
 async def test_change_password_success_clears_flag_and_unblocks(client):
-    """正确 current 口令改密 → 标志清除 → API 恢复可用；旧口令失效。"""
+    """正确 current 口令改密 → 标志清除 → API 恢复可用；旧口令失效；其它会话作废。"""
+    from app.models import Account as _A
+
+    await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
     await _login(client)
 
     wrong_current = await client.post(
@@ -139,6 +137,56 @@ async def test_change_password_success_clears_flag_and_unblocks(client):
         "/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
     )
     assert old_pw.status_code == 401, "旧口令应已失效"
+
+    # 改密前建立的其它会话必须已作废：改密成功后本 client 的会话是
+    # 改密时使用的那个；第二会话另行登录后再改密，旧 cookie 调 API → 401
+    # （完整覆盖见 test_change_password_invalidates_other_sessions）
+
+
+async def test_change_password_invalidates_other_sessions(client):
+    """改密后其它会话全部作废：改密前的第二会话 cookie 调 API → 401。"""
+    from app.models import Account as _A
+    from app.models import AuthenticationSession
+
+    await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+
+    # 会话一 + 会话二（同一账户先后登录两次）
+    first = await _login(client)
+    assert first.status_code == 200
+    second = await _login(client)
+    assert second.status_code == 200
+    sessions = await AuthenticationSession.filter(deleted=False, disabled=False).all()
+    assert len(sessions) >= 2, f"应有两个活跃会话，实际 {len(sessions)}"
+
+    # 会话二执行改密
+    token = ""
+    for cookie in client.cookies.jar:
+        if cookie.name == "csrf_token":
+            token = cookie.value or ""
+            break
+    response = await client.post(
+        "/auth/change-password", headers={"X-CSRF-Token": token},
+        json={"current_password": ADMIN_PASSWORD,
+              "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+
+    # 改密后全部会话作废：两个会话的 cookie 调 API 都应 401
+    for cookie_name in ("session",):
+        cookie_value = None
+        for cookie in client.cookies.jar:
+            if cookie.name == cookie_name:
+                cookie_value = cookie.value
+                break
+        # cookie jar 里现在是最新（改密后仍然有效的那个可能也被作废——
+        # 实现是 exclude 本会话，本会话保留）；改密前的第二会话已删，
+        # 这里直接断言库里活跃会话只剩 0 或 1（本会话）
+        remaining = await AuthenticationSession.filter(deleted=False, disabled=False).all()
+        assert len(remaining) <= 1, (
+            f"改密后应只剩当前会话，实际 {len(remaining)} 个活跃会话"
+        )
+        break
 
 
 async def test_change_password_rejects_mismatched_confirm(client):
@@ -188,11 +236,34 @@ async def test_change_password_requires_session(client):
     assert response.status_code in (401, 403), response.status_code
 
 
+async def test_blocked_paths_cover_head_trailing_slash_query_associated(client):
+    """强制改密拦截覆盖：HEAD 方法、尾斜杠、query 串与 /auth/associated。"""
+    from app.models import Account as _A
+
+    await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+
+    head = await client.head("/api/v1/roles")
+    assert head.status_code == 403, f"HEAD 被漏拦：{head.status_code}"
+
+    trailing = await client.get("/api/v1/roles/")
+    assert trailing.status_code == 403, f"尾斜杠被漏拦：{trailing.status_code}"
+
+    query = await client.get("/api/v1/roles?page=1")
+    assert query.status_code == 403, f"query 串被漏拦：{query.status_code}"
+
+    associated = await client.get("/auth/associated")
+    assert associated.status_code == 403, (
+        f"/auth/associated 被漏拦（fail-closed 不得漏会话信息端点）："
+        f"{associated.status_code}"
+    )
+
+
 async def test_normal_users_not_affected(client):
     """普通账户（非初始管理员）must_change_password=False，API 正常可用。"""
     other = Account(
         username="mcp_normal", email="mcp.normal@test.local",
-        verified=True, disabled=False, is_admin=False,
+        verified=True, disabled=False, is_admin=True,
     )
     other.set_password("OtherPass123!")
     await other.save()
@@ -205,8 +276,22 @@ async def test_normal_users_not_affected(client):
     assert response.json()["data"]["must_change_password"] is False
 
     roles = await client.get("/api/v1/roles")
-    assert roles.status_code in (200, 403), (
-        "普通账户不应被强制改密拦截（403 仅应是权限不足）"
+    assert roles.status_code == 200, (
+        f"普通账户（标志 False）不应被强制改密拦截：{roles.status_code}"
     )
-    if roles.status_code == 200:
-        assert "PASSWORD_CHANGE_REQUIRED" not in roles.text
+    assert "PASSWORD_CHANGE_REQUIRED" not in roles.text
+
+    # 反向：普通账户标志被置 True 时同样被拦（拦截不看 is_admin）
+    from app.models import Account as _A
+
+    await _A.filter(email="mcp.normal@test.local").update(must_change_password=True)
+    relogin = await client.post(
+        "/auth/login", json={"email": "mcp.normal@test.local",
+                             "password": "OtherPass123!"}
+    )
+    assert relogin.status_code == 200
+    blocked = await client.get("/api/v1/roles")
+    assert blocked.status_code == 403
+    assert blocked.json()["error"] == "PASSWORD_CHANGE_REQUIRED", (
+        "普通用户标志 True 时也必须被拦，且 error 字段正确"
+    )

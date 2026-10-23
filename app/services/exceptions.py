@@ -41,6 +41,14 @@ class SecurityError(BaseError):
         return self.to_dict()
 
 
+class PasswordChangeRequiredError(SecurityError):
+    """首次登录强制改密：must_change_password=True 的会话访问受限资源。"""
+
+    status_code = 403
+    error_code = "PASSWORD_CHANGE_REQUIRED"
+    message = "首次登录必须修改密码"
+
+
 # 认证相关异常
 class AuthenticationError(SecurityError):
     """认证错误的基类"""

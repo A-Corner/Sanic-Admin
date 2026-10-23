@@ -40,9 +40,25 @@ async def authenticate_request(request: Request) -> None:
         logger.error(f"认证处理时出错: {str(e)}")
 
 
-#: 强制改密拦截的白名单：改密、登出、登录（改密后重登）、会话信息查询。
-#: 拦截面限定在 /api/ 前缀——保护对象是数据面 API；管理台静态页不拦，
-#: 用户仍能打开页面并在 AMIS 里看到 403 提示后走改密对话框。
+#: 强制改密默认拦截**全部**路径（fail-closed：/auth/associated 等会话信息
+#: 端点若漏拦会被用来侧探账户状态），仅放行完成改密与基本导航所必需的
+#: 白名单：认证流程（login/logout/change-password）、管理台静态页（/amis）、
+#: 健康检查与 API 文档。
+
+
+#: 强制改密白名单（前缀匹配）：完成改密与基本导航所必需的最小集合。
+PASSWORD_CHANGE_EXEMPT_PREFIXES = (
+    "/auth/login",
+    "/auth/logout",
+    "/auth/change-password",
+    "/amis",
+    "/health",
+    "/static",
+    "/docs",
+    "/redoc",
+    "/swagger",
+    "/favicon",
+)
 
 
 async def enforce_password_change(request: Request) -> None:
@@ -57,12 +73,12 @@ async def enforce_password_change(request: Request) -> None:
     if bearer is None or not getattr(bearer, "must_change_password", False):
         return
     path = request.path
-    if not path.startswith("/api/"):
-        return
-    from sanic.exceptions import SanicException
+    for prefix in PASSWORD_CHANGE_EXEMPT_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/") or path.startswith(prefix + "."):
+            return
+    from app.services.exceptions import PasswordChangeRequiredError
 
-    # 由全局错误处理器渲染为统一信封（error=PASSWORD_CHANGE_REQUIRED，403）
-    raise SanicException("首次登录必须修改密码", status_code=403)
+    raise PasswordChangeRequiredError()
 
 
 class AuthMiddleware:

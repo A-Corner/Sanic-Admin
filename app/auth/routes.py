@@ -127,10 +127,9 @@ async def on_login(request):
         two_step_session = await request_two_step_verification(
             request, authentication_session.bearer
         )
-        response = json(
-            "登录成功! 需要两步验证。",
-            _delivery_code(request, two_step_session.code),
-        )
+        delivery = _delivery_code(request, two_step_session.code)
+        delivery["must_change_password"] = must_change_password
+        response = json("登录成功! 需要两步验证。", delivery)
         two_step_session.encode(response)
     else:
         data = dict(authentication_session.bearer.json)
@@ -200,9 +199,13 @@ async def on_two_factor_authentication(request):
     完成客户端认证会话的二次验证
     """
     authentication_session = await fulfill_second_factor(request)
+    data = dict(authentication_session.bearer.json)
+    data["must_change_password"] = bool(
+        getattr(authentication_session.bearer, "must_change_password", False)
+    )
     response = json(
         "两步验证已完成! 您现在已通过验证。",
-        authentication_session.bearer.json,
+        data,
     )
     authentication_session.encode(response)
     return response
