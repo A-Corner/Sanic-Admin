@@ -62,20 +62,24 @@ v0.2.0 尚在开发中，**不应用于生产环境**。安全策略与实现会
 
 以下限制**当前确实存在**，请在评估风险时一并考虑。
 
-* **没有登录限流。** 除验证码会话自身的尝试次数上限外，登录接口不限制尝试频率，
-  可被用于口令爆破。建议在反向代理层加限流，或在 v0.3 引入应用层限流。
+* **登录限流（v0.3.0 起）。** 登录接口按**账户**与**来源 IP** 双维度独立计数，
+  5 次失败 / 15 分钟触发 429（任一维度超限即拒；成功登录双键清零）。IP 维度默认只信
+  socket 直连对端，`X-Forwarded-For` 仅在配置 `TRUSTED_PROXIES` 后按可信代理规则采信
+  （该配置暂无环境变量接线，见 v0.3.0 Release Notes 已知限制）。
 * **两步验证（2FA）默认关闭。** 由 `REQUIRE_TWO_FACTOR=true` 开启，且是**全局**开关
   （不支持按账户开关）。验证码的投递渠道尚未接入——非 DEBUG 环境下验证码不会出现在
   响应里，相关流程需先接入邮件/短信渠道才能使用。
 * **上传大小上限。** 通用文件 10MB、头像 2MB，请求体整体上限 16MB
-  （`MAX_CONTENT_LENGTH`）。超限会被拒绝，但上限本身不算很高。
+  （`REQUEST_MAX_SIZE`，v0.3.0 起真实生效；注意 Sanic 25 下超限客户端通常表现为
+  连接中断而非收到 413 响应，服务端日志仍记录 413）。
 * **SQL 分析接口需要高权限。** 任何持有 `system:database:query` 权限的账户都能提交
   SQL 文本。虽然只发 `EXPLAIN`、不执行语句，但 `EXPLAIN` 本身仍由数据库执行，
   恶意构造的语句可能造成资源消耗（例如超大 `CROSS JOIN` 的计划计算）。
 * **验证码/两步验证的投递渠道未接入。** 只能用于本地联调。
-* **CSRF 保护是可选装饰器而非默认启用。** `csrf_protect()` 已实现
-  （非 GET 请求校验 `X-CSRF-Token` 头与 `csrf_token` Cookie），但**没有**挂到路由上。
-  当前的防护依赖：会话 Cookie 为 `HttpOnly` + `SameSite=Lax`，以及 API 使用
+* **CSRF 保护（v0.3.0 起默认启用）。** 携带会话 Cookie 且不带 `Authorization` 头的
+  写请求校验双提交 token（`X-CSRF-Token` 头 + `csrf_token` Cookie）；AMIS 控制台经
+  `requestAdaptor` 自动注入。已知残留：登录/注册端点豁免（无预登录 token，login-CSRF
+  在 backlog）。既有底线防护不变：会话 Cookie 为 `HttpOnly` + `SameSite=Lax`，以及 API 使用
   `Authorization` 头而非 Cookie 承载凭据。
 * **development 环境的 CORS 默认是 `*`。** production 下默认为空。
 * **仓库历史中提交过示例 JWT 私钥、默认管理员口令和一个 SQLite 数据库。**

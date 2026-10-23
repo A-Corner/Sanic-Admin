@@ -19,7 +19,7 @@
 - **安全基线**：生产环境缺少必需密钥时 **fail-closed**（直接退出，rc=1）；仓库内无密钥；SQL 分析只接受单条 `SELECT`/`WITH`；上传文件使用生成的文件名，不使用原始文件名拼路径。
 - **API 文档**：OpenAPI 3.0 生成器与 `@api_tags` / `@api_summary` / `@api_response` 等装饰器，由 `ENABLE_API_DOCS` 控制（开发环境开、生产环境关）。实测 `/swagger` 302 跳转后 200、`/redoc` 200、`/swagger.json` 200 且规范含 66 条 path（详见英文版 README）。
 
-**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.2.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；测试覆盖率 52%；`value` 字段仍无长度上限（实际上限 100MB），且 `MAX_CONTENT_LENGTH` 配置项在 Sanic 23.6 下不生效——两项均留到 v0.3。
+**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.3.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；测试覆盖率 68% 仍不足；登录页缺独立的 login-CSRF token（`TRUSTED_PROXIES` 亦暂无环境变量接线）。v0.2.x 遗留的 value 长度与请求体上限问题已在 v0.3.0 修复（value ≤ 8192、`REQUEST_MAX_SIZE` 16MB 真实生效）。
 
 ---
 

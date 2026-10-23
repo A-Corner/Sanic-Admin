@@ -131,7 +131,8 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 | `PORT` | 监听端口 | `22222` | 否 |
 | `AMIS_DIR` | AMIS 管理界面的静态资源目录。M1 起由后端同源托管在 `/amis` 下，浏览器访问 `http://127.0.0.1:22222/amis/login.html` 即为登录页，与 API 同源，不涉及 CORS。目录为空或不存在则不挂载（生产环境可据此关闭管理界面） | `str(BASE_DIR / "amis")`，即项目根下的 `amis/` | 否 |
 
-`WORKERS`（1）、`AUTO_RELOAD`（False）、`AUTO_RELOAD`、`MAX_CONTENT_LENGTH`（16 MB）、
+`WORKERS`（1）、`AUTO_RELOAD`（False）、`REQUEST_MAX_SIZE`（16 MB，v0.3.0 起替代
+曾长期无效的 `MAX_CONTENT_LENGTH`——该名在 Sanic 下从未被读取，已于 v0.3.0 删除）、
 `COMPRESSION_MIN_LENGTH`（1024）、`COMPRESSION_LEVEL`（6）、`DEFAULT_PAGE_SIZE`（10）、
 `MAX_PAGE_SIZE`（100）、`LOG_DIR`、`LOG_LEVEL`（INFO）均为类常量，**不可通过环境变量覆盖**。
 
