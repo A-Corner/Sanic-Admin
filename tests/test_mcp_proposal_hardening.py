@@ -42,10 +42,27 @@ from tools.mcp_server.proposal_registry import (
 _SPEC = "resource: demo\ntable: demo\nlabel: d\nfields:\n  - name: a\n    type: string\n"
 
 
+#: 测试自己跑 git 时的环境：与实现一样清掉能改变目标仓库的变量，
+#: 否则 `test_git_dir_env_cannot_redirect_repo` 里断言会查错仓库。
+_REPO_ENV_KEYS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE", "GIT_COMMON_DIR",
+)
+
+
+def _clean_env(**extra) -> dict:
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    for k in _REPO_ENV_KEYS:
+        env.pop(k, None)
+    env.update(extra)
+    return env
+
+
 def _run(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True,
-        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+        env=_clean_env(),
     ).stdout
 
 
@@ -152,6 +169,114 @@ def test_discard_refuses_non_proposal_prefix(repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 一之三、L1 回滚的两种结果必须可区分
+# ---------------------------------------------------------------------------
+
+
+def test_marker_write_failure_rolls_back_branch(repo: Path, monkeypatch) -> None:
+    """
+    标记写入失败、回滚成功 → 分支必须已被删除，错误信息含「已回滚」。
+
+    破坏实验：把回滚那段删掉（或改成 pass）→ 分支残留，测试红。
+    """
+    import tools.mcp_server.git_isolation as gi
+
+    real = gi._git_on_user_repo
+
+    def _fail_marker(repo_root, args):
+        # 只让「写标记」失败，其它（回滚用的 update-ref -d）照常
+        if args[0] == "update-ref" and len(args) == 3 and args[1].startswith(
+            "refs/specgen/proposals/"
+        ):
+            raise subprocess.CalledProcessError(1, ["git", *args], stderr="boom")
+        return real(repo_root, args)
+
+    monkeypatch.setattr(gi, "_git_on_user_repo", _fail_marker)
+    branch = gi.make_branch_name("demo")
+
+    with pytest.raises(GitNotAllowed) as excinfo:
+        gi.make_proposal(
+            repo, branch, "proposal: marker fail",
+            lambda d: (d / "specs" / "demo.yaml").write_text(_SPEC, encoding="utf-8"),
+        )
+    msg = str(excinfo.value)
+    assert "已回滚分支" in msg, f"错误信息没说明已回滚：{msg}"
+
+    # 回滚必须真的生效：分支不应存在
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
+        cwd=str(repo), capture_output=True, text=True,
+        env=_clean_env(),
+    )
+    assert proc.returncode != 0, f"回滚后分支仍存在：{branch}"
+
+
+def test_marker_and_rollback_failure_reports_residue(repo: Path, monkeypatch) -> None:
+    """
+    标记写入失败 **且** 回滚也失败 → 错误信息必须点名残留分支，供人工处理。
+
+    破坏实验：把回滚失败分支的 message 改回「已回滚」或吞掉异常 → 测试红。
+    """
+    import tools.mcp_server.git_isolation as gi
+
+    def _all_fail(repo_root, args):
+        if args[0] == "update-ref":
+            raise subprocess.CalledProcessError(1, ["git", *args], stderr="denied")
+        raise AssertionError(f"这次测试只应出现 update-ref：{args}")
+
+    monkeypatch.setattr(gi, "_git_on_user_repo", _all_fail)
+    branch = gi.make_branch_name("demo")
+
+    with pytest.raises(GitNotAllowed) as excinfo:
+        gi.make_proposal(
+            repo, branch, "proposal: total fail",
+            lambda d: (d / "specs" / "demo.yaml").write_text(_SPEC, encoding="utf-8"),
+        )
+    msg = str(excinfo.value)
+    assert "回滚也失败" in msg, f"没说明回滚失败：{msg}"
+    assert branch in msg, f"错误信息未点名残留分支 {branch!r}：{msg}"
+
+
+# ---------------------------------------------------------------------------
+# 一之四、GIT_DIR 等变量不得改变操作目标
+# ---------------------------------------------------------------------------
+
+
+def test_git_dir_env_cannot_redirect_repo(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    """
+    L4：用户环境里的 GIT_DIR 指向另一个仓库时，我们的操作仍作用于目标仓库。
+
+    不清理 GIT_DIR 的话，`git -C <target>` 会被 GIT_DIR 覆盖——命令实际跑在
+    另一个仓库上，于是「在用户仓库写标记」会写到别处。
+    """
+    other = tmp_path / "other-repo"
+    other.mkdir()
+    _run(other, "init", "-q")
+    (other / "x.txt").write_text("x", encoding="utf-8")
+    _run(other, "add", "-A")
+    _run(other, "-c", "user.name=t", "-c", "user.email=t@x.invalid",
+         "commit", "-q", "-m", "other init")
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+
+    result = _propose(repo)
+
+    # 标记必须写在**目标仓库**里，不是 other
+    marked = _run(repo, "rev-parse", "--verify",
+                  f"{proposal_ref(result['branch'])}^{{commit}}").strip()
+    assert marked == result["commit"]
+
+    # other 仓库里不该出现这个 ref
+    proc = subprocess.run(
+        ["git", "--git-dir", str(other / ".git"), "rev-parse", "--verify",
+         proposal_ref(result["branch"])],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode != 0, "标记被写到 GIT_DIR 指向的仓库里了"
+
+
+# ---------------------------------------------------------------------------
 # 一之二、用户仓库的 hook 不得被触发（M1）
 # ---------------------------------------------------------------------------
 
@@ -213,6 +338,49 @@ def test_discard_rejects_malformed_branch_name(repo: Path) -> None:
         assert "不合法" in str(excinfo.value), (
             f"{bad!r} 的拒绝理由不是形态校验：{excinfo.value}"
         )
+
+
+def test_marker_deletion_is_guarded_by_expected_sha(repo: Path) -> None:
+    """
+    删标记时必须带期望值——`update-ref -d <ref> <expected>` 的 `expected` 不是摆设。
+
+    **为什么直接测 git 层**：在 `discard_proposal` 的流程里，标记 SHA 与分支
+    SHA 必须先一致才会走到删标记那一步；一致之后再去「并发改标记」需要精确
+    卡在两步之间，测试难以稳定复现。所以这里直接验证**被依赖的 git 语义**：
+    带期望值时实际 SHA 不匹配则拒绝删除。
+
+    这条与实现是契约级关系：实现依赖这个语义。若实现漏了 `expected`，
+    它会无条件删除——本测试演示了两者的差别。
+    """
+    ref = "refs/specgen/proposals/guard-check"
+    a = _run(repo, "rev-parse", "master").strip()
+    # 标记指向 a
+    _run(repo, "update-ref", ref, a)
+
+    (repo / "z.txt").write_text("z", encoding="utf-8")
+    _run(repo, "add", "-A")
+    _run(repo, "-c", "user.name=t", "-c", "user.email=t@x.invalid",
+         "commit", "-q", "-m", "another")
+    b = _run(repo, "rev-parse", "HEAD").strip()
+    assert a != b
+
+    # 用**错误的**期望值 b 去删（ref 实际指向 a）→ 必须拒绝
+    proc = subprocess.run(
+        ["git", "update-ref", "-d", ref, b],
+        cwd=str(repo), capture_output=True, text=True, env=_clean_env(),
+    )
+    assert proc.returncode != 0, "带期望值但 SHA 不匹配时，git 竟然删了"
+    alive = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        cwd=str(repo), capture_output=True, text=True, env=_clean_env(),
+    )
+    assert alive.returncode == 0, "标记被删了"
+
+    ok = subprocess.run(
+        ["git", "update-ref", "-d", ref, a],
+        cwd=str(repo), capture_output=True, text=True, env=_clean_env(),
+    )
+    assert ok.returncode == 0, f"期望值正确时应当能删：{ok.stderr[:200]}"
 
 
 # ---------------------------------------------------------------------------

@@ -113,6 +113,25 @@ class GitNotAllowed(Exception):
     """尝试执行白名单之外的 git 子命令。"""
 
 
+#: 能覆盖「操作哪个仓库」的环境变量。必须全部清掉：
+#: ``GIT_DIR`` 最危险——它优先于 cwd，会让我们的命令操作别的仓库。
+_REPO_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_COMMON_DIR",
+)
+
+
+def _strip_repo_env(env: dict) -> None:
+    """从 env 里删掉所有能改变目标仓库的变量（原地修改）。"""
+    for name in _REPO_ENV_VARS:
+        env.pop(name, None)
+
+
 def _git(args: Sequence[str], cwd: Path, *, env_extra: Optional[dict] = None) -> str:
     """
     执行一条 git 命令，**子命令必须在白名单内**。
@@ -201,9 +220,15 @@ def _git(args: Sequence[str], cwd: Path, *, env_extra: Optional[dict] = None) ->
     # hook。把全局与系统配置都关掉，git 只看仓库自己的 .git/config。
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
-    # **显式覆盖身份环境变量**：`GIT_AUTHOR_NAME` / `GIT_COMMITTER_EMAIL` 这类变量
-    # 的优先级高于 `-c user.name=...`——若运行环境设了它们，会盖过工具身份。
-    # 与 `-c user.*` 配套，确保 commit 的作者始终是本工具，不随环境漂移。
+    # 顺序：**先清理、再覆盖**。
+    # 1) 清掉能改变「操作哪个仓库」的变量。不清理的话，用户环境里的 GIT_DIR
+    #    会让 `git -C <我们指定的 cwd>` 仍然操作另一个仓库——cwd 参数形同虚设。
+    #    （本工具，v0.4.1 硬化）
+    _strip_repo_env(env)
+    # 2) 显式覆盖身份环境变量：`GIT_AUTHOR_NAME` / `GIT_COMMITTER_EMAIL` 这类
+    #    变量的优先级高于 `-c user.name=...`——若运行环境设了它们，会盖过工具
+    #    身份。与 `-c user.*` 配套，确保 commit 的作者始终是本工具，不随环境漂移。
+    #    （另一条 lane 的改动，与本工具的 `_REPO_ENV_VARS` 零交集，两段并存）
     for _k, _v in (
         ("GIT_AUTHOR_NAME", _TOOL_NAME),
         ("GIT_AUTHOR_EMAIL", _TOOL_EMAIL),
@@ -396,16 +421,35 @@ def make_proposal(
             # L1：标记写失败时回滚刚落地的分支——否则会留下一个「无归属」的
             # 提案分支，既不能被 discard（没有标记），又占着名字。
             # 用带期望值的 update-ref -d 保证只删我们刚写的那个 commit。
+            #
+            # 回滚本身也可能失败，两种结果必须**分别**告诉调用方：
+            # 失败的 `pass` 会让调用方以为已经清理干净，实际残留了一个分支。
+            rollback_ok = True
+            rollback_err = ""
             try:
                 _git_on_user_repo(
                     repo_root,
                     ["update-ref", "-d", f"refs/heads/{branch}", commit],
                 )
-            except subprocess.CalledProcessError:
-                pass
+            except (GitNotAllowed, subprocess.CalledProcessError) as rb_exc:
+                rollback_ok = False
+                rollback_err = (
+                    getattr(rb_exc, "stderr", "") or str(rb_exc)
+                ).strip()[:200]
+                _log.error(
+                    "提案分支回滚失败，残留分支 %s（commit %s）：%s",
+                    branch, commit, rollback_err,
+                )
+            if rollback_ok:
+                raise GitNotAllowed(
+                    f"提案分支已创建但归属标记写入失败，**已回滚分支** {branch!r}，"
+                    f"仓库已恢复到操作前状态。原因：{(exc.stderr or '').strip()[:200]}"
+                ) from None
             raise GitNotAllowed(
-                f"提案分支已创建但归属标记写入失败，已尝试回滚分支 {branch!r}。"
-                f"请人工检查：{(exc.stderr or '').strip()[:200]}"
+                f"提案分支已创建，归属标记写入失败，**回滚也失败了**："
+                f"残留分支 {branch!r}（commit {commit}）需要人工删除。"
+                f"标记写入错误：{(exc.stderr or '').strip()[:150]}；"
+                f"回滚错误：{rollback_err}"
             ) from None
         return {
             "branch": branch,
@@ -415,6 +459,12 @@ def make_proposal(
         }
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+#: 允许在**用户仓库**上执行的子命令。
+_USER_REPO_SUBCOMMANDS = frozenset({
+    "update-ref", "fetch", "rev-parse", "for-each-ref", "symbolic-ref",
+})
 
 
 def _git_on_user_repo(repo_root: Path, args: Sequence[str]) -> str:
@@ -429,6 +479,16 @@ def _git_on_user_repo(repo_root: Path, args: Sequence[str]) -> str:
     做法：独立起 subprocess，带 ``-c core.hooksPath=/dev/null -c gc.auto=0``
     （与 ``fetch_from_local_clone`` 一致），并做同样的环境净化。
     """
+    if not args:
+        raise GitNotAllowed("用户仓库操作缺少子命令")
+    # 只允许**实际用到**的子命令。`_git` 的白名单更宽（含 clone/add/commit 等
+    # 只在隔离 clone 里用的），这里收紧到用户仓库上真正需要的几个——
+    # 任何新增的用户仓库写操作都必须显式加进这个集合，避免顺手扩权。
+    if args[0] not in _USER_REPO_SUBCOMMANDS:
+        raise GitNotAllowed(
+            f"用户仓库不允许子命令 {args[0]!r}；允许的是 "
+            f"{sorted(_USER_REPO_SUBCOMMANDS)}"
+        )
     for arg in args:
         if arg in _FORBIDDEN_ARGS or arg.startswith("--force"):
             raise GitNotAllowed(f"用户仓库操作不允许参数 {arg!r}")
@@ -438,6 +498,7 @@ def _git_on_user_repo(repo_root: Path, args: Sequence[str]) -> str:
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ASKPASS"] = ""
     env["SSH_ASKPASS"] = ""
+    _strip_repo_env(env)
     result = subprocess.run(
         ["git",
          "-c", "core.hooksPath=" + os.devnull,
@@ -477,6 +538,9 @@ def fetch_from_local_clone(repo_root: Path, clone_dir: Path, branch: str) -> Non
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # 同样要清 GIT_DIR 等变量：不清的话 fetch 会把分支写进 GIT_DIR 指向的
+    # 另一个仓库，而我们后续在主仓库里找不到它（实测：回滚会因此失败）。
+    _strip_repo_env(env)
     subprocess.run(
         ["git",
          "-c", "core.hooksPath=" + os.devnull,
@@ -537,7 +601,10 @@ def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> No
             "本工具只删除自己创建的提案分支——手工建立的同名分支不会被删。"
         ) from None
 
-    current = _git(["rev-parse", f"{branch}^{{commit}}"], cwd=repo_root).strip()
+    # 全名解析：短名遇到同名 tag 时 git 会有歧义（tag 与分支同名是合法的）
+    current = _git(
+        ["rev-parse", f"refs/heads/{branch}^{{commit}}"], cwd=repo_root
+    ).strip()
     if marked != current:
         raise GitNotAllowed(
             f"拒绝删除 {branch!r}：分支已被改动（标记指向 {marked[:7]}，"
@@ -563,14 +630,26 @@ def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> No
     # 失败不致命：标记指向一个已不存在的 commit，下次 discard 会因 SHA 不一致拒绝，
     # 但不会误删——这是安全方向的失败。
     try:
-        _git_on_user_repo(repo_root, ["update-ref", "-d", ref])
+        # 带期望值：只删掉指向 marked 的那个标记。若标记在此期间被别人改成
+        # 别的 commit，git 会拒绝——避免误删他人的标记。
+        _git_on_user_repo(repo_root, ["update-ref", "-d", ref, marked])
     except subprocess.CalledProcessError:
         _log.warning("归属标记 %s 清理失败（分支已删除）", ref)
 
 
 def branch_exists(repo_root: Path, branch: str) -> bool:
-    out = _git(["branch", "--list", branch], cwd=repo_root)
-    return bool(out.strip())
+    """
+    分支是否存在。
+
+    用 `rev-parse --verify refs/heads/<b>` 而非 `branch --list <b>`：后者在
+    存在同名 tag 时行为依赖匹配模式，前者按全名精确解析，不会把 tag 当成分支。
+    """
+    try:
+        _git(["rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"],
+             cwd=repo_root)
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 
 #: ref 形态白名单：`check-ref-format` 的严格子集。

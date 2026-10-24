@@ -77,8 +77,11 @@ def make_workspace() -> Path:
     """
     创建本次提案的临时工作目录，并写入标记文件。
 
-    目录名带 pid，便于清理时跳过当前进程正在用的那个（同一进程内多次提案也
-    不会互相误删）。
+    **目录名不含 pid**：用 ``tempfile.mkdtemp(prefix=TMP_PREFIX)`` 生成随机后缀，
+    这样同一进程内连续多次提案不会撞名。识别「是不是当前进程的」靠**标记文件
+    内容里的 pid**，不靠目录名。
+
+    （早先的 docstring 写「目录名带 pid」，与实现不符，已更正。）
     """
     root = Path(tempfile.mkdtemp(prefix=TMP_PREFIX))
     (root / TMP_MARKER).write_text(
