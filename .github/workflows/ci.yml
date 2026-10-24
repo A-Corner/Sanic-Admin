@@ -182,3 +182,91 @@ jobs:
     - name: Show server log on failure
       if: failure()
       run: tail -100 tmp/server.log || true
+
+  # ---------------------------------------------------------------------------
+  # 方言 DDL 实跑：MySQL / PostgreSQL 的真实 DDL 必须能执行
+  #
+  # 为什么要有这个 job：`check_migrations` 只把迁移 DDL 当**文本**比对，从不执行。
+  # MySQL 的 DDL 与 SQLite 差别很大（反引号、AUTO_INCREMENT、COMMENT、DATETIME(6)），
+  # 语法错误在只跑 SQLite 的 CI 里一路绿灯，到生产才炸。真实案例：
+  # `migrations/dialects/mysql/0_*_init.py` 里写 `\'`，被 Python 还原成裸引号，
+  # 任何 MySQL 全新部署都在基线第一步就报 1064。
+  #
+  # 这个 job 跑在 GitHub runner 上（不是本机），用 services 起真库。
+  # ---------------------------------------------------------------------------
+  migrations-dialects:
+    # GitHub 默认把 matrix 的**所有**字段值拼进 job 显示名，长到无法阅读
+    # （实测：「migrations-dialects (mysql, mysql, mysql:8.0, 3306, mysql://...」）。
+    # 必须在 job 层用 name 显式指定，只取 dialect。
+    name: migrations-dialects (${{ matrix.dialect }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dialect: mysql
+            image: mysql:8.0
+            port: 3306
+            fresh_url: mysql://root:root@127.0.0.1:3306/sanic_a
+            existing_url: mysql://root:root@127.0.0.1:3306/sanic_a_ex
+            health: >-
+              --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+              --health-interval=10s --health-timeout=5s --health-retries=12
+          - dialect: postgres
+            image: postgres:16
+            port: 5432
+            fresh_url: postgres://postgres:root@127.0.0.1:5432/sanic_a
+            existing_url: postgres://postgres:root@127.0.0.1:5432/sanic_a_ex
+            health: >-
+              --health-cmd="pg_isready -U postgres"
+              --health-interval=10s --health-timeout=5s --health-retries=12
+
+    services:
+      db:
+        image: ${{ matrix.image }}
+        # 两个镜像的环境变量都写上：各自只读自己认识的，多余的会被忽略。
+        # 不用 `env: ${{ matrix.db_env }}` —— GitHub Actions 不支持用表达式整体
+        # 替换一个 mapping，那种写法不会报错但可能静默得到空 env。
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: sanic_a
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: sanic_a
+        ports:
+          - ${{ matrix.port }}:${{ matrix.port }}
+        options: ${{ matrix.health }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: requirements.txt
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install asyncmy asyncpg
+
+    - name: Install the target dialect's migration baseline
+      run: python scripts/migrations/select_dialect_baseline.py ${{ matrix.dialect }}
+
+    # 新库：空库跑完整迁移链（基线 0_* + 增量 1_*），再用 information_schema
+    # 断言关键列的类型/唯一/外键。MySQL 的 DDL 语法错误会在这里直接炸。
+    - name: "New database: full chain (baseline + increment)"
+      env:
+        SANIC_ENV: development
+        INITIAL_ADMIN_PASSWORD: ci-check-only
+      run: python scripts/check_dialect_ddl.py ${{ matrix.dialect }} "${{ matrix.fresh_url }}"
+
+    # 存量库：先用当前模型建表（模拟 v0.3.2 的 generate_schemas 库），再基线化，
+    # 再 upgrade —— 断言只应用增量、基线不重跑。
+    - name: "Existing database: increment only"
+      env:
+        SANIC_ENV: development
+        INITIAL_ADMIN_PASSWORD: ci-check-only
+      run: python scripts/check_dialect_ddl.py ${{ matrix.dialect }} "${{ matrix.existing_url }}" --existing

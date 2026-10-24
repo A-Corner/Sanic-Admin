@@ -619,43 +619,107 @@ def test_select_dialect_rejects_incomplete_dialect_set(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_mysql_baseline_comment_quotes_are_escaped():
-    """
-    MySQL 基线里注释文本内含单引号时，Python 源码必须写 `\\\\'`（两个字符）。
+def _all_dialect_migrations():
+    """dialects 下所有方言的全部迁移文件。"""
+    out = []
+    for d in ("sqlite", "mysql", "postgres"):
+        base = REPO / "migrations" / "dialects" / d
+        if not base.is_dir():
+            continue
+        for f in sorted(base.glob("*.py")):
+            if not f.name.startswith("__"):
+                out.append((d, f))
+    return out
 
-    写 `\\'` 会被 Python 三引号字符串还原成裸 `'`，实际发出的 SQL 就变成
-    `COMMENT '令牌类型，如 'activation', ...'`——MySQL 报 1064。
-    这个缺陷本地 sqlite 测试与 check_migrations 都发现不了（它们不执行 MySQL
-    DDL），只能靠真实 MySQL 实跑或本用例。
 
-    守的是「实际发出的 SQL 里，注释字符串内部没有未转义的裸引号」。
-    """
+def _emitted_sql(path):
+    """执行迁移文件的 upgrade()，取出实际要发给数据库的 SQL。"""
     import asyncio
     import importlib.util
 
-    path = REPO / "migrations" / "dialects" / "mysql" / "0_20261024125437_init.py"
-    assert path.is_file(), f"MySQL 基线不存在: {path}"
-    spec = importlib.util.spec_from_file_location("mysql_baseline", path)
+    spec = importlib.util.spec_from_file_location(f"mig_{path.stem}", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    sql = asyncio.run(mod.upgrade(None))
+    return asyncio.run(mod.upgrade(None))
 
-    # 逐行找 COMMENT '...'，检查其中的单引号是否都已用反斜杠转义
+
+def _unescaped_quotes_in_comments(sql, dialect):
+    """
+    返回注释字符串内部未转义的裸引号所在行（空列表 = 通过）。
+
+    各方言的转义写法不同：
+      - MySQL：字符串用 `\\'` 转义单引号，注释是 `COMMENT '...'`
+      - PostgreSQL：字符串用 `''` 双写转义，注释是 `COMMENT ON ... IS '...'`
+      - SQLite：注释是 `/* ... */` 块注释，内部单引号无需转义（不检查）
+    """
     import re
 
     problems = []
     for lineno, line in enumerate(sql.splitlines(), 1):
-        m = re.search(r"COMMENT\s+'(.*)',?\s*$", line.strip())
-        if not m:
-            continue
-        body = m.group(1)
-        # 去掉已转义的 \' 后，仍出现的 ' 就是裸引号
-        unescaped = body.replace("\\'", "")
-        if "'" in unescaped:
-            problems.append(f"第 {lineno} 行注释里有未转义的引号：{line.strip()[:100]}")
-    assert not problems, "MySQL DDL 注释中的单引号未正确转义：\n" + "\n".join(problems)
+        stripped = line.strip()
+        if dialect == "mysql":
+            # 注释体是 COMMENT 后那对引号之间的内容；不能贪婪到行尾，
+            # 否则会把后面的 DEFAULT 'active' 也吞进来造成误报
+            m = re.search(r"COMMENT\s+'(.*?)'(?=\s*(?:DEFAULT|,|$))", stripped)
+            if not m:
+                continue
+            body = m.group(1)
+            # 去掉已转义的 \' 后仍有 ' 即为裸引号
+            unescaped = body.replace("\\'", "")
+            if "'" in unescaped:
+                problems.append(
+                    f"第 {lineno} 行注释里有未转义的引号：{stripped[:100]}")
+        elif dialect == "postgres":
+            m = re.search(r"COMMENT ON .*? IS '(.*)';?$", stripped)
+            if not m:
+                continue
+            body = m.group(1)
+            # PG 里 '' 是转义后的单引号；去掉成对的 '' 后仍有 ' 即为未转义
+            unescaped = body.replace("''", "")
+            if "'" in unescaped:
+                problems.append(
+                    f"第 {lineno} 行注释里有未转义的引号：{stripped[:100]}")
+        # sqlite 用 /* */ 块注释，不检查
+    return problems
 
-    # 正向对照：确认令牌类型那条注释确实含引号，否则上面的循环是空转
-    assert "token_type" in sql, "基线里找不到 token_type 列，用例前提不成立"
-    token_line = next(ln for ln in sql.splitlines() if "token_type" in ln)
-    assert "activation" in token_line, "token_type 注释内容与预期不符"
+
+def test_all_dialect_migrations_have_escaped_comment_quotes():
+    """
+    dialects 下**每个**迁移文件，注释里的引号都必须按各自方言的规则转义。
+
+    MySQL 基线曾写 `\\'`（Python 还原成裸引号）导致 1064，任何 MySQL 全新部署
+    都在基线第一步失败。PG 用 `''` 双写转义，写错同样会语法错误。
+    这两类问题本地 sqlite 测试与 check_migrations（只做文本比对）都发现不了。
+    """
+    files = _all_dialect_migrations()
+    assert files, "找不到任何方言迁移文件，用例前提不成立"
+
+    problems = []
+    checked_with_quotes = 0
+    for dialect, path in files:
+        sql = _emitted_sql(path)
+        found = _unescaped_quotes_in_comments(sql, dialect)
+        for f in found:
+            problems.append(f"[{dialect}] {path.name}: {f}")
+        if dialect in ("mysql", "postgres") and (
+                "activation" in sql or "令牌类型" in sql):
+            checked_with_quotes += 1
+
+    assert not problems, "迁移 DDL 注释中的引号未按方言正确转义：\n" + "\n".join(problems)
+    # 正向对照：至少有一个 MySQL/PG 文件确实带含引号的注释，否则检查是空转
+    assert checked_with_quotes > 0, (
+        "没有任何 MySQL/PG 迁移含带引号的注释，本用例无法证明检查有效")
+
+
+def test_quote_guard_detects_broken_mysql_escaping(tmp_path):
+    """正向对照：故意写坏转义，守卫必须报出来。"""
+    src = (REPO / "migrations" / "dialects" / "mysql" /
+           "0_20261024125437_init.py").read_text()
+    broken = src.replace("\\\\'", "\\'")  # \\' -> \'
+    assert broken != src, "替换未生效，用例前提不成立"
+    bad = tmp_path / "0_broken_init.py"
+    bad.write_text(broken, encoding="utf-8")
+
+    sql = _emitted_sql(bad)
+    found = _unescaped_quotes_in_comments(sql, "mysql")
+    assert found, "转义被写坏后守卫未报错"
