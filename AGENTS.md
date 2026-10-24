@@ -305,6 +305,32 @@ python scripts/amis_e2e_check.py ... --negative-control login_password
   两种可能都要排查：断言测不到，或者破坏没破到。
 - 最稳的做法：故意做**两种不同方向**的破坏。两种都能让测试红，才说明断言覆盖了该行为。
 
+#### 报告破坏实验时，必须贴原始输出行
+
+**不能只写「破坏后测试变红 ✓」。** 必须把那条断言的实际输出贴出来：
+
+```
+$ pytest -k expected_sha_to_git
+FAILED tests/test_mcp_proposal_hardening.py::test_discard_passes_expected_sha_to_git
+```
+
+或者恢复后：
+
+```
+$ pytest tests/test_mcp_proposal_hardening.py
+23 passed
+```
+
+理由：2026-10-24 我做过一次破坏实验，输出是 `1 passed, 21 deselected`，
+**我在报告里写成了「契约测试红 ✓」**。看输出时我已经有结论（「破坏应该会让它红」），
+输出不符合预期时没有纠正结论，而是照结论写。带了对勾，看起来像验证过的。
+
+这条规矩的作用是**让报告里的每个「✓」背后都有一行可核对的事实**。写「红 ✓」时
+如果必须附上 `FAILED` 那行，就编不出来。
+
+同时要贴**破坏是否生效**的证据（`grep` 到改动后的代码行），否则「红了」也可能是
+别的原因造成的——这与上面「破坏本身可能没破坏到」是同一类。
+
 #### 恢复文件只能用备份，不能用 `git checkout`
 
 做破坏实验前，**先用 `cp` 把文件备份到 `/tmp/<名字>.bak`**，实验完成后从这个备份恢复：
