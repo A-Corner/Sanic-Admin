@@ -66,6 +66,10 @@ _COMMIT_IDENTITY = (
     "user.email=specgen-mcp@noreply.invalid",
 )
 
+#: 从 :data:`_COMMIT_IDENTITY` 派生，供环境变量覆盖使用（避免两处定义漂移）。
+_TOOL_NAME = _COMMIT_IDENTITY[0].split("=", 1)[1]
+_TOOL_EMAIL = _COMMIT_IDENTITY[1].split("=", 1)[1]
+
 #: 允许通过 `git -c key=value` 前置传入的配置键。
 #: 只放行提交身份；`core.hooksPath`、`alias.*`、`filter.*` 等一律拒绝。
 _ALLOWED_CONFIG_KEYS = frozenset({"user.name", "user.email"})
@@ -192,6 +196,16 @@ def _git(args: Sequence[str], cwd: Path, *, env_extra: Optional[dict] = None) ->
     # hook。把全局与系统配置都关掉，git 只看仓库自己的 .git/config。
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    # **显式覆盖身份环境变量**：`GIT_AUTHOR_NAME` / `GIT_COMMITTER_EMAIL` 这类变量
+    # 的优先级高于 `-c user.name=...`——若运行环境设了它们，会盖过工具身份。
+    # 与 `-c user.*` 配套，确保 commit 的作者始终是本工具，不随环境漂移。
+    for _k, _v in (
+        ("GIT_AUTHOR_NAME", _TOOL_NAME),
+        ("GIT_AUTHOR_EMAIL", _TOOL_EMAIL),
+        ("GIT_COMMITTER_NAME", _TOOL_NAME),
+        ("GIT_COMMITTER_EMAIL", _TOOL_EMAIL),
+    ):
+        env[_k] = _v
     if env_extra:
         env.update(env_extra)
 
@@ -206,7 +220,7 @@ def _git(args: Sequence[str], cwd: Path, *, env_extra: Optional[dict] = None) ->
     )
     if result.returncode != 0:
         raise subprocess.CalledProcessError(
-            result.returncode, ["git", *args],
+            result.returncode, ["git", *prefix, *args],
             output=result.stdout, stderr=result.stderr,
         )
     return result.stdout
