@@ -34,8 +34,15 @@ from tools.mcp_server import ToolError
 TOKEN_ENV = "SANIC_ADMIN_MCP_TOKEN"
 #: 环境变量名：whoami 服务地址（显式配置才允许指向非回环主机）。
 API_URL_ENV = "SANIC_ADMIN_MCP_API_URL"
+#: 环境变量名：非回环地址的显式放行开关（值为 "1" 时生效）。
+ALLOW_REMOTE_ENV = "SANIC_ADMIN_MCP_ALLOW_REMOTE"
 #: 默认回调地址：本机回环（token 默认不出本机）。
 DEFAULT_API_URL = "http://127.0.0.1:22222"
+
+#: 默认允许的回调主机：仅本机回环。
+#: 注意按**完整 host 串精确匹配**——``127.0.0.1.evil.com`` 这类后缀域名
+#: 不以任何形式命中此表（审核整改：URL 形态攻击面）。
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 #: 回调超时上限（CPL 约束 3：5s 以内）。
 TIMEOUT_SECONDS = 5.0
@@ -75,11 +82,16 @@ def get_api_url() -> str:
 
 def _guard_api_url(url: str) -> str:
     """
-    回调目标约束（CPL 约束 3）：必须是 http(s) URL 且有主机名。
+    回调目标约束（审核整改后的完整形态）：
 
-    默认 :data:`DEFAULT_API_URL` 是回环；:data:`API_URL_ENV` 允许部署方显式
-    指向内网服务实例（容器部署等）——这是显式配置行为，风险由部署方承担
-    （§10.4）。本函数挡住的是畸形 URL 与空配置静默回退到错误主机。
+    - 必须是 http(s) URL 且有主机名；
+    - **拒绝携带 userinfo**（``http://127.0.0.1@evil.com`` 的真实 host 是
+      ``evil.com``——userinfo 是经典的 URL 混淆攻击面）；
+    - host 必须**精确命中** :data:`LOOPBACK_HOSTS`（回环）；
+    - 非回环必须显式设 :data:`ALLOW_REMOTE_ENV` ``=1`` 且强制 https。
+
+    默认 :data:`DEFAULT_API_URL` 是回环；指向内网服务实例（容器部署等）
+    是显式配置行为，风险由部署方承担（§10.4）。
     """
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -87,7 +99,45 @@ def _guard_api_url(url: str) -> str:
             f"{API_URL_ENV} 不合法（需要带主机名的 http(s) URL）",
             reason="identity_not_configured",
         )
+    # urlsplit 对 `http://user@host/` 会把 user 归入 username；任何 userinfo 都拒
+    if parts.username is not None or parts.password is not None:
+        raise IdentityError(
+            f"{API_URL_ENV} 不允许携带 userinfo（user:pass@host 形态）",
+            reason="identity_not_configured",
+        )
+    host = parts.hostname.lower()
+    if host in LOOPBACK_HOSTS:
+        return url
+    # 非回环：双重显式放行（开关 + https）
+    if os.environ.get(ALLOW_REMOTE_ENV, "").strip() != "1":
+        raise IdentityError(
+            f"{API_URL_ENV} 只允许回环地址（{', '.join(sorted(LOOPBACK_HOSTS))}）；"
+            f"要指向其他主机必须显式设置 {ALLOW_REMOTE_ENV}=1，且使用 https",
+            reason="identity_not_configured",
+        )
+    if parts.scheme != "https":
+        raise IdentityError(
+            f"非回环地址必须使用 https（当前 {parts.scheme}://），token 不允许明文出本机",
+            reason="identity_not_configured",
+        )
     return url
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """
+    禁止跟随重定向：``redirect_request`` 返回 None 时，urllib 会把 3xx
+    作为 :class:`urllib.error.HTTPError` 抛出，而不是带着 Authorization 头
+    打向 Location 指向的第二台主机（审核整改：重定向外泄面）。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+#: 专用 opener：禁重定向（上面的 handler）+ 禁代理。
+#: 默认 opener 会读 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 环境变量——
+#: ``ProxyHandler({})`` 强制直连，token 永不经代理转发。
+_OPENER = urllib.request.build_opener(_NoRedirect(), urllib.request.ProxyHandler({}))
 
 
 def fetch_whoami(token: str, api_url: str) -> Dict[str, Any]:
@@ -99,14 +149,16 @@ def fetch_whoami(token: str, api_url: str) -> Dict[str, Any]:
     - HTTP 401 → ``identity_invalid``（token 无效、过期、会话被禁用、
       2FA 未完成——服务端 ``requires_authentication`` 统一拒绝）；
     - HTTP 403 → ``permission_denied``（改密拦截或权限不足）；
-    - 其他状态码 / 连接失败 / 超时 → ``identity_unavailable``（fail-closed）。
+    - 3xx（重定向被禁） / 其他状态码 / 连接失败 / 超时 →
+      ``identity_unavailable``（fail-closed）。
     """
     url = _guard_api_url(api_url).rstrip("/") + "/auth/whoami"
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        # 用专用 opener（禁重定向、禁代理），不用全局 urlopen
+        with _OPENER.open(req, timeout=TIMEOUT_SECONDS) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         # HTTPError 的消息不含请求头（token 不会进异常链）；

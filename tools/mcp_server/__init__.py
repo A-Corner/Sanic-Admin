@@ -69,6 +69,16 @@ def _redact(text: str) -> str:
         val = os.environ.get(var)
         if val:
             replacements.append(val)
+    # MCP 会话 token（SA-v042-SPECWRITE）：即便结构性不打印之外出现意外路径
+    # （第三方库把 env 值带进异常消息等），出口处再抹一道。
+    try:
+        from tools.mcp_server.identity import get_token
+
+        _token = get_token()
+        if _token:
+            replacements.append(_token)
+    except Exception:  # noqa: BLE001  身份模块不可用时跳过，不影响路径脱敏
+        pass
     try:
         replacements.append(str(Path(tempfile.gettempdir()).resolve()))
     except (OSError, RuntimeError):

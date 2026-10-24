@@ -362,7 +362,7 @@ exit 1
 1. 写入工具的每次调用绑定到一个真实账户，并要求该账户拥有 `spec:write` 权限——admin 默认拥有，普通角色显式授予。
 2. 校验走与 HTTP API **同一套**鉴权栈（`authenticate_request` + `has_permission`），不另造口径。
 3. fail-closed：token 缺失、无效、过期、权限不足、校验服务不可达，一律拒绝且**零副作用**（不建 clone、不建分支）。
-4. 审计可归属：成功与失败都记账户标识（id / username），不记 token 本体。
+4. 审计可归属：成功与失败都记 `account_id`（不含用户名等更多信息），不记 token 本体。
 
 **非目标（本节不做）**
 
@@ -400,7 +400,7 @@ exit 1
 2. 本地 decode 等于把数据库凭据交给 MCP 进程：MCP 被攻破时损失从「一个 token」升级为「整库访问」。四层隔离（§6）刻意让工具进程「不带凭据」，本地 decode 直接违背这一立场。
 3. HTTP 回调让鉴权口径与 HTTP API 物理同栈，未来鉴权栈演进（如会话校验加码）MCP 侧零改动。
 4. 「依赖运行中的服务」是可接受的：写路径本就该在服务可用时使用；服务不可达时 fail-closed（§10.5），只读工具不受影响。
-5. 依赖成本：主项目无 HTTP 客户端依赖（`requirements.txt` 已核对），但官方 `mcp` 包传递依赖含 httpx；实现时优先用 httpx（MCP 环境必然存在），并在 `anyio.to_thread` 中同步调用避免阻塞事件循环，超时 3s。
+5. 依赖成本：实现用**标准库 urllib**（零新增依赖；同步调用发生在 MCP SDK 给同步工具分配的工作线程里，不阻塞事件循环），超时 5s（CPL 上限）。
 
 **服务端改动**：新增 `GET /auth/whoami`（`auth_bp`）。CPL 对这个**新增对外接口**的硬性约束（全部落实）：
 
@@ -457,7 +457,7 @@ exit 1
 | 需要改密（`must_change_password=True`） | `ToolError`（whoami 403 `PASSWORD_CHANGE_REQUIRED`：中间件白名单不含 `/auth/whoami`，handler 内还有显式检查） | `reason=permission_denied` |
 | 权限不足（无 `spec:write`） | `ToolError`：当前账户没有 spec:write 权限 | `reason=permission_denied` + 账户标识 |
 | 校验服务不可达 / 超时 | `ToolError`：无法校验权限（服务不可达），**fail-closed 不放行** | `reason=identity_unavailable` |
-| 校验通过 | 继续原有流程；审计 `detail` 增加 `account: {id, username}` | `status=success/failure` 照旧 |
+| 校验通过 | 继续原有流程；审计记录增加 `account_id` | `status=success/failure` 照旧 |
 
 ### 10.6 与 `--allow-write` 的关系：建议 AND（两者都满足）
 

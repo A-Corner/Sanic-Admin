@@ -28,6 +28,7 @@ from app.models import Account, AuthenticationSession
 from app.middleware.auth_middleware import PASSWORD_CHANGE_EXEMPT_PREFIXES
 from app.services.utils import utcnow
 from tools.mcp_server.identity import (
+    ALLOW_REMOTE_ENV,
     API_URL_ENV,
     DEFAULT_API_URL,
     TOKEN_ENV,
@@ -44,8 +45,9 @@ from tools.mcp_server.write_tools import (
     propose_spec_change,
 )
 
-#: 测试用假 token：审计与错误消息里**不得**出现该子串（结构性不打印的断言锚点）
-SECRET_TOKEN = "test-secret-token-XYZ-勿泄露"
+#: 测试用假 token：审计与错误消息里**不得**出现该子串（结构性不打印的断言锚点）。
+#: 必须纯 ASCII——HTTP 头只接受 latin-1 可编码值，真实 JWT 亦为 ASCII。
+SECRET_TOKEN = "test-secret-token-XYZ-leak-canary"
 
 #: 一个可用的最小规格（resource 合法、含一个必填 string 字段）
 DEMO_SPEC = "resource: demo\nlabel: 演示\nplural: demos\nfields:\n  - name: title\n    type: string\n    required: true\n"
@@ -126,9 +128,19 @@ def _mock_whoami(monkeypatch, *, account_id=7, permissions=None, http_error=None
     monkeypatch.setattr(identity, "fetch_whoami", fake)
 
 
-def _assert_zero_side_effect(repo: Path, baseline: list):
-    """拒绝后：分支列表逐字节不变（没建 proposal/ 分支，也没动别的分支）。"""
+def _tmp_proposal_dirs() -> set:
+    """系统临时区里本工具的 clone 目录（``mcp-proposal-*`` 前缀，git_isolation.mkdtemp）。"""
+    import tempfile
+
+    return {p.name for p in Path(tempfile.gettempdir()).glob("mcp-proposal-*")}
+
+
+def _assert_zero_side_effect(repo: Path, baseline: list, tmp_baseline: set | None = None):
+    """拒绝后：分支列表逐字节不变（没建 proposal/ 分支，也没动别的分支），
+    且系统临时区没有残留的 clone 目录。"""
     assert _branch_list(repo) == baseline
+    if tmp_baseline is not None:
+        assert _tmp_proposal_dirs() == tmp_baseline, "临时 clone 目录集合发生变化（残留或误删）"
 
 
 # ---------------------------------------------------------------------------
@@ -311,75 +323,82 @@ def test_write_tools_reject_without_token(repo, monkeypatch):
     """情形 1：token 缺失 → identity_not_configured，三个工具全部拒绝且零副作用。"""
     monkeypatch.delenv(TOKEN_ENV, raising=False)
     baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
     for name, call in _WRITE_CALLS.items():
         with pytest.raises(IdentityError) as exc_info:
             call(repo)
         assert exc_info.value.reason == "identity_not_configured", name
-    _assert_zero_side_effect(repo, baseline)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
 
 
 def test_write_tools_reject_invalid_token(repo, token_env, monkeypatch):
     """情形 2：token 无效（whoami 401）→ identity_invalid，零副作用。"""
     _mock_whoami(monkeypatch, http_error=401)
     baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
     for name, call in _WRITE_CALLS.items():
         with pytest.raises(IdentityError) as exc_info:
             call(repo)
         assert exc_info.value.reason == "identity_invalid", name
-    _assert_zero_side_effect(repo, baseline)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
 
 
 def test_write_tools_reject_expired_session(repo, token_env, monkeypatch):
     """情形 3：会话过期（服务端 401；语义由 HTTP 侧用例证明）→ 拒绝，零副作用。"""
     _mock_whoami(monkeypatch, http_error=401)
     baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
     for name, call in _WRITE_CALLS.items():
         with pytest.raises(IdentityError):
             call(repo)
-    _assert_zero_side_effect(repo, baseline)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
 
 
 def test_write_tools_reject_2fa_pending(repo, token_env, monkeypatch):
     """情形 4：2FA pending（服务端 401；语义由 HTTP 侧用例证明）→ 拒绝，零副作用。"""
     _mock_whoami(monkeypatch, http_error=401)
     baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
     for name, call in _WRITE_CALLS.items():
         with pytest.raises(IdentityError):
             call(repo)
-    _assert_zero_side_effect(repo, baseline)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
 
 
 def test_write_tools_reject_must_change_password(repo, token_env, monkeypatch):
     """情形 5：需要改密（whoami 403 PASSWORD_CHANGE_REQUIRED）→ 拒绝，零副作用。"""
     _mock_whoami(monkeypatch, http_error=403)
     baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
     for name, call in _WRITE_CALLS.items():
         with pytest.raises(IdentityError) as exc_info:
             call(repo)
         assert exc_info.value.reason == "permission_denied", name
-    _assert_zero_side_effect(repo, baseline)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
 
 
 def test_write_tools_reject_without_spec_write(repo, token_env, monkeypatch):
     """情形 6：有效会话但没有 spec:write → 集合判断拒绝，零副作用。"""
     _mock_whoami(monkeypatch, account_id=7, permissions={"other": ["read"]})
     baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
     for name, call in _WRITE_CALLS.items():
         with pytest.raises(IdentityError) as exc_info:
             call(repo)
         assert exc_info.value.reason == "permission_denied", name
-    _assert_zero_side_effect(repo, baseline)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
 
 
 def test_write_tools_reject_when_sanic_unreachable(repo, token_env, monkeypatch):
     """情形 7：Sanic 不可达（真实连接失败）→ identity_unavailable，零副作用，不重试。"""
     monkeypatch.setenv(API_URL_ENV, "http://127.0.0.1:1")
     baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
     for name, call in _WRITE_CALLS.items():
         with pytest.raises(IdentityError) as exc_info:
             call(repo)
         assert exc_info.value.reason == "identity_unavailable", name
-    _assert_zero_side_effect(repo, baseline)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -436,3 +455,186 @@ def test_reject_audit_records_reason(repo, monkeypatch, capsys):
     records = [_json.loads(line) for line in err.splitlines() if line.startswith("{")]
     failure = [r for r in records if r.get("operation") == "propose_spec_change" and r["status"] == "failure"]
     assert failure and failure[0].get("reason") == "identity_not_configured"
+
+
+# ---------------------------------------------------------------------------
+# 审核整改（ChangesRequested 2026-10-24）：URL/传输安全面 + 回归 + 正例
+# ---------------------------------------------------------------------------
+
+
+def test_guard_rejects_userinfo_url():
+    """``http://127.0.0.1@evil.com`` 的真实 host 是 evil.com——任何 userinfo 一律拒绝。"""
+    with pytest.raises(IdentityError):
+        _guard_api_url("http://127.0.0.1@evil.com")
+    with pytest.raises(IdentityError):
+        _guard_api_url("http://user:pass@127.0.0.1:22222")
+
+
+def test_guard_rejects_suffix_domain():
+    """``127.0.0.1.evil.com`` 不是回环——后缀域名不得命中回环白名单（精确匹配）。"""
+    with pytest.raises(IdentityError):
+        _guard_api_url("http://127.0.0.1.evil.com:22222")
+
+
+def test_guard_requires_explicit_opt_in_and_https_for_remote(monkeypatch):
+    """非回环：默认拒绝；ALLOW_REMOTE=1 后仅 https 放行；回环不受开关影响。"""
+    monkeypatch.delenv(ALLOW_REMOTE_ENV, raising=False)
+    with pytest.raises(IdentityError):
+        _guard_api_url("http://evil.com")
+    with pytest.raises(IdentityError):
+        _guard_api_url("https://evil.com")
+    monkeypatch.setenv(ALLOW_REMOTE_ENV, "1")
+    with pytest.raises(IdentityError):
+        _guard_api_url("http://evil.com")  # 开了开关但明文 http，仍拒
+    assert _guard_api_url("https://evil.com") == "https://evil.com"
+    for loopback in ("http://127.0.0.1:22222", "http://localhost:22222", "http://[::1]:22222"):
+        assert _guard_api_url(loopback)
+
+
+@pytest.fixture()
+def fake_services():
+    """
+    回环三服务：``A``＝正常 whoami（200）；``B``＝记录 Authorization 的黑洞；
+    ``C``＝302 跳向 B。用于重定向与代理两条外泄面的测试。
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    received_b = []
+    holder = {}
+
+    class _A(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = _json.dumps({"account_id": 1, "permissions": {"spec": ["all"]}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    class _Recorder(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received_b.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    class _Redirect(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{holder['b']}/steal")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    sa = ThreadingHTTPServer(("127.0.0.1", 0), _A)
+    sb = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
+    sc = ThreadingHTTPServer(("127.0.0.1", 0), _Redirect)
+    holder["b"] = sb.server_address[1]
+    for s in (sa, sb, sc):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    yield {
+        "a": f"http://127.0.0.1:{sa.server_address[1]}",
+        "b": sb.server_address[1],
+        "c": f"http://127.0.0.1:{sc.server_address[1]}",
+        "received_b": received_b,
+    }
+    for s in (sa, sb, sc):
+        s.shutdown()
+        s.server_close()
+
+
+def test_whoami_redirect_is_not_followed(fake_services, token_env):
+    """302 → 禁止跟随：拒绝且跳转目标端口收不到任何请求（Authorization 未外带）。"""
+    with pytest.raises(IdentityError) as exc_info:
+        fetch_whoami(SECRET_TOKEN, fake_services["c"])
+    assert exc_info.value.reason == "identity_unavailable"
+    assert fake_services["received_b"] == [], "重定向目标不应收到任何请求"
+
+
+def test_whoami_never_goes_through_proxy(fake_services, token_env, monkeypatch):
+    """设置 HTTP(S)_PROXY 后 token 仍不经过代理（ProxyHandler({}) 强制直连）。"""
+    # 先清空环境里既有的代理与绕过名单（本机可能自带 http_proxy 与含回环的
+    # no_proxy），保证「若实现不禁代理，请求必走代理」——单因素证明防护有效
+    for _var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(_var, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{fake_services['b']}")
+    monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{fake_services['b']}")
+    body = fetch_whoami(SECRET_TOKEN, fake_services["a"])
+    assert body["account_id"] == 1, "应直连命中真实 whoami 服务"
+    assert fake_services["received_b"] == [], "token 不允许经过代理"
+
+
+def test_redact_strips_token(monkeypatch):
+    """``_redact`` 出口兜底抹除 token 值（审核低项 4：补实现）。"""
+    from tools.mcp_server import _redact
+
+    monkeypatch.setenv(TOKEN_ENV, "leaky-token-abc")
+    out = _redact("unexpected error mentions leaky-token-abc from a third-party lib")
+    assert "leaky-token-abc" not in out
+    # 无 token 配置时不影响正常文本
+    monkeypatch.delenv(TOKEN_ENV)
+    assert _redact("plain text") == "plain text"
+
+
+def test_full_permission_role_without_spec_stays_protected():
+    """
+    回归（审核中项 2）：存量自建的全权限角色没有 ``spec`` 键，仍必须判为
+    「授予全部权限」→ 受保护管理员。破坏实验：去掉 ``_core_resources`` 的
+    spec 排除 → 本用例变红（原始 FAILED 行见交付回报）。
+    """
+    from app.api.resources.role import _role_grants_all_permissions
+    from app.auth.permissions import all_resources
+    from app.models import Role
+
+    perms = {r: ["all"] for r in all_resources() if r != "spec"}
+    role = Role(name="legacy-full-admin", permissions=perms)
+    assert _role_grants_all_permissions(role) is True
+
+
+def test_core_resources_exclude_spec_and_generated():
+    """比较集不含 spec（静态 MCP 权限点）与任何生成资源。"""
+    from app.api.resources.role import _core_resources
+    from app.generated.permissions import GENERATED_PERMISSIONS
+
+    core = set(_core_resources())
+    assert "spec" not in core
+    assert not (core & set(GENERATED_PERMISSIONS))
+
+
+def test_list_and_discard_allowed_with_spec_write(repo, token_env, monkeypatch):
+    """正例（审核测试空转 3）：list / discard 在有权限时正常工作。"""
+    _mock_whoami(monkeypatch, account_id=7, permissions={"spec": ["write"]})
+    assert list_proposals(repo_root=repo) == []
+    result = propose_spec_change("demo", DEMO_SPEC, repo_root=repo)
+    items = list_proposals(repo_root=repo)
+    assert [i["branch"] for i in items] == [result["branch"]]
+    # 提案分支相对 master 必有未合并 commit，删除需显式 force（git_isolation 契约）
+    out = discard_proposal_tool(result["branch"], repo_root=repo, force=True)
+    assert out["discarded"] == result["branch"]
+    assert list_proposals(repo_root=repo) == []
+
+
+def test_discard_rejection_keeps_existing_proposal(repo, token_env, monkeypatch):
+    """
+    空转修复（审核测试空转 1）：discard 的拒绝用例先建**真实**提案分支，
+    断言拒绝后分支还在、临时目录无残留。
+    """
+    _mock_whoami(monkeypatch, account_id=7, permissions={"spec": ["write"]})
+    result = propose_spec_change("demo", DEMO_SPEC, repo_root=repo)
+    # 切到无权限场景再尝试删除
+    _mock_whoami(monkeypatch, account_id=7, permissions={})
+    baseline = _branch_list(repo)
+    tmp_baseline = _tmp_proposal_dirs()
+    with pytest.raises(IdentityError):
+        discard_proposal_tool(result["branch"], repo_root=repo)
+    _assert_zero_side_effect(repo, baseline, tmp_baseline)
+    assert result["branch"] in _branch_list(repo), "被拒绝的 discard 不得删除既有提案分支"
