@@ -175,16 +175,30 @@ def test_fresh_db_flow(tmp_path):
 
 
 def test_existing_db_baseline_then_noop_upgrade(tmp_path):
+    """
+    存量库（表已存在、没有账本）基线化后，upgrade 不应破坏结构。
+
+    本轮起迁移链不只一条基线（还有 specgen 增量），所以 upgrade **会**记录增量。
+    但存量库的表是用**当前模型**建的，已经含 customer/orders，增量的
+    ``CREATE TABLE IF NOT EXISTS`` 是空操作——断言点因此从「一条都不跑」改为
+    「跑完结构与基线化时一致」。语义上仍然守住「不破坏存量库」这个目的。
+    """
     db = tmp_path / "existing.sqlite3"
     _run_ok(["-c", GENERATE_CODE, str(db)], db)
     conn = sqlite3.connect(str(db))
     pre = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert "account" in pre and "aerich" not in pre, f"前置不符: {pre}"
+    pre_schema = check_migrations.dump_sqlite_schema(db)
 
     _run_ok([str(BASELINE_SCRIPT), str(db), str(MIGRATIONS_DIR)], db)
     out = _run_ok(["-c", UPGRADE_CODE, str(db), str(MIGRATIONS_ROOT)], db).stdout
-    assert _migrated(out) == [], f"存量库 upgrade 应为 no-op，实际: {out}"
+    # 基线之外只允许出现增量迁移；若冒出别的版本号，说明迁移链被改动过
+    extra = [m for m in _migrated(out) if not m.startswith("1_")]
+    assert extra == [], f"upgrade 应只应用 specgen 增量，实际: {out}"
+
+    post_schema = check_migrations.dump_sqlite_schema(db)
+    assert post_schema == pre_schema, "存量库 upgrade 改变了表结构"
 
 
 def test_baseline_script_is_idempotent(tmp_path):
@@ -275,9 +289,10 @@ def test_c_v031_db_handwritten_then_baseline_then_upgrade(tmp_path):
     # 2) 基线化
     _run_ok([str(BASELINE_SCRIPT), str(db), str(MIGRATIONS_DIR)], db)
 
-    # 3) upgrade：no-op，不报错
+    # 3) upgrade：基线化之后只剩 specgen 增量待应用（存量库表已含它创建的表，
+    #    IF NOT EXISTS 使其为空操作）；不应报错，也不应冒出其它版本
     out = _run_ok(["-c", UPGRADE_CODE, str(db), str(MIGRATIONS_ROOT)], db).stdout
-    assert _migrated(out) == []
+    assert [m for m in _migrated(out) if not m.startswith("1_")] == [], out
 
     # 4) 表结构与模型一致
     assert check_migrations.diff_schemas(check_migrations.dump_sqlite_schema(db), _expected_schema(tmp_path)) == []

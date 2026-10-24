@@ -99,14 +99,25 @@ def check_dialect_baselines(repo: Path = None) -> list:
                 f"方言基线文件名不一致: {dialect}={sorted(names)} "
                 f"vs {sorted(reference)}"
             )
-    # 与 migrations/models/ 里的实际基线也要对得上
+    # 与 migrations/models/ 里实际安装的也要对得上。
+    # 口径必须与上面一致：比较**全部**迁移文件名，不能只取 0_*_init.py——
+    # 增量迁移（1_*、2_* …）也是账本的版本键，漏掉它们会让「models/ 缺一条增量」
+    # 这种真实错位看起来像「一致」。
     models_dir = repo / "migrations" / "models"
-    installed = {f.name for f in models_dir.glob("0_*_init.py")}
+    installed = {f.name for f in models_dir.glob("*.py") if not f.name.startswith("__")}
     for dialect, names in seen.items():
         if installed and names != installed:
+            missing = sorted(names - installed)
+            extra = sorted(installed - names)
+            detail = []
+            if missing:
+                detail.append(f"models/ 缺少 {missing}")
+            if extra:
+                detail.append(f"models/ 多出 {extra}")
             problems.append(
-                f"{dialect} 基线名 {sorted(names)} 与 migrations/models/ "
-                f"实际安装的 {sorted(installed)} 不一致（账本版本键会错位）"
+                f"{dialect} 迁移文件名 {sorted(names)} 与 migrations/models/ "
+                f"实际安装的 {sorted(installed)} 不一致（账本版本键会错位；"
+                + "；".join(detail) + "）"
             )
             break
     return problems
