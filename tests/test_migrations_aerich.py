@@ -31,12 +31,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = REPO / "migrations" / "models"
 MIGRATIONS_ROOT = REPO / "migrations"
 BASELINE_SCRIPT = REPO / "scripts" / "migrations" / "baseline_existing_db.py"
 HANDWRITTEN_SCRIPT = REPO / "scripts" / "migrate_v0_3_2_must_change_password.py"
 CHECK_SCRIPT = REPO / "scripts" / "check_migrations.py"
+SELECT_SCRIPT = REPO / "scripts" / "migrations" / "select_dialect_baseline.py"
 PYTHON = sys.executable
 TEST_ADMIN_PASSWORD = "Mig-Test-Initial-Pass-1"
 
@@ -501,3 +504,111 @@ def test_dialect_mismatch_is_rejected(tmp_path):
         f"stdout={result.stdout[-300:]}\nstderr={result.stderr[-300:]}"
     )
     assert "select_dialect_baseline" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# 切方言必须连增量迁移一起装（只换基线会在 MySQL/PG 上执行 SQLite 语法）
+# ---------------------------------------------------------------------------
+
+
+def _load_select_module():
+    spec = importlib.util.spec_from_file_location(
+        "select_dialect_baseline", SELECT_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_select_dialect_installs_increments_too(tmp_path):
+    """
+    切方言后，`migrations/models/` 里的增量迁移必须与目标方言那份逐字节相同。
+
+    只换基线是不够的：增量里的类型也分方言（MySQL `DATETIME(6)` vs
+    PG `TIMESTAMPTZ`），沿用旧方言的增量会在 upgrade 时执行错误语法。
+    """
+    mod = _load_select_module()
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+
+    # 先把 sqlite 那份装进去（模拟当前是 sqlite 部署）
+    for src in sorted((REPO / "migrations" / "dialects" / "sqlite").glob("*.py")):
+        shutil.copyfile(src, models_dir / src.name)
+
+    # 切到 mysql
+    mod.install("mysql", models_dir)
+
+    mysql_dir = REPO / "migrations" / "dialects" / "mysql"
+    for src in sorted(mysql_dir.glob("*.py")):
+        target = models_dir / src.name
+        assert target.is_file(), f"切到 mysql 后缺少 {src.name}"
+        assert target.read_bytes() == src.read_bytes(), (
+            f"{src.name} 装进去的不是 mysql 版本"
+        )
+
+    # 正向对照：mysql 与 sqlite 的增量内容必须真的不同，否则上面的断言是空转
+    sqlite_dir = REPO / "migrations" / "dialects" / "sqlite"
+    inc = [p.name for p in mysql_dir.glob("*.py") if not p.name.startswith("0_")]
+    assert inc, "没有增量迁移可供对照，测试前提不成立"
+    differ = [
+        n for n in inc
+        if (mysql_dir / n).read_bytes() != (sqlite_dir / n).read_bytes()
+    ]
+    assert differ, "mysql 与 sqlite 的增量内容完全相同，本用例无法证明方言区分生效"
+
+
+def test_verify_rejects_wrong_dialect_increment(tmp_path):
+    """
+    增量装错方言必须被方言校验拦住（原来只比基线，增量错了会漏过）。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "baseline_existing_db", BASELINE_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    # 基线装对（mysql），增量故意装成 sqlite 的
+    shutil.copyfile(REPO / "migrations" / "dialects" / "mysql" / mod.BASELINE_FILENAME,
+                    models_dir / mod.BASELINE_FILENAME)
+    sqlite_incs = [
+        p for p in (REPO / "migrations" / "dialects" / "sqlite").glob("*.py")
+        if not p.name.startswith("0_")
+    ]
+    assert sqlite_incs, "没有 sqlite 增量可供对照"
+    for src in sqlite_incs:
+        shutil.copyfile(src, models_dir / src.name)
+
+    err = mod.verify_installed_baseline_matches_dialect(
+        "mysql://u:p@127.0.0.1:3306/db", models_dir)
+    assert err is not None, "增量装成 sqlite 版时，方言校验必须报错"
+    assert "select_dialect_baseline" in err
+
+    # 正向对照：换成正确的 mysql 增量后必须通过
+    for src in (REPO / "migrations" / "dialects" / "mysql").glob("*.py"):
+        shutil.copyfile(src, models_dir / src.name)
+    assert mod.verify_installed_baseline_matches_dialect(
+        "mysql://u:p@127.0.0.1:3306/db", models_dir) is None
+
+
+def test_select_dialect_rejects_incomplete_dialect_set(tmp_path):
+    """三方言增量不成套时（某方言少一条）必须报错，而不是静默装半套。"""
+    mod = _load_select_module()
+    fake = tmp_path / "dialects"
+    for d in ("sqlite", "mysql", "postgres"):
+        (fake / d).mkdir(parents=True)
+        # 每家都放基线
+        shutil.copyfile(REPO / "migrations" / "dialects" / d / mod.BASELINE_FILENAME,
+                        fake / d / mod.BASELINE_FILENAME)
+    # sqlite 多一条增量，其它两家没有
+    (fake / "sqlite" / "1_x_specgen.py").write_text("# only sqlite\n")
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    orig = mod.DIALECTS_DIR
+    mod.DIALECTS_DIR = fake
+    try:
+        with pytest.raises(SystemExit) as exc:
+            mod.install("sqlite", models_dir)
+        assert "不成套" in str(exc.value)
+    finally:
+        mod.DIALECTS_DIR = orig
