@@ -140,7 +140,7 @@ CREATE TABLE `verification_tokens` (
     `updated_at` DATETIME(6) NOT NULL  COMMENT '更新时间' DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     `deleted` BOOL NOT NULL  COMMENT '删除标记' DEFAULT 0,
     `token` VARCHAR(128) NOT NULL UNIQUE COMMENT '验证令牌',
-    `token_type` VARCHAR(32) NOT NULL  COMMENT '令牌类型，如 \'activation\', \'password_reset\', \'two_factor\'',
+    `token_type` VARCHAR(32) NOT NULL  COMMENT '令牌类型，如 \\'activation\\', \\'password_reset\\', \\'two_factor\\'',
     `expires_at` DATETIME(6) NOT NULL  COMMENT '过期时间',
     `used` BOOL NOT NULL  COMMENT '是否已使用' DEFAULT 0,
     `data` LONGTEXT   COMMENT '附加数据，存储为JSON格式',

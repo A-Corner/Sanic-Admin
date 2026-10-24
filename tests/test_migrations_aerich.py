@@ -612,3 +612,50 @@ def test_select_dialect_rejects_incomplete_dialect_set(tmp_path):
         assert "不成套" in str(exc.value)
     finally:
         mod.DIALECTS_DIR = orig
+
+
+# ---------------------------------------------------------------------------
+# 迁移 DDL 的引号转义：只有真连 MySQL 才会暴露，必须静态守住
+# ---------------------------------------------------------------------------
+
+
+def test_mysql_baseline_comment_quotes_are_escaped():
+    """
+    MySQL 基线里注释文本内含单引号时，Python 源码必须写 `\\\\'`（两个字符）。
+
+    写 `\\'` 会被 Python 三引号字符串还原成裸 `'`，实际发出的 SQL 就变成
+    `COMMENT '令牌类型，如 'activation', ...'`——MySQL 报 1064。
+    这个缺陷本地 sqlite 测试与 check_migrations 都发现不了（它们不执行 MySQL
+    DDL），只能靠真实 MySQL 实跑或本用例。
+
+    守的是「实际发出的 SQL 里，注释字符串内部没有未转义的裸引号」。
+    """
+    import asyncio
+    import importlib.util
+
+    path = REPO / "migrations" / "dialects" / "mysql" / "0_20261024125437_init.py"
+    assert path.is_file(), f"MySQL 基线不存在: {path}"
+    spec = importlib.util.spec_from_file_location("mysql_baseline", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sql = asyncio.run(mod.upgrade(None))
+
+    # 逐行找 COMMENT '...'，检查其中的单引号是否都已用反斜杠转义
+    import re
+
+    problems = []
+    for lineno, line in enumerate(sql.splitlines(), 1):
+        m = re.search(r"COMMENT\s+'(.*)',?\s*$", line.strip())
+        if not m:
+            continue
+        body = m.group(1)
+        # 去掉已转义的 \' 后，仍出现的 ' 就是裸引号
+        unescaped = body.replace("\\'", "")
+        if "'" in unescaped:
+            problems.append(f"第 {lineno} 行注释里有未转义的引号：{line.strip()[:100]}")
+    assert not problems, "MySQL DDL 注释中的单引号未正确转义：\n" + "\n".join(problems)
+
+    # 正向对照：确认令牌类型那条注释确实含引号，否则上面的循环是空转
+    assert "token_type" in sql, "基线里找不到 token_type 列，用例前提不成立"
+    token_line = next(ln for ln in sql.splitlines() if "token_type" in ln)
+    assert "activation" in token_line, "token_type 注释内容与预期不符"
