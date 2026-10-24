@@ -155,14 +155,18 @@ async def test_change_password_success_clears_flag_and_unblocks(client):
     # （完整覆盖见 test_change_password_invalidates_other_sessions）
 
 
-async def test_change_password_invalidates_other_sessions(client):
-    """改密后其它会话全部作废：改密前的第二会话 cookie 调 API → 401。"""
+async def test_change_password_rotates_all_sessions(client):
+    """改密后**全部**旧会话作废，并轮换出一个新会话（SA-v034-L1 第 4 项）。
+
+    与 v0.3.2 的差别：旧行为保留「发起改密的那个会话」，新行为把它也作废并
+    签发新 token —— 这样即使当前 token 曾泄露，改密后立即失效。
+    """
     from app.models import Account as _A
     from app.models import AuthenticationSession
 
     await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
 
-    # 会话一 + 会话二（同一账户先后登录两次）；记下会话一的令牌
+    # 会话一 + 会话二（同一账户先后登录两次）；记下会话二的令牌
     first = await _login(client)
     assert first.status_code == 200
     first_token = first.headers.get("authorization")
@@ -178,22 +182,29 @@ async def test_change_password_invalidates_other_sessions(client):
     response = await client.post(
         "/auth/change-password",
         headers=_csrf_header(client),
-        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD, "confirm_password": NEW_PASSWORD},
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD},
     )
     assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["data"]["token_rotated"] is True, "应声明已轮换 token"
 
-    # 只剩改密所用的会话二
+    # 全部旧会话作废，只剩轮换出的一个新会话
     remaining = await AuthenticationSession.filter(deleted=False, disabled=False).all()
-    assert len(remaining) == 1, f"改密后应只剩当前会话，实际 {len(remaining)} 个活跃会话"
+    assert len(remaining) == 1, f"改密后应只剩轮换出的新会话，实际 {len(remaining)}"
 
-    # 去掉 cookie（get_session_token 优先读 cookie），只凭 Authorization 头访问
+    # 新会话可用（响应已重新下发 cookie + Authorization）
+    new_token = response.headers.get("authorization")
+    assert new_token, "改密响应应下发新会话令牌"
     client.cookies.clear()
-    # 正向对照：会话二仍有效、标志已清 → 200
-    ok = await client.get("/api/v1/roles", headers={"Authorization": second_token})
-    assert ok.status_code == 200, f"当前会话应仍可用：{ok.status_code}"
-    # 旧会话一已作废 → 401
-    old = await client.get("/api/v1/roles", headers={"Authorization": first_token})
-    assert old.status_code == 401, f"改密前的旧会话应 401，实际 {old.status_code}"
+    ok = await client.get("/api/v1/roles", headers={"Authorization": new_token})
+    assert ok.status_code == 200, f"轮换出的新会话应可用：{ok.status_code}"
+
+    # 正向对照：改密前的两个旧令牌都已作废 → 401
+    for label, token in (("会话一", first_token), ("会话二", second_token)):
+        old = await client.get("/api/v1/roles", headers={"Authorization": token})
+        assert old.status_code == 401, (
+            f"{label}的令牌应已作废，实际 {old.status_code}")
 
 
 async def test_change_password_rejects_mismatched_confirm(client):
@@ -434,3 +445,140 @@ async def test_change_password_requires_completed_two_factor(client, monkeypatch
     account = await _A.get(email=ADMIN_EMAIL)
     assert account.must_change_password is False
     assert account.verify_password(NEW_PASSWORD)
+
+
+# ---------------------------------------------------------------------------
+# SA-v034-L1：审计日志 / 口令强度 / 拒绝清单 / 当前口令限速
+# ---------------------------------------------------------------------------
+
+async def _audit_rows(operation=None):
+    from app.models import OperationLog
+
+    q = OperationLog.all()
+    if operation:
+        q = q.filter(operation=operation)
+    return await q.order_by("id").all()
+
+
+async def test_audit_login_success_and_failure(client):
+    """登录成功与失败各写一条审计；字段中不含口令。"""
+    ok = await _login(client)
+    assert ok.status_code == 200
+    rows = await _audit_rows("login_success")
+    assert rows, "登录成功应写入审计"
+    assert rows[-1].operation_type == "auth"
+    assert rows[-1].status == "success"
+
+    bad = await client.post("/auth/login", json={"email": ADMIN_EMAIL,
+                                                 "password": "WrongPass!2026"})
+    assert bad.status_code == 401
+    fails = await _audit_rows("login_failure")
+    assert fails, "登录失败应写入审计"
+    assert fails[-1].status == "failure"
+
+    # 敏感值不得出现在任何字段里
+    for row in rows + fails:
+        blob = " ".join(str(v) for v in
+                        (row.detail, row.account_name, row.user_agent, row.operation))
+        for secret in (ADMIN_PASSWORD, "WrongPass!2026"):
+            assert secret not in blob, f"审计里出现了口令: {blob!r}"
+
+
+async def test_audit_logout(client):
+    """登出写一条审计。"""
+    await _login(client)
+    resp = await client.post("/auth/logout", headers=_csrf_header(client))
+    assert resp.status_code == 200
+    rows = await _audit_rows("logout")
+    assert rows, "登出应写入审计"
+
+
+async def test_audit_change_password_success(client):
+    """改密成功写一条审计，且不含新旧口令。"""
+    from app.models import Account
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+    resp = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert resp.status_code == 200, resp.text
+    rows = await _audit_rows("change_password_success")
+    assert rows, "改密成功应写入审计"
+    for row in rows:
+        blob = " ".join(str(v) for v in (row.detail, row.operation, row.account_name))
+        for secret in (ADMIN_PASSWORD, NEW_PASSWORD):
+            assert secret not in blob, f"审计里出现了口令: {blob!r}"
+
+
+async def test_audit_change_password_failure(client):
+    """当前口令错误写一条失败审计，且不含口令。"""
+    from app.models import Account
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+    resp = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": "WrongCurrent!1", "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert resp.status_code == 401
+    rows = await _audit_rows("change_password_failure")
+    assert rows, "改密失败应写入审计"
+    for row in rows:
+        assert "WrongCurrent!1" not in str(row.detail)
+
+
+async def test_password_strength_requires_two_classes():
+    """新口令必须含至少两类字符（纯数字/纯小写 均拒绝）。"""
+    from app.auth.authentication import validate_password_strength
+
+    assert validate_password_strength("alllowercase") is not None
+    assert validate_password_strength("12345678") is not None
+    assert validate_password_strength("lower1234") is None
+    assert validate_password_strength("Lower1234") is None
+
+
+async def test_password_rejects_banned_and_email():
+    """拒绝系统已知弱口令与等于邮箱的口令。"""
+    from app.auth.authentication import validate_not_banlisted
+
+    class _Acct:
+        email = "someone@example.com"
+
+    assert validate_not_banlisted("SAdmin@123", _Acct()) is not None
+    assert validate_not_banlisted("someone@example.com", _Acct()) is not None
+    assert validate_not_banlisted("TotallyFine#2026", _Acct()) is None
+
+
+async def test_change_password_rejects_weak_and_banned(client):
+    """端到端：弱口令与已知弱口令都被拒。"""
+    from app.models import Account
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+    for weak in ("alllowercase", "SAdmin@123"):
+        resp = await client.post(
+            "/auth/change-password", headers=_csrf_header(client),
+            json={"current_password": ADMIN_PASSWORD, "new_password": weak,
+                  "confirm_password": weak})
+        assert resp.status_code == 400, f"{weak!r} 应被拒绝，实际 {resp.status_code}"
+
+
+async def test_change_password_current_password_rate_limited(client):
+    """当前口令连续试错达阈值后返回 429。"""
+    from app.models import Account
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+
+    codes = []
+    for _ in range(8):
+        resp = await client.post(
+            "/auth/change-password", headers=_csrf_header(client),
+            json={"current_password": "WrongCurrent!1", "new_password": NEW_PASSWORD,
+                  "confirm_password": NEW_PASSWORD})
+        codes.append(resp.status_code)
+        if resp.status_code == 429:
+            break
+    assert 429 in codes, f"应在阈值内出现 429，实际序列 {codes}"
