@@ -29,4 +29,15 @@ def build_tortoise_config(db_url: str) -> dict:
     }
 
 
-TORTOISE_ORM = build_tortoise_config(settings.DATABASE_URL or "sqlite://:memory:")
+def _require_db_url() -> str:
+    """迁移必须有真实数据库地址；静默回落到内存库会让 ``aerich`` 对空库操作而毫无察觉。"""
+    db_url = getattr(settings, "DATABASE_URL", None)
+    if not db_url or not str(db_url).strip():
+        raise RuntimeError(
+            "DATABASE_URL 为空：迁移需要真实数据库地址，"
+            "请设置 SANIC_ENV / DATABASE_URL（不接受 sqlite://:memory: 回落）。"
+        )
+    return str(db_url).strip()
+
+
+TORTOISE_ORM = build_tortoise_config(_require_db_url())

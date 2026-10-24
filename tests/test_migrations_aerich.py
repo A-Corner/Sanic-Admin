@@ -21,6 +21,7 @@ S2 正向对照：
       证明结构对比能抓出缺列。
 """
 
+import copy
 import importlib.util
 import json
 import os
@@ -288,9 +289,101 @@ def test_c_v031_db_handwritten_then_baseline_then_upgrade(tmp_path):
     assert _generated(gen) == "", f"基线快照无效，migrate 误判有变化: {gen[-400:]}"
 
 
-def test_c_without_handwritten_script_schema_diff_is_detected(tmp_path):
-    """反例：v0.3.1 库不跑手写脚本直接基线化——结构对比必须发现缺列（证明 (c) 的对比有效）。"""
+def test_c_without_handwritten_script_baseline_is_refused(tmp_path):
+    """反例：v0.3.1 库不跑手写脚本直接基线化——**基线脚本必须拒绝写入账本**。
+
+    v0.3.2 整改第 2 项：基线化前先核对库结构与模型，缺列时以非 0 退出（rc=3），
+    不写账本。若放行，账本会宣称已对齐而库里实际缺列，之后 `aerich upgrade`
+    永远不补（S2 复审的 P1）。本测试同时证明 (c) 的三步顺序不是形式要求。
+    """
     db = _make_v031_db(tmp_path, "v031-skip.sqlite3")
-    _run_ok([str(BASELINE_SCRIPT), str(db), str(MIGRATIONS_DIR)], db)
-    problems = check_migrations.diff_schemas(check_migrations.dump_sqlite_schema(db), _expected_schema(tmp_path))
-    assert any("account.columns" in p and "must_change_password" in p for p in problems), problems
+    result = subprocess.run(
+        [PYTHON, str(BASELINE_SCRIPT), str(db), str(MIGRATIONS_DIR)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 3, (
+        f"缺列时必须 rc=3 拒绝基线化，实际 rc={result.returncode}\n"
+        f"stdout={result.stdout[-400:]}\nstderr={result.stderr[-400:]}"
+    )
+    assert "must_change_password" in result.stderr, (
+        f"拒绝理由应点名缺失的列: {result.stderr[-400:]}"
+    )
+    # 账本表即便被建，也不应写入基线行（否则 upgrade 会误判已对齐）
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute("SELECT version FROM aerich").fetchall()
+    finally:
+        conn.close()
+    assert rows == [], f"拒绝时不应写入任何基线行，实际: {rows}"
+
+
+# ---------------------------------------------------------------------------
+# 整改第 8 项：守门的三组变异反例
+# 证明 diff_schemas 能识别「类型 / 索引 / 默认值」这三类模型漂移，
+# 而不是只对缺表缺列报警。
+# ---------------------------------------------------------------------------
+
+def _snapshot_of(models_db: Path) -> dict:
+    """用给定库文件的真实结构做快照（与 _expected_schema 同源同格式）。"""
+    return check_migrations.dump_sqlite_schema(models_db)
+
+
+def _baseline_of(tmp_path, name: str) -> Path:
+    """生成一个「当前模型」库，用于取变异基底。"""
+    db = tmp_path / name
+    _run_ok(["-c", GENERATE_CODE, str(db)], db)
+    return db
+
+
+def test_mutation_column_type_change_is_detected(tmp_path):
+    """变异：改一个列的类型 —— 守门必须报错（列格式: 名称/类型/非空/默认/主键）。"""
+    base = _snapshot_of(_baseline_of(tmp_path, "type-base.sqlite3"))
+    expected = _expected_schema(tmp_path)
+    assert check_migrations.diff_schemas(base, expected) == []
+
+    mutated = copy.deepcopy(base)
+    cols = mutated["account"]["columns"]
+    i = next(k for k, c in enumerate(cols) if c[0] == "username")
+    name, _type, notnull, default, pk = cols[i]
+    cols[i] = (name, "TEXT(999)", notnull, default, pk)
+
+    diffs = check_migrations.diff_schemas(mutated, expected)
+    assert diffs, "类型变化必须被守门发现"
+
+
+def test_mutation_index_change_is_detected(tmp_path):
+    """变异：删掉一个索引 —— 守门必须报错。"""
+    base = _snapshot_of(_baseline_of(tmp_path, "idx-base.sqlite3"))
+    expected = _expected_schema(tmp_path)
+    table = next(t for t, v in base.items() if v["indexes"])
+
+    mutated = copy.deepcopy(base)
+    mutated[table]["indexes"] = mutated[table]["indexes"][1:]
+
+    diffs = check_migrations.diff_schemas(mutated, expected)
+    assert diffs, "索引变化必须被守门发现"
+
+
+def test_mutation_default_value_change_is_detected(tmp_path):
+    """变异：改一个列的默认值 —— 守门必须报错。"""
+    base = _snapshot_of(_baseline_of(tmp_path, "dflt-base.sqlite3"))
+    expected = _expected_schema(tmp_path)
+
+    mutated = copy.deepcopy(base)
+    cols = mutated["system_setting"]["columns"]
+    i = next(k for k, c in enumerate(cols) if c[0] == "category" and c[3])
+    name, ctype, notnull, _default, pk = cols[i]
+    cols[i] = (name, ctype, notnull, "'MUTATED'", pk)
+
+    diffs = check_migrations.diff_schemas(mutated, expected)
+    assert diffs, "默认值变化必须被守门发现"
+
+
+def test_dialect_baselines_share_one_filename():
+    """三份方言基线的文件名必须一致，且与 migrations/models/ 里安装的那份对得上。
+
+    文件名是 aerich 的版本键：不一致会让切换方言后的 upgrade 把基线当成未应用，
+    去重建已经存在的表（复审整改第 2 项）。
+    """
+    problems = check_migrations.check_dialect_baselines()
+    assert problems == [], f"方言基线文件名不一致: {problems}"

@@ -56,6 +56,34 @@ def _redact_db_url(db_url: str) -> str:
     return db_url
 
 
+async def _aerich_ledger_present() -> bool:
+    """检查 aerich 版本账本表是否存在（不依赖 aerich 包，直接查系统表）。"""
+    try:
+        conn = Tortoise.get_connection("default")
+        if "sqlite" in str(getattr(conn, "filename", "") or "").lower() or hasattr(conn, "sqlite"):
+            rows = await conn.execute_query_dict(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='aerich'"
+            )
+            return bool(rows)
+        # 必须按当前 schema 过滤：同名表可能存在于别的 schema 里，
+        # 不过滤会把「其它库的账本表」误判为本库已有。
+        dialect = getattr(conn.capabilities, "dialect", "")
+        if "mysql" in dialect or "maria" in dialect:
+            rows = await conn.execute_query_dict(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name='aerich' AND table_schema = DATABASE()"
+            )
+        else:
+            rows = await conn.execute_query_dict(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name='aerich' AND table_schema = current_schema()"
+            )
+        return bool(rows)
+    except Exception:
+        logger.warning("检查 aerich 账本表失败，按缺失处理")
+        return False
+
+
 async def init_db(app: Sanic = None):
     """
     初始化数据库连接并建表
@@ -70,6 +98,18 @@ async def init_db(app: Sanic = None):
         db_url=db_url,
         modules={'models': ['app.models']}
     )
-    await Tortoise.generate_schemas(safe=True)
+
+    env = str(getattr(config, "ENV", "") or "").lower()
+    if env == "production":
+        # 生产：结构由迁移链负责（见 docs/migrations.md）。generate_schemas 的
+        # safe=True 只建缺失的表、不加也不改列，在这里跑会让「缺迁移」被静默掩盖，
+        # 长期停在旧 schema。改为检查账本表存在，缺失即拒绝启动。
+        if not await _aerich_ledger_present():
+            raise RuntimeError(
+                "生产环境缺少 aerich 迁移账本表：请先执行 `aerich upgrade` "
+                "（存量库见 docs/migrations.md 的基线化流程）后再启动。"
+            )
+    else:
+        await Tortoise.generate_schemas(safe=True)
 
     logger.info(f"数据库连接初始化完成，使用: {_redact_db_url(db_url)}")

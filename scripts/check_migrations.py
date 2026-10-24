@@ -26,9 +26,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 IGNORED_TABLES = {"aerich"}
-# SQLite 里 BOOLEAN 与 INT 都只是整数存储（读写行为一致，仅声明亲和性名称不同）：
-# 手写补列脚本用 BOOLEAN，aerich/Tortoise 生成 INT，对比时归一，避免对无害差异误报。
-TYPE_ALIASES = {"BOOLEAN": "INT", "BOOL": "INT"}
+# 不做类型归一：BOOLEAN 与 INT 在 SQLite 里虽同为整数存储，但归一成 INT 会
+# 掩盖真实的类型变更（例如把某列从 INT 改成 BOOLEAN）。手写补列脚本与 aerich
+# 基线若产生该差异，应当暴露出来由人判断，而不是静默抹平。
+TYPE_ALIASES: dict = {}
 
 
 def dump_sqlite_schema(db_file) -> dict:
@@ -71,6 +72,43 @@ def diff_schemas(migrated: dict, expected: dict) -> list:
                     only_m = [x for x in migrated[t][key] if x not in expected[t][key]]
                     only_e = [x for x in expected[t][key] if x not in migrated[t][key]]
                     problems.append(f"表 {t}.{key}: 仅迁移链={only_m} 仅模型={only_e}")
+    return problems
+
+
+def check_dialect_baselines() -> list:
+    """检查三份方言基线的迁移文件名集合是否一致（纯文件检查，CI 用）。
+
+    文件名是 aerich 的版本键：若三份方言基线的文件名不一致，切方言后账本里
+    记录的版本名与目录里的文件名对不上，upgrade 会把基线当成未应用而重复建表。
+    """
+    repo = Path(__file__).resolve().parent.parent
+    dialects_dir = repo / "migrations" / "dialects"
+    if not dialects_dir.is_dir():
+        return [f"方言基线目录不存在: {dialects_dir}"]
+    problems = []
+    seen = {}
+    for d in sorted(p for p in dialects_dir.iterdir() if p.is_dir()):
+        names = {f.name for f in d.glob("*.py") if not f.name.startswith("__")}
+        seen[d.name] = names
+    if not seen:
+        return ["方言基线目录为空"]
+    reference = next(iter(seen.values()))
+    for dialect, names in seen.items():
+        if names != reference:
+            problems.append(
+                f"方言基线文件名不一致: {dialect}={sorted(names)} "
+                f"vs {sorted(reference)}"
+            )
+    # 与 migrations/models/ 里的实际基线也要对得上
+    models_dir = repo / "migrations" / "models"
+    installed = {f.name for f in models_dir.glob("0_*_init.py")}
+    for dialect, names in seen.items():
+        if installed and names != installed:
+            problems.append(
+                f"{dialect} 基线名 {sorted(names)} 与 migrations/models/ "
+                f"实际安装的 {sorted(installed)} 不一致（账本版本键会错位）"
+            )
+            break
     return problems
 
 
