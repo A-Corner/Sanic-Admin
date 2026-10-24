@@ -164,6 +164,11 @@ async def on_change_password(request):
     session = getattr(request.ctx, "authentication_session", None)
     if session is None or session.bearer is None:
         raise SessionValidationError("未登录或会话已失效")
+    # 账户启用 2FA 时，二次验证未完成的会话不得改密（否则仅凭口令即可绕过 2FA）
+    if session.second_factor_pending:
+        from app.services.exceptions import TwoFactorRequiredError
+
+        raise TwoFactorRequiredError()
 
     current_password = _text_field(
         get_request_value(request, "current_password"), "当前口令", 128

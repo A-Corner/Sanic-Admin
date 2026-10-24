@@ -360,10 +360,11 @@ async def test_flagged_user_can_complete_two_factor(client, monkeypatch):
     assert login.status_code == 200, login.text
     code = login.json()["data"]["code"]
 
-    # 2FA 未完成：/api/ 被拒（401 二次验证未完成 或 403 强制改密，取决于
-    # 蓝图组中间件与应用级中间件的执行先后，二者均为拒绝）
+    # 2FA 未完成：强制改密中间件以显式 priority 先于 /api 蓝图中间件执行，
+    # 因此稳定返回 403 PASSWORD_CHANGE_REQUIRED（不会是蓝图中间件的 401）
     pending = await client.get("/api/v1/roles")
-    assert pending.status_code in (401, 403), pending.status_code
+    assert pending.status_code == 403, pending.status_code
+    assert pending.json()["error"] == "PASSWORD_CHANGE_REQUIRED"
 
     verify = await client.post(
         "/auth/validate-2fa", headers=_csrf_header(client), json={"code": code}
@@ -404,3 +405,64 @@ async def test_two_factor_paths_exempt_with_boundary():
     for path in ("/auth/validate-2fax", "/two-steps", "/api/v1/roles"):
         with pytest.raises(PasswordChangeRequiredError):
             await enforce_password_change(_req(path))
+
+
+async def test_password_check_runs_before_api_blueprint_middleware(app):
+    """/api 路由的最终请求中间件链里，强制改密（应用级，高 priority）总在蓝图鉴权之前。"""
+    from app.middleware import AUTH_MIDDLEWARE_PRIORITY
+    from app.middleware.auth_middleware import AuthMiddleware
+
+    routes = [r for r in app.router.routes if r.path.startswith("api/v1/")]
+    assert routes, "未找到 /api/v1 路由"
+    checked = 0
+    for route in routes:
+        chain = list(route.extra.request_middleware)
+        auth_idx = [i for i, m in enumerate(chain) if isinstance(m.func, AuthMiddleware)]
+        api_idx = [
+            i for i, m in enumerate(chain)
+            if getattr(m.func, "__name__", "") == "_require_api_authentication"
+        ]
+        assert auth_idx, route.path  # 应用级中间件对所有路由生效
+        assert chain[auth_idx[0]].priority == AUTH_MIDDLEWARE_PRIORITY
+        if not api_idx:  # 部分路由不在 api_bp 组内，无蓝图鉴权中间件
+            continue
+        checked += 1
+        assert auth_idx[0] < api_idx[0], (route.path, auth_idx, api_idx)
+    # 正向对照：确实有路由同时带两个中间件，否则上面的比较是空转
+    assert checked > 0
+
+
+async def test_change_password_requires_completed_two_factor(client, monkeypatch):
+    """账户开 2FA：未完成二次验证时 /auth/change-password 403；完成后 200。"""
+    from app.models import Account as _A
+
+    await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    login = await _login_with_2fa(client, monkeypatch)
+    assert login.status_code == 200, login.text
+    code = login.json()["data"]["code"]
+    payload = {"current_password": ADMIN_PASSWORD,
+               "new_password": NEW_PASSWORD,
+               "confirm_password": NEW_PASSWORD}
+
+    # 反向：2FA 未完成 → 403 TWO_FACTOR_REQUIRED，口令与标志均不变
+    denied = await client.post(
+        "/auth/change-password", headers=_csrf_header(client), json=payload
+    )
+    assert denied.status_code == 403, (denied.status_code, denied.text)
+    assert denied.json()["error"] == "TWO_FACTOR_REQUIRED"
+    account = await _A.get(email=ADMIN_EMAIL)
+    assert account.must_change_password is True
+    assert account.verify_password(ADMIN_PASSWORD)
+
+    # 正向：完成 2FA 后同一请求成功
+    verify = await client.post(
+        "/auth/validate-2fa", headers=_csrf_header(client), json={"code": code}
+    )
+    assert verify.status_code == 200, verify.text
+    ok = await client.post(
+        "/auth/change-password", headers=_csrf_header(client), json=payload
+    )
+    assert ok.status_code == 200, (ok.status_code, ok.text)
+    account = await _A.get(email=ADMIN_EMAIL)
+    assert account.must_change_password is False
+    assert account.verify_password(NEW_PASSWORD)
