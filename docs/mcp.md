@@ -19,12 +19,22 @@
 
 ### 安全边界
 
-- **只读**：不改任何文件。`preview_generate` 先在仓库生成物哈希快照，返回前复核
-  未变；一旦发现被改动会直接报错而不是静默通过。
+- **只读**：不改任何文件。`preview_generate` 先对仓库相关文件取哈希快照
+  （`specs/*.yaml`、`amis/pages/site.json`、其余 `amis/pages/*-list.json`、
+  `app/auth/permissions.py`、`app/generated/**` 与各生成包的 `__init__.py`、
+  `tests/generated/*.py`），返回前复核未变；一旦发现被改动会直接报错并列出
+  有差异的路径，而不是静默通过。
+- **快照是事后检测**：它只负责**发现**改动，不负责**阻止**改动。真正的只读保障
+  是实现本身——生成全部发生在系统临时目录，仓库只被读取。
+- **输入上限**：`validate_spec` / `preview_generate` 的 spec 文本上限 64KB；
+  YAML 拒绝锚点（`&`）与别名（`*`）（防 billion laughs 别名炸弹），并限制嵌套
+  深度（`tools.specgen.schema.SpecLoader`）。超限/命中的输入在校验阶段即报错。
 - **临时目录**：位于系统临时区，`shutil.rmtree` 清理；测试断言不残留。
-- **白名单**：资源名必须匹配 `^[a-z][a-z0-9_]*$`；显式拒绝 `/`、`\`、`..` 与绝对路径，
-  并在拼接后再校验结果确实落在 `specs/` 内（双重防护）。
-- **不暴露**环境变量、数据库连接与密钥：工具只回规格与生成物本身（有测试断言）。
+- **白名单**：资源名必须匹配 `^[a-z][a-z0-9_]*$`（整串匹配，末尾换行会被拒）；
+  显式拒绝 `/`、`\`、`..` 与绝对路径，并在拼接后再校验结果确实落在 `specs/` 内
+  （双重防护）。
+- **不暴露**环境变量、数据库连接与密钥：工具只回规格与生成物本身。错误信息里的
+  本机绝对路径、HOME 与临时目录前缀统一脱敏为 `<path>`（有测试断言）。
 
 ## 安装
 
@@ -90,5 +100,16 @@ AI **不会**直接调用 `generate` 写盘——那一步由人确认后执行�
 pytest tests/test_mcp_server.py -q
 ```
 
-覆盖：每个工具的正例与反例、路径穿越拒绝（9 种变体）、preview 前后仓库哈希不变、
-临时目录清理、不泄露环境变量/密钥。
+覆盖：
+
+- 每个工具的正例与反例；路径穿越拒绝（含末尾换行等 11 种变体）
+- 输入上限：超长文本、billion laughs 别名炸弹、深嵌套——`validate_spec` 与
+  `preview_generate` 两条入口都各有用例，且都断言被拒
+- preview 前后仓库文件哈希不变；快照范围（specs / site.json / permissions.py /
+  各包 `__init__`）逐项断言；**正向对照**：快照后篡改文件，比对必须报出差异
+- 错误与预览输出不泄露环境变量/密钥，也不含绝对路径、HOME、临时目录前缀
+- 已注册工具名与本文档契约一致（公开 API）；以及对子进程发 `initialize` +
+  `tools/list` 的真实 stdio 握手冒烟
+
+> `mcp` 装在 `requirements-dev.txt`，CI 的 test job 用
+> `pip install -r requirements.txt -r requirements-dev.txt` 安装后运行 `pytest tests/`。

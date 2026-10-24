@@ -10,7 +10,10 @@ Sanic-Admin 规格即代码 MCP 服务（M2 第一段：只读与预演层）。
   走 PR + 独立审核，而不是让 AI 直接改运行时。
 - **只读**：`list_resources` / `describe_resource` / `validate_spec` /
   `preview_generate` / `check` 全部不落盘（`preview_generate` 只在临时目录生成，
-  用完即删，并复核仓库文件哈希未变）。
+  用完即删，并复核仓库文件哈希未变）。哈希快照是**事后检测**：只负责发现改动，
+  不负责阻止写入；真正的只读保障是实现本身只在临时目录生成。
+- **输入上限**：spec 文本 64KB；YAML 拒绝锚点/别名（防 billion laughs）并限制
+  嵌套深度（`tools.specgen.schema.SpecLoader`）。
 - **白名单**：资源名必须匹配 `^[a-z][a-z0-9_]*$`，不接受路径分隔符、`..`、
   绝对路径——防止经资源名做路径穿越。
 - **不暴露**环境变量、数据库连接与密钥：工具只回规格与生成物本身。
@@ -41,9 +44,39 @@ RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: 仓库根（可用 --root 覆盖，见 main()）
 ROOT = Path(__file__).resolve().parent.parent.parent
 
+#: 对外输入上限：单次 spec 文本 64KB（超限直接拒绝，不进 YAML 解析器）。
+#: YAML 层的锚点/别名与嵌套深度上限由 tools.specgen.schema.SpecLoader 负责。
+MAX_SPEC_TEXT_BYTES = 64 * 1024
+
 
 class ToolError(Exception):
     """工具层可安全展示给调用方的错误（不含路径/环境/密钥细节）。"""
+
+
+def _redact(text: str) -> str:
+    """
+    把错误文本里的本机路径抹掉，再回给调用方。
+
+    `ToolError` 的契约是「可安全展示」，但底层异常（生成器、临时目录、HOME）
+    常把绝对路径带进消息。这里统一替换成占位符，避免泄露目录结构。
+    """
+    out = str(text)
+    replacements = [str(_repo_root().resolve()), str(_repo_root())]
+    for var in ("HOME", "TMPDIR", "TEMP", "TMP"):
+        val = os.environ.get(var)
+        if val:
+            replacements.append(val)
+    try:
+        replacements.append(str(Path(tempfile.gettempdir()).resolve()))
+    except (OSError, RuntimeError):
+        pass
+    # 长的先换，避免 /tmp 先把 /tmp/xxx 换掉一半
+    for needle in sorted({r for r in replacements if r}, key=len, reverse=True):
+        out = out.replace(needle, "<path>")
+    # 兜底：仍残留的绝对路径（POSIX 与 Windows 盘符）整段抹掉
+    out = re.sub(r"(?<![<\w.])/(?:[\w.\-]+/)*[\w.\-]+", "<path>", out)
+    out = re.sub(r"\b[A-Za-z]:\\(?:[\w.\-]+\\)*[\w.\-]+", "<path>", out)
+    return out
 
 
 def _repo_root() -> Path:
@@ -54,13 +87,28 @@ def _specs_dir() -> Path:
     return _repo_root() / "specs"
 
 
+def _guard_spec_text(yaml_text: Any) -> str:
+    """
+    校验 spec 文本入口（长度上限）。**在进入 YAML 解析器之前**执行。
+
+    别名炸弹（billion laughs）在解析期才会爆炸，因此长度上限只能挡住「体积大」
+    的一类；锚点/别名与嵌套深度由 ``tools.specgen.schema.SpecLoader`` 拒绝。
+    """
+    if not isinstance(yaml_text, str):
+        raise ToolError(f"规格必须是文本，实际 {type(yaml_text).__name__}")
+    size = len(yaml_text.encode("utf-8"))
+    if size > MAX_SPEC_TEXT_BYTES:
+        raise ToolError(f"规格文本超过上限 {MAX_SPEC_TEXT_BYTES} 字节（实际 {size}）")
+    return yaml_text
+
+
 def _guard_resource_name(name: str) -> str:
     """资源名白名单校验（防路径穿越）。"""
     if not isinstance(name, str) or not name:
         raise ToolError("资源名不能为空")
     if ".." in name or "/" in name or "\\" in name or os.path.isabs(name):
         raise ToolError(f"资源名不合法：{name!r}（不允许路径分隔符、'..' 或绝对路径）")
-    if not RESOURCE_NAME_RE.match(name):
+    if not RESOURCE_NAME_RE.fullmatch(name):
         raise ToolError(
             f"资源名不合法：{name!r}（必须匹配 {RESOURCE_NAME_RE.pattern}）"
         )
@@ -155,15 +203,33 @@ def validate_spec(yaml_text: str) -> Dict[str, Any]:
     from tools.specgen.schema import SpecError, parse_spec_text
 
     try:
-        spec = parse_spec_text(yaml_text, "inline")
+        text = _guard_spec_text(yaml_text)
+        spec = parse_spec_text(text, "inline")
+    except ToolError as exc:
+        return {"ok": False, "errors": [{"path": "<root>", "reason": _redact(exc)}]}
     except SpecError as exc:
         return {
             "ok": False,
-            "errors": [{"path": path, "reason": reason} for path, reason in exc.errors],
+            "errors": [{"path": path, "reason": _redact(reason)} for path, reason in exc.errors],
         }
     except Exception as exc:  # noqa: BLE001  解析期异常也按校验失败回，不暴露堆栈
-        return {"ok": False, "errors": [{"path": "", "reason": str(exc)}]}
+        return {"ok": False, "errors": [{"path": "", "reason": _redact(exc)}]}
     return {"ok": True, "resource": spec.resource, "field_count": len(spec.fields)}
+
+
+#: 快照要覆盖的仓库文件（glob，相对仓库根）。
+#: 不限于「生成物」：规格源、AMIS 站点菜单、权限点定义、生成包的 __init__ 都在
+#: 生成链路里被读或被写，漏掉任何一类都会让「仓库未被改动」的复核形同虚设。
+SNAPSHOT_GLOBS = (
+    "specs/*.yaml",
+    "app/generated/models/*.py",
+    "app/generated/resources/*.py",
+    "app/generated/*.py",
+    "tests/generated/*.py",
+    "amis/pages/*-list.json",
+    "amis/pages/site.json",
+    "app/auth/permissions.py",
+)
 
 
 def _file_digest(path: Path) -> str:
@@ -172,18 +238,19 @@ def _file_digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def _repo_generated_digests() -> Dict[str, str]:
-    """当前仓库里全部生成物的 sha256 快照（用于 preview 前后对照）。"""
+def _repo_digest_snapshot() -> Dict[str, str]:
+    """
+    当前仓库相关文件的 sha256 快照（用于 preview 前后对照）。
+
+    这是**事后检测**：它只能发现「已经发生的改动」，不能阻止写入。真正的只读
+    保障是实现本身（生成全部发生在临时目录）；快照是兜底的正向对照。
+    """
     root = _repo_root()
     digests: Dict[str, str] = {}
-    for pattern in (
-        "app/generated/models/*.py",
-        "app/generated/resources/*.py",
-        "tests/generated/*.py",
-        "amis/pages/*-list.json",
-    ):
+    for pattern in SNAPSHOT_GLOBS:
         for p in sorted(root.glob(pattern)):
-            digests[str(p.relative_to(root))] = _file_digest(p)
+            if p.is_file():
+                digests[p.relative_to(root).as_posix()] = _file_digest(p)
     return digests
 
 
@@ -198,14 +265,17 @@ def preview_generate(yaml_text: str) -> Dict[str, Any]:
     from tools.specgen.schema import SpecError, parse_spec_text
 
     try:
-        parsed = parse_spec_text(yaml_text, "inline")
+        text = _guard_spec_text(yaml_text)
+        parsed = parse_spec_text(text, "inline")
+    except ToolError as exc:
+        return {"ok": False, "errors": [{"path": "<root>", "reason": _redact(exc)}]}
     except SpecError as exc:
         return {
             "ok": False,
-            "errors": [{"path": path, "reason": reason} for path, reason in exc.errors],
+            "errors": [{"path": path, "reason": _redact(reason)} for path, reason in exc.errors],
         }
 
-    before = _repo_generated_digests()
+    before = _repo_digest_snapshot()
     tmp_root = Path(tempfile.mkdtemp(prefix="specgen-preview-"))
     try:
         # 在临时根下铺一份最小骨架：specs/ + 生成器需要读取的现有生成物目录
@@ -235,11 +305,12 @@ def preview_generate(yaml_text: str) -> Dict[str, Any]:
         for src in sorted(specs_src.glob("*.yaml")):
             shutil.copy2(src, tmp_root / "specs" / src.name)
         spec_file = f"{parsed.resource}.yaml"
-        (tmp_root / "specs" / spec_file).write_text(yaml_text, encoding="utf-8")
+        (tmp_root / "specs" / spec_file).write_text(text, encoding="utf-8")
         try:
             changed, _stale = generate.run(tmp_root, tmp_root / "specs", check=False)
         except Exception as exc:  # noqa: BLE001
-            raise ToolError(f"预览生成失败：{exc}") from None
+            # 不直接 str(exc)：底层异常常带临时目录/仓库绝对路径
+            raise ToolError(f"预览生成失败：{_redact(exc)}") from None
 
         diffs: List[str] = []
         for rel in changed:
@@ -256,10 +327,14 @@ def preview_generate(yaml_text: str) -> Dict[str, Any]:
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    after = _repo_generated_digests()
+    after = _repo_digest_snapshot()
     if before != after:
-        # 正向对照：preview 绝不允许写仓库；一旦写入立即报错而非静默通过
-        raise ToolError("内部错误：preview 修改了仓库文件，已中止")
+        # 正向对照：preview 绝不允许写仓库；一旦写入立即报错而非静默通过。
+        # 这是**事后检测**（只能发现、不能阻止），真正的保障是「只在临时目录生成」。
+        changed_paths = sorted(
+            {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
+        )
+        raise ToolError(f"内部错误：preview 修改了仓库文件，已中止（{', '.join(changed_paths)}）")
 
     return {
         "ok": True,
