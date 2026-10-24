@@ -261,7 +261,7 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 ```bash
 # 起一个隔离服务（独立端口 / 独立 SQLite / 一次性口令）后：
 python scripts/amis_e2e_check.py \
-    --base http://127.0.0.1:<port> \
+    --base-url http://127.0.0.1:<port> \
     --admin-password '<一次性口令>' \
     --new-password '<新口令>'          # v0.3.2 起首登会停在改密表单，必须提供
 
@@ -272,7 +272,7 @@ python scripts/amis_e2e_check.py ... --negative-control login_password
 
 - 全绿的标准是 **19/19 项通过**（脚本钉死断言总数，少一条就报错）。
 - `--negative-control` 退出码 0 表示「被篡改的断言确实失败了」——这才是门禁有效性的证明。
-- CI 里有对应的 `amis-e2e` job；**浏览器不可用时该 job 标记为 `skipped`，不会静默算通过**。
+- CI 由 `amis-e2e-probe` 先探测浏览器可用性并输出 `available`；`amis-e2e` job 用 `if` 依赖该输出，**浏览器不可用时整个 job 显示为 `skipped`**（不是绿色通过）。
 
 ---
 
