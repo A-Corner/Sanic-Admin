@@ -7,6 +7,62 @@
 
 <!-- 下一版变更写在这里。 -->
 
+## [0.3.2] — 2026-10-24
+
+鉴权收尾版本。新增首登强制改密，修复 2FA 登录 500 与 AMIS 角色表单校验；**存量库需手工跑一次迁移脚本**（见下）。
+
+**API 契约变更**：登录与 `/auth/validate-2fa` 响应新增 `must_change_password` 布尔字段；新增错误码 `PASSWORD_CHANGE_REQUIRED`（HTTP 403，改密未完成时返回）。请求体与路径未变。
+
+### Added
+
+- **首次登录强制改密。** 由 `INITIAL_ADMIN_PASSWORD` 创建的初始管理员携带
+  `must_change_password=True`；改密前该会话访问 `/api/**` 一律返回
+  **403 `PASSWORD_CHANGE_REQUIRED`**（仅登录/登出/改密端点、AMIS 控制台、健康检查
+  与 API 文档放行）。新增 `POST /auth/change-password`
+  （`current_password` / `new_password` / `confirm_password`），改密成功后作废该账户
+  的其它会话。AMIS 登录页在响应带该标志时显示改密对话框。
+- 中间件顺序显式化：强制改密检查为应用级中间件并设置显式 priority，保证先于
+  `/api` 蓝图鉴权执行（测试钉住顺序）。
+
+### Fixed
+
+- **开启 `REQUIRE_TWO_FACTOR` 时登录返回 500**：登录响应在加标志时把字符串当映射用。
+  2FA 分支改为返回 `{"code": …, "must_change_password": …}`，`/auth/validate-2fa`
+  同样透出该标志。
+- **2FA 未完成的会话无法完成二次验证**：`/auth/validate-2fa` 加入强制改密白名单；
+  `/auth/change-password` 反过来要求二次验证已完成（否则 403）。
+- **AMIS 角色表单的 `permissions` 被后端拒绝（400）**：表单按字符串原文提交而后端要求
+  对象。两表单改为提交前解析 JSON、校验解析结果为对象、字段必填，编辑时把存储的对象
+  回填为缩进 JSON。
+
+### Migration — 存量库必读
+
+> **破坏性提示：** 升级并完成迁移后，口令仍是 `INITIAL_ADMIN_PASSWORD` 或历史默认
+> `SAdmin@123` 的管理员，访问 `/api/**` 会返回 **403 `PASSWORD_CHANGE_REQUIRED`**，
+> 必须先调用 `POST /auth/change-password` 改密（或用控制台的改密对话框）。
+
+项目尚未引入迁移框架，`generate_schemas` 不会给已有表加列。**v0.3.1 及更早版本升级
+必须手工执行一次**：
+
+```bash
+export SANIC_ENV=production            # 或用 DB_URL 指定
+export INITIAL_ADMIN_PASSWORD='...'    # 当前在用的口令
+python scripts/migrate_v0_3_2_must_change_password.py
+```
+
+脚本补 `account.must_change_password` 列，并把**未禁用的管理员**中口令仍等于当前
+`INITIAL_ADMIN_PASSWORD` 或历史硬编码默认口令 `SAdmin@123` 的账户置为强制改密。
+支持 SQLite / MySQL（生产默认）/ PostgreSQL，不打印任何口令；幂等可重复执行。
+管理员邮箱已改过（有管理员但无 `INITIAL_ADMIN_EMAIL` 账户）时警告并跳过创建，
+需强制创建时加 `--create-initial-admin`。全新安装无需迁移。
+
+### Known limitations
+
+- **aerich 迁移链推迟到 v0.4 M1**：审核发现其基线只在 SQLite 上可跑，生产用的 MySQL
+  跑不了，因此 v0.3.2 仍用手写迁移脚本。
+- v0.3.1 的已知限制全部继续有效：登录端点豁免 CSRF、`TRUSTED_PROXIES` 暂无环境变量
+  接线、Sanic 25 下非 GET 的 405 `Allow` 头仍列 `HEAD`。
+
 ## [0.2.1] — 2026-10-22
 
 v0.2.0 的维护补丁版本，不含新功能。除下列修复外，公开 API、配置契约与部署路径均未变化。

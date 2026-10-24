@@ -12,7 +12,7 @@
 
 ## 特性
 
-- **认证与会话**：注册 / 验证 / 登录 / 登出 / 会话关联、图形验证码、两步验证流程；RS256 签名的 JWT 会话，同时通过 `HttpOnly` Cookie 和 `Authorization` 响应头下发。真实路由前缀为 `/auth`、`/capt`、`/two-step`、`/roles`、`/account`（`app/auth/routes.py:27-31`）。
+- **认证与会话**：注册 / 验证 / 登录 / 登出 / 会话关联、图形验证码、两步验证流程；RS256 签名的 JWT 会话，同时通过 `HttpOnly` Cookie 和 `Authorization` 响应头下发。真实路由前缀为 `/auth`、`/capt`、`/roles`、`/account`（`app/auth/routes.py:27-31`）。
 - **RBAC 权限**：角色模型携带 `{资源: [操作]}` 权限表；提供权限检查、角色检查、角色分配与回收；`is_admin` 账户拥有全部权限。
 - **管理 API**：账户、角色、个人资料、系统设置、操作日志、文件上传、仪表盘、缓存、只读 SQL 分析。这些是**类式 CRUD 资源**（继承 `app/api/base.py` 的 `CRUDResource`），不是独立的 `@bp.route` 蓝图装饰器。
 - **缓存**：内存 / Redis 双后端，共用一套接口；Redis 不可达时开发环境降级为内存，**生产环境拒绝降级启动**。

@@ -46,6 +46,9 @@ class Account(BaseModel):
     disabled: bool = fields.BooleanField(default=False)
     verified: bool = fields.BooleanField(default=False)
     is_admin: bool = fields.BooleanField(default=False)
+    # 首次登录强制改密：初始管理员（环境变量口令创建）为 True，改密成功后置 False。
+    # 存量库需手工 ALTER（见 upgrade_schema.md v0.3.2 节）。
+    must_change_password: bool = fields.BooleanField(default=False)
     roles: fields.ManyToManyRelation["Role"] = fields.ManyToManyField(
         "models.Role", through="account_role", related_name="accounts"
     )

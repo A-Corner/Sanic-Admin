@@ -157,7 +157,7 @@ class DefaultConfig:
     """
     ENV = "default"
     APP_NAME = "Sanic-Admin"
-    APP_VERSION = "1.0.0"
+    APP_VERSION = "0.3.2"
 
     DEBUG = False
     TESTING = False

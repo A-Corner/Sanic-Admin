@@ -178,6 +178,16 @@ async def app(tmp_path):
     await application._server_event("init", "before", loop)
     await application._server_event("init", "after", loop)
 
+    # v0.3.2 起，初始管理员（环境变量口令创建）默认 must_change_password=True，
+    # 登录后除改密流程外全部 /api/ 请求被 403（首次登录强制改密）。
+    # 绝大多数测试关心的是"已改密的常规运行态"，这里在初始化后把标志复位；
+    # "初始管理员默认 True" 的专项断言见 test_must_change_password.py（DB 层）。
+    from app.models import Account as _AccountModel
+
+    await _AccountModel.filter(email=os.environ["INITIAL_ADMIN_EMAIL"]).update(
+        must_change_password=False
+    )
+
     try:
         yield application
     finally:

@@ -138,6 +138,8 @@ async def create_initial_admin_account(app=None):
         verified=True,
         disabled=False,
         is_admin=True,
+        # 环境变量注入的口令只是交付通道，首次登录强制改为只有持有者知道的口令
+        must_change_password=True,
     )
     admin.set_password(BaseConfig.INITIAL_ADMIN_PASSWORD)
     await admin.save()

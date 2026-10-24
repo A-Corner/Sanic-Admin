@@ -2,7 +2,7 @@
 # 注意：PyPI 上 "sanic-admin" 已被无关项目占用，因此 name 不使用该名称。
 [project]
 name = "sanic-admin-rbac"
-version = "0.1.0"
+version = "0.3.2"
 description = "Sanic + Tortoise ORM + Vue 3 的全栈后台管理系统（RBAC）"
 readme = "README.md"
 requires-python = ">=3.10"
