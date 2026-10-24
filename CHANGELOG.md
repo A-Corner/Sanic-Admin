@@ -39,6 +39,9 @@ v0.3.2 的热修版本。修复控制台角色弹窗无法渲染的回归，并�
   `amis-e2e` job 用 `if` 依赖该输出。浏览器可用时：起服务（固定端口 22222、临时
   SQLite、一次性口令）→ 跑 19 项 E2E → 跑正向对照；**不可用时整个 job 显示为
   `skipped`**，不会被记成绿色通过。
+- **CI 触发白名单加入 `release/**`**：补丁版从 `release/` 分支拉 hotfix 分支，原先
+  `push` / `pull_request` 只列了 `main, master, develop, vj-mp3`，发补丁版的 PR 根本
+  不会触发 CI。仅改 workflow 配置，不动运行时。
 - **仪表盘断言改为比对真实数值**：原先只要求「有标题的卡片存在」，现在读取卡片实际
   渲染的数字，与 `/api/v1/dashboard/summary` 返回的 `data.accounts.total` 比对
   （同一会话、同源，两个数才真正可比）。已做双向验证：破坏 `.cxd-Card-fieldValue`
