@@ -67,7 +67,19 @@ AMIS 的 `input-datetime` 默认把用户看到的**本地时间**原样提交�
 因为它拿不到时区信息。正确做法是在前端声明时区语义（AMIS 的 `utc: true`），
 让它在提交前把本地时间换算成 UTC。
 
-> 状态：v0.4.1 之前 **尚未处理**。已在迭代计划中登记。
+> **状态：v0.4.1 已处理。** 生成器给 `input-datetime` 加了 `utc: true`，
+> `valueFormat` 改为 `"YYYY-MM-DDTHH:mm:ssZ"`（见 `tools/specgen/render_amis.py`）。
+>
+> 实测（TZ=Asia/Shanghai 真实浏览器）：
+> - 库里 `2026-12-01T02:00:00+00:00` → 编辑弹窗显示 `2026-12-01 10:00:00`
+> - DatePicker 选本地 `2026-10-07 00:00:00` → 请求体 `"onboarded_at": "2026-10-06T16:00:00+00:00"`
+>
+> 即：提交前本地→UTC、回显时 UTC→本地，都不再由用户或后端猜。
+>
+> **注意 AMIS 6.13 的 DOM 变化**：`input-datetime` 的输入框**没有 `name` 属性**
+> （只有 `class="cxd-DatePicker-input"`），弹层是 react-datetime 的 `.rdtDay`
+> 网格而非 AMIS 自己的 Picker。写自动化测试时不能按 `input[name="..."]` 定位，
+> 也不能用普通 `fill()`——它不会触发 AMIS 的 onChange。
 
 ## 6. 存量数据
 
