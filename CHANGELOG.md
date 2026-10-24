@@ -5,7 +5,33 @@
 
 ## [Unreleased]
 
-<!-- 下一版变更写在这里。 -->
+### Fixed
+
+- **AMIS 角色表单的校验写法导致弹窗打不开（v0.3.2 回归）。** v0.3.2 把两处
+  `permissions` 文本域的 `validations.isJson` 改成了字符串形式的 `validate`，
+  而 AMIS 3.4.0 对 `$schema.validate` 直接执行 `validate.bind(...)`，字符串没有
+  `bind` 方法 —— 新增/编辑对话框在 `componentDidMount` 抛
+  `TypeError: i.bind is not a function`，弹窗根本不渲染。已改回
+  `validations.isJson` + `validationErrors.isJson`（3.4.0 与 6.13.0 均支持）。
+  该缺陷会让「控制台建/改角色」完全不可用，pytest 覆盖不到（AMIS 页面不在
+  API 测试范围）。
+- **AMIS E2E 门禁脚本（`scripts/amis_e2e_check.py`）从未真正跑绿。** 修正四处
+  脚本缺陷：密码字段选择器 `password` → `pass`；弹窗选择器 `.amis-dialog` →
+  `.amis-dialog-widget`；清理断言 `_cleanup_role(...) is None or True` 恒真
+  （改为 cookie 会话清理 + 删除后重新查询核验）；编辑用例提交的
+  `{"account": ["write"]}` 中 `write` 不是注册表里的合法动作（应为 `update`）。
+  另修正三处会静默放宽门禁的写法：`--admin-password` 为 `must_change_password=True`
+  的账户时脚本会停住（新增 `--new-password` 走完强制改密）；amis 空表仍渲染占位行
+  使 `tbody tr > 0` 恒真（改为排除空态行并核对探针数据）；断言总数被钉在 19，
+  少一条即报错。
+
+### Added
+
+- **AMIS E2E 正向对照。** `--negative-control {dialog,login_password}` 故意把选择器
+  改错，要求对应断言**必须**失败；断言仍通过说明它是恒真的，脚本以退出码 1 报警。
+- **CI 新增 `amis-e2e` job**（与 pytest 并行）：起隔离服务（独立端口/独立 SQLite/
+  一次性口令）→ 跑 19 项 E2E → 跑正向对照。浏览器不可用时该 job 标记为
+  **skipped**（并输出 `::warning::`），不会静默算通过。
 
 ## [0.3.2] — 2026-10-24
 
