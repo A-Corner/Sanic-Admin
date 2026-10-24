@@ -16,6 +16,54 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 IDENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 
+#: 规格 YAML 允许的最大嵌套深度（防深嵌套/递归炸弹）
+MAX_YAML_DEPTH = 32
+#: 单份规格文本的最大字节数（MCP 入口的输入上限）
+MAX_SPEC_TEXT_BYTES = 64 * 1024
+
+
+class SpecLoader(yaml.SafeLoader):
+    """
+    加固版 SafeLoader：拒绝锚点与别名，并限制嵌套深度。
+
+    ``yaml.safe_load`` 不会执行任意代码，但仍会展开别名——一段几百字节的
+    「billion laughs」YAML 能在解析期把内存放大到几个 GB。规格里没有任何合理
+    理由使用 ``&`` / ``*``，因此直接拒绝；深嵌套同理设上限。
+    """
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self._depth = 0
+
+    def compose_node(self, parent, index):
+        event = self.peek_event()
+        if event is not None and (
+            isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None)
+        ):
+            raise yaml.composer.ComposerError(
+                "规格 YAML 不允许锚点（&）或别名（*）", event.start_mark
+            )
+        self._depth += 1
+        try:
+            if self._depth > MAX_YAML_DEPTH:
+                raise yaml.composer.ComposerError(
+                    f"规格 YAML 嵌套超过 {MAX_YAML_DEPTH} 层", event.start_mark
+                )
+            return super().compose_node(parent, index)
+        finally:
+            self._depth -= 1
+
+
+def safe_load_spec(text, rel: str):
+    """用 :class:`SpecLoader` 解析规格文本或字节；YAML 错误一律转成 ``SpecError``。"""
+    try:
+        if isinstance(text, bytes):
+            text = text.decode("utf-8")
+        return yaml.load(text, Loader=SpecLoader)
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        raise SpecError(rel, [("<yaml>", str(exc).replace("\n", " "))])
+
+
 #: 框架已占用的资源名（权限点 / 路由），规格不得重名
 RESERVED_RESOURCES = frozenset(
     {"account", "role", "profile", "log", "setting", "file", "dashboard", "system", "session", "verification", "upload"}
@@ -39,7 +87,7 @@ class SpecError(Exception):
 
 
 def _ident(value: str, what: str) -> str:
-    if not IDENT_RE.match(value):
+    if not IDENT_RE.fullmatch(value):
         raise ValueError(f"{what}必须匹配 {IDENT_RE.pattern}（小写字母开头，仅小写字母/数字/下划线）")
     if keyword.iskeyword(value):
         raise ValueError(f"{what}不能是 Python 关键字")
@@ -271,10 +319,7 @@ def _fmt_errors(exc: ValidationError) -> List[tuple]:
 def load_spec(path: Path, rel: str) -> ResourceSpec:
     """读取并校验一份规格；失败抛 ``SpecError``（含字段路径与原因）。"""
     raw = path.read_bytes()
-    try:
-        data = yaml.safe_load(raw.decode("utf-8"))
-    except (yaml.YAMLError, UnicodeDecodeError) as exc:
-        raise SpecError(rel, [("<yaml>", str(exc).replace("\n", " "))])
+    data = safe_load_spec(raw.decode("utf-8"), rel)
     if not isinstance(data, dict):
         raise SpecError(rel, [("<root>", "规格顶层必须是映射")])
     try:
@@ -287,6 +332,36 @@ def load_spec(path: Path, rel: str) -> ResourceSpec:
     spec.digest = hashlib.sha256(raw).hexdigest()[:12]
     if path.stem != spec.resource:
         raise SpecError(rel, [("resource", f"文件名 {path.stem!r} 必须与 resource {spec.resource!r} 一致")])
+    return spec
+
+
+def parse_spec_text(text: str, rel: str = "inline") -> ResourceSpec:
+    """
+    校验一段规格 YAML 文本（不写盘、不做文件名一致性检查）。
+
+    供 MCP 的 ``validate_spec`` / ``preview_generate`` 与测试使用：调用方手上
+    只有文本，没有文件。校验口径与 :func:`load_spec` 相同，失败同样抛
+    ``SpecError``（带字段路径）。
+
+    输入边界（MCP 是对外入口，不可信任输入大小）：超过
+    :data:`MAX_SPEC_TEXT_BYTES`、含锚点/别名、或嵌套过深的文本一律拒绝。
+    """
+    import hashlib
+
+    if not isinstance(text, str):
+        raise SpecError(rel, [("<root>", f"规格必须是文本，实际 {type(text).__name__}")])
+    raw = text.encode("utf-8")
+    if len(raw) > MAX_SPEC_TEXT_BYTES:
+        raise SpecError(rel, [("<root>", f"规格文本超过上限 {MAX_SPEC_TEXT_BYTES} 字节（实际 {len(raw)}）")])
+    data = safe_load_spec(text, rel)
+    if not isinstance(data, dict):
+        raise SpecError(rel, [("<root>", "规格顶层必须是映射")])
+    try:
+        spec = ResourceSpec.model_validate(data)
+    except ValidationError as exc:
+        raise SpecError(rel, _fmt_errors(exc))
+    spec.source = rel
+    spec.digest = hashlib.sha256(raw).hexdigest()[:12]
     return spec
 
 

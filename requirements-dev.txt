@@ -13,3 +13,17 @@ requests>=2.31
 
 # specgen（规格即代码生成器）读取规格 YAML
 pyyaml>=6,<7
+
+# MCP 服务（tools/mcp_server）：官方 Python SDK，2.x 已把 FastMCP 更名为 MCPServer。
+# 仅开发期/AI 协作需要，不属运行时依赖；锁定精确版本以免 2.x→3.x 的 API 变动打断工具。
+mcp==2.3.0
+# mcp 2.3.0 的 Requires-Dist 是 pydantic>=2.12.0，而 requirements.txt 写的是
+# pydantic>=2.5,<3（运行时给 sanic-ext / tortoise 用的下界更宽）。两者求交集后
+# 实际可解析区间是 [2.12, 3)，这里显式抬下界，避免解析器挑到 2.5–2.11 时
+# 与 mcp 的约束打架、或在 CI 上装出「本地能跑、CI 装不上」的分歧。
+pydantic>=2.12,<3
+# mcp 2.3.0 依赖 httpx2>=2.10.0，而 httpx2 从 2.15.0 起把 Requires-Python 抬到
+# >=3.11。CI 矩阵含 3.10，解析器在 3.10 上会自动回退到 httpx2 2.14.0（能装能跑），
+# 但那是「碰巧」。显式钉住 3.10 的上界，避免将来 httpx2 抬高下界或解析器行为变化
+# 导致 3.10 突然装不上。
+httpx2<2.15; python_version < "3.11"
