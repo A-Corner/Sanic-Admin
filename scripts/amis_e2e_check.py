@@ -388,8 +388,23 @@ def main() -> int:
             dash = page.locator("body").inner_text()
             check("仪表盘标题渲染", "仪表盘" in dash)
             check("仪表盘卡片渲染（账户总数）", "账户总数" in dash)
-            tail = dash.split("账户总数")[-1][:40] if "账户总数" in dash else ""
-            check("仪表盘数据绑定生效（数字非空）", any(ch.isdigit() for ch in tail))
+            # 收紧：不靠「账户总数」之后的任意字符里找数字（那样任何正文里的数字
+            # 都能让它变绿）。改为定位仪表盘卡片内的数值元素，要求其文本是可解析的数字。
+            card_value = page.locator(
+                '[class*="cards"] [class*="value"], .amis-cards-value'
+            )
+            numeric_ok = False
+            for i in range(min(card_value.count(), 6)):
+                text = (card_value.nth(i).inner_text() or "").strip()
+                digits = "".join(ch for ch in text if ch.isdigit())
+                if digits:
+                    numeric_ok = True
+                    break
+            check(
+                "仪表盘数据绑定生效（卡片数值元素为数字）",
+                numeric_ok,
+                f"cards={card_value.count()}",
+            )
 
             # 4. 角色列表
             page.goto(base + PAGES["console"] + "#/role/list", wait_until="domcontentloaded")
@@ -458,7 +473,13 @@ def main() -> int:
                 "账户列表 filter 关键字输入框渲染",
                 page.locator('input[name="keyword"]').count() > 0,
             )
-            check("账户列表 filter-toggler 控件存在", "关键字" in acct)
+            # 收紧：原先用「正文里出现『关键字』」判定，页面上任何含该词的文本都能
+            # 让它通过。改为要求 filter 区域确实渲染了 keyword 输入控件。
+            check(
+                "账户列表 filter-toggler 控件存在",
+                page.locator('input[name="keyword"]').is_visible(),
+                "keyword_input=%d" % page.locator('input[name="keyword"]').count(),
+            )
 
             # 8. 系统设置（先保证有真实数据行，再断言页面能看到它）
             setting_detail = ""
