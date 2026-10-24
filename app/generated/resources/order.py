@@ -24,7 +24,7 @@ from app.api.validators import (
     request_payload,
     validate_fields,
 )
-from app.auth.authorization import requires_permission
+from app.auth.authorization import has_permission, requires_permission
 from app.models import Customer, Order
 
 RESOURCE = 'order'
@@ -43,7 +43,7 @@ FIELD_RULES = {
 WRITE_FIELDS = ('title', 'amount', 'quantity', 'status', 'customer_id')
 UNIQUE_FIELDS = ()
 SEARCH_FIELDS = ('title',)
-FK_TARGETS = {'customer_id': Customer}
+FK_TARGETS = {'customer_id': (Customer, 'customer')}
 CHILDREN = ()
 
 
@@ -55,13 +55,24 @@ def _error(message, code, status, details=None):
     return APIResponse.error(message=message, error_code=code, status_code=status, details=details)
 
 
-async def _ref_errors(payload: dict) -> dict:
+async def _ref_errors(payload: dict, account) -> dict:
     errors = {}
-    for col, model in FK_TARGETS.items():
+    for col, (model, _res) in FK_TARGETS.items():
         value = payload.get(col)
         if value is not None and not await model.filter(id=value).exists():
             errors[col] = ["引用的记录不存在"]
     return errors
+
+
+async def _ref_permission_denied(payload: dict, account) -> bool:
+    # 防 ID 枚举：调用者对引用目标没有 <target>:read 时，400(不存在) 与
+    # 201(存在)的差异会泄露目标 id 是否存在，因此先返回 403。
+    for col, (_model, target_res) in FK_TARGETS.items():
+        if payload.get(col) is None:
+            continue
+        if not await has_permission(account, target_res, 'read'):
+            return True
+    return False
 
 
 async def _unique_conflicts(payload: dict, exclude_id=None) -> dict:
@@ -106,9 +117,11 @@ class OrderResource(HTTPMethodView):
     @requires_permission("order:create")
     async def post(self, request: Request):
         payload = extract_whitelisted(request_payload(request), WRITE_FIELDS)
+        if await _ref_permission_denied(payload, request.ctx.authentication_session.bearer):
+            return _error("无权引用该关联资源", APIError.FORBIDDEN, 403)
         errors = validate_fields(payload, FIELD_RULES)
         if not errors:
-            errors = await _ref_errors(payload)
+            errors = await _ref_errors(payload, request.ctx.authentication_session.bearer)
         if errors:
             return _error("参数验证失败", APIError.VALIDATION_ERROR, 400, errors)
         conflicts = await _unique_conflicts(payload)
@@ -128,11 +141,13 @@ class OrderResource(HTTPMethodView):
         if obj is None:
             return _error(f"{LABEL}不存在", NOT_FOUND, 404)
         payload = extract_whitelisted(request_payload(request), WRITE_FIELDS)
+        if await _ref_permission_denied(payload, request.ctx.authentication_session.bearer):
+            return _error("无权引用该关联资源", APIError.FORBIDDEN, 403)
         if not payload:
             return _error("没有可更新的字段", APIError.MISSING_PARAMETER, 400)
         errors = validate_fields(payload, {k: v for k, v in FIELD_RULES.items() if k in payload})
         if not errors:
-            errors = await _ref_errors(payload)
+            errors = await _ref_errors(payload, request.ctx.authentication_session.bearer)
         if errors:
             return _error("参数验证失败", APIError.VALIDATION_ERROR, 400, errors)
         conflicts = await _unique_conflicts(payload, exclude_id=order_id)

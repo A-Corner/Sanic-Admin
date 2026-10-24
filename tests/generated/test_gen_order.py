@@ -34,6 +34,66 @@ async def test_read_grant_is_positive_control(client, normal_auth_headers):
     assert (await client.post(URL, headers=normal_auth_headers, json={})).status_code == 403
 
 
+async def test_permission_matrix(client, normal_auth_headers):
+    """权限动作矩阵：每次只授予一个动作的权限，其余动作必须 403。"""
+    from app.models import Role
+
+    for granted, denied in (
+        ('read', ['create', 'update', 'delete']),
+        ('create', ['read', 'update', 'delete']),
+        ('update', ['create', 'read', 'delete']),
+        ('delete', ['create', 'read', 'update']),
+    ):
+        await Role.filter(name='reader').update(
+            permissions={'order': [granted]}
+        )
+        for action in granted, *denied:
+            calls = {
+                'read': ('get', URL, None),
+                'create': ('post', URL, {}),
+                'update': ('put', URL + '/1', {}),
+                'delete': ('delete', URL + '/1', None),
+            }
+            method, path, body = calls[action]
+            kwargs = {'headers': normal_auth_headers}
+            if body is not None:
+                kwargs['json'] = body
+            response = await getattr(client, method)(path, **kwargs)
+            if action == granted:
+                assert response.status_code != 403, (
+                    f'{action} 已授权却得到 403（URL {path}）'
+                )
+            else:
+                assert response.status_code == 403, (
+                    f'{action} 未授权却未返回 403（{response.status_code}）'
+                )
+
+    # 还原：权限矩阵会反复改写 reader 角色，结束时恢复为只读，避免污染后续用例
+    await Role.filter(name='reader').update(permissions={'order': ['read']})
+
+
+async def test_fk_requires_target_read_permission(client, normal_auth_headers):
+    """外键防 ID 枚举：无 <target>:read 时引用必须 403，不能靠 400/201 差异侧探。"""
+    from app.models import Role
+
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    await Role.filter(name='reader').update(permissions={'order': ['create']})
+
+    # 对引用目标无 read 权限：无论 id 是否存在，都必须 403（不泄露存在性）
+    payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
+    denied = await client.post(URL, headers=normal_auth_headers, json=payload)
+    assert denied.status_code == 403, (
+        f'无 customer:read 时引用应 403，实际 {denied.status_code}'
+    )
+
+    # 正向对照：授了 read 后同一 payload 不再是 403（证明上面的 403 来自权限判定）
+    await Role.filter(name='reader').update(permissions={'order': ['create'], 'customer': ['read']})
+    allowed = await client.post(URL, headers=normal_auth_headers, json=payload)
+    assert allowed.status_code != 403, (
+        f'授了 read 后不应再 403，实际 {allowed.status_code}'
+    )
+
+
 async def test_crud_roundtrip(client, auth_headers):
     """创建 -> 列表 -> 详情 -> 更新 -> 删除 -> 404。"""
     customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})

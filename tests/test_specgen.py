@@ -239,7 +239,8 @@ def test_field_attributes_flow_through_model_api_and_amis():
     order_model = out["app/generated/models/order.py"]
     assert "ForeignKeyField('models.Customer'" in order_model and "RESTRICT" in order_model
     assert '"customer_id": self.customer_id' in order_model
-    assert "'customer_id': Customer" in out["app/generated/resources/order.py"]
+    # FK_TARGETS 现为 (模型, 目标资源) 元组——权限判定需要资源名（防 ID 枚举）
+    assert "'customer_id': (Customer, 'customer')" in out["app/generated/resources/order.py"]
 
 
 def test_permissions_and_menu_auto_registered():
