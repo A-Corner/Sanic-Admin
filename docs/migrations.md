@@ -107,8 +107,7 @@ DATABASE_URL="<生产库 DSN>" python scripts/migrations/upgrade.py
 
 - `baseline_existing_db.py` 已支持 SQLite / MySQL / PostgreSQL（`--url <dsn>`）。
   **MySQL/PG 的存量非空库已实测通过**（改造 v0.3.1 形态库 → 四步走完 → upgrade 为
-  no-op → production 启动成功且原数据保留），证据见
-  `editor-b/evidence-scratch/mig-s2-dialects.md` 的「追加」节。
+  no-op → production 启动成功且原数据保留）。
 - 方言基线的 `downgrade()` 未实测。
 - **基线化的放行行为**：结构核对只拦「缺表 / 缺列」；库里**多出来的列**与**类型差异**
   当前直接放行、不阻断。理由是存量库常有手写脚本或历史迁移留下的额外列，一律拦会
@@ -116,7 +115,6 @@ DATABASE_URL="<生产库 DSN>" python scripts/migrations/upgrade.py
   结构」与「模型 generate_schemas 的结构」，**不覆盖 MySQL/PG 的类型差异**；
   需要严格类型校验时请在该脚本支持的方言上单独跑，或走 UB26 手工门禁。
 - CI 里做 SQLite 的模型比对与「三份方言基线文件名一致性」检查；**MySQL / PG 的
-  结构与迁移验证是 UB26 上的手工门禁**（`editor-b/evidence-scratch/mig-s2-dialects.md`）。
-  该证据已包含**存量非空库**的完整实测：MySQL 8 与 PG 16 上按 §2b 四步走完后
+  结构与迁移验证在 MySQL 8 与 PostgreSQL 16 上实测**：按 §2b 四步走完后
   `upgrade` 为 no-op、production 启动成功、原种子数据保留。
 - 手写脚本在 SQLite 上补列已统一用 `INT`（与 aerich 基线一致），守门脚本不再做类型归一。

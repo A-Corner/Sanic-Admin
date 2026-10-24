@@ -482,6 +482,40 @@ def test_commit_works_without_any_user_gitconfig(tmp_path: Path) -> None:
 #: 且当 git 行为的推断规则改变时会给出信号。**不要把它当作 CI 场景的保护。**
 
 
+def test_commit_author_survives_hostile_env_vars(user_repo: Path, monkeypatch) -> None:
+    """
+    运行环境设了 ``GIT_AUTHOR_*`` / ``GIT_COMMITTER_*`` 时，author 仍必须是工具身份。
+
+    这些环境变量的**优先级高于** `git -c user.name=...`——只靠 `-c` 不足以守住。
+    本用例设置一套与之冲突的值，断言工具显式覆盖它们。
+
+    （这条是**行为断言**：如果只检查「代码里有 env 覆盖逻辑」，即使覆盖写错了
+    变量名也会通过——今晚 `prefix` 没传给 subprocess 的 bug 就是这么漏掉的。）
+    """
+    from tools.mcp_server.git_isolation import _COMMIT_IDENTITY
+
+    expected_name = _COMMIT_IDENTITY[0].split("=", 1)[1]
+    expected_email = _COMMIT_IDENTITY[1].split("=", 1)[1]
+
+    # 与工具身份冲突的环境变量（模拟「用户的 shell / CI 设了这些」）
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Hostile Human")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "human@example.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Hostile Committer")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "committer@example.com")
+
+    branch = make_branch_name("envprobe")
+    make_proposal(
+        user_repo, branch, "proposal: env override",
+        lambda d: (d / "specs" / "envprobe.yaml").write_text(
+            "name: envprobe\nfields:\n  - name: a\n", encoding="utf-8"
+        ),
+    )
+    actual = _run(user_repo, "log", "-1", "--format=%an|%ae|%cn|%ce", branch).strip()
+    assert actual == f"{expected_name}|{expected_email}|{expected_name}|{expected_email}", (
+        f"环境变量改写了 author/committer；期望全部为工具身份，实际 {actual}"
+    )
+
+
 def test_commit_author_is_tool_identity(user_repo: Path) -> None:
     """提案 commit 的 author 必须是工具身份，不是运行它的机器身份。"""
     from tools.mcp_server.git_isolation import _COMMIT_IDENTITY
