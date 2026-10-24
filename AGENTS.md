@@ -385,6 +385,10 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 会自动接收新的 `Set-Cookie`（AMIS `login.html` 即此模式，已实测能接住）。
 **自己管理 token 的客户端必须改用响应里新下发的 `Authorization`**，否则下一次请求会 401。
 
+**升级注意（breaking）**：`INITIAL_ADMIN_PASSWORD` 现在也要求强度——若不足两类字符，
+production 启动即报 `ConfigError` 并提示原因。升级到 v0.3.4 前请先确认该值足够强
+（例如 `MyDeploy#2026`），否则容器/服务会起不来。
+
 加固项（同一版本引入）：
 
 - 当前口令试错按账户维度限速，窗口内达阈值返回 **429**；

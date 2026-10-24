@@ -16,6 +16,8 @@
 import json
 import os
 
+import pytest
+
 from app.models import Account
 
 ADMIN_EMAIL = "SAdmin@Sanic.com"
@@ -582,3 +584,85 @@ async def test_change_password_current_password_rate_limited(client):
         if resp.status_code == 429:
             break
     assert 429 in codes, f"应在阈值内出现 429，实际序列 {codes}"
+
+
+# ---------------------------------------------------------------------------
+# SA-v034-L1 复审整改：context 参数 / 初始口令 / 强度一致性
+# ---------------------------------------------------------------------------
+
+async def test_initial_admin_created_with_configured_password():
+    """初始管理员能用 INITIAL_ADMIN_PASSWORD 建成（context="initial" 不做拒绝清单）。"""
+    from app.auth.authentication import create_initial_admin_account
+    from app.config import BaseConfig
+    from app.models import Account
+
+    await Account.all().delete()
+    await create_initial_admin_account()
+    admin = await Account.filter(email=BaseConfig.INITIAL_ADMIN_EMAIL).first()
+    assert admin is not None, "初始管理员应已创建"
+    assert admin.verify_password(BaseConfig.INITIAL_ADMIN_PASSWORD), (
+        "初始管理员口令应等于配置值")
+
+
+async def test_change_password_rejects_initial_admin_password(client):
+    """改密为 INITIAL_ADMIN_PASSWORD 或 SAdmin@123 必须被拒。"""
+    from app.config import BaseConfig
+    from app.models import Account
+
+    for banned in (BaseConfig.INITIAL_ADMIN_PASSWORD, "SAdmin@123"):
+        await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+        await _login(client)
+        resp = await client.post(
+            "/auth/change-password", headers=_csrf_header(client),
+            json={"current_password": ADMIN_PASSWORD, "new_password": banned,
+                  "confirm_password": banned})
+        assert resp.status_code == 400, f"{banned!r} 应被拒绝，实际 {resp.status_code}"
+
+
+def test_set_password_default_context_is_strict():
+    """不带 context 调用 set_password 时默认走严格校验（正向对照）。"""
+    from app.models.account import Account
+
+    account = Account(email="probe@example.com", username="probe")
+    # 默认 context="change" → 拒绝清单生效
+    with pytest.raises(Exception):
+        account.set_password("SAdmin@123")
+    # 显式 initial 才跳过拒绝清单
+    account.set_password("SAdmin@123", context="initial")
+    assert account.verify_password("SAdmin@123")
+
+
+def test_context_initial_used_only_by_initial_admin_creation():
+    """用 AST 断言：全仓 ``context="initial"`` 只出现在 create_initial_admin_account。
+
+    这是防止「初始口令豁免」被误用到其它入口的守卫——一旦有人复制这行到别处，
+    本测试失败。
+    """
+    import ast
+    from pathlib import Path
+
+    app_dir = Path(__file__).resolve().parent.parent / "app"
+    occurrences = []
+    for py in app_dir.rglob("*.py"):
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            is_set_pw = (
+                isinstance(func, ast.Attribute) and func.attr == "set_password"
+            )
+            if not is_set_pw:
+                continue
+            for kw in node.keywords:
+                if kw.arg == "context" and isinstance(kw.value, ast.Constant) \
+                        and kw.value.value == "initial":
+                    # 记录所在函数名
+                    occurrences.append(str(py.relative_to(app_dir)))
+
+    assert len(occurrences) == 1, (
+        f'context="initial" 应只出现 1 处（create_initial_admin_account），'
+        f"实际 {len(occurrences)} 处: {occurrences}")

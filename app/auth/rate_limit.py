@@ -120,7 +120,9 @@ class LoginRateLimiter:
         """两个独立计数键：账户维度（不掺 IP）恒在；IP 维度仅有来源时存在。"""
         keys = []
         if identity:
-            keys.append(f"{ACCOUNT_KEY_PREFIX}:{identity}")
+            # 账户键统一小写：邮箱大小写不敏感，登录与改密必须累计到同一个计数，
+            # 否则 Admin@x 与 admin@x 会被当成两个账户分别计数，限流形同虚设。
+            keys.append(f"{ACCOUNT_KEY_PREFIX}:{identity.strip().lower()}")
         keys.append(f"{IP_KEY_PREFIX}:{self._client_ip(request)}")
         return keys
 
@@ -164,3 +166,12 @@ class LoginRateLimiter:
         """登录成功后清零两个维度的失败计数。"""
         for key in self._keys(identity, request):
             self.cache.delete(key)
+
+    async def clear_account_only(self, identity: str) -> None:
+        """只清账户维度的计数，保留共享的 IP 计数。
+
+        用于「口令正确但并非登录」的场景（如改密成功）：IP 键是同一出口下多个
+        账户共享的，按它清零会让一个账户的正常操作替别人解封。
+        """
+        if identity:
+            self.cache.delete(f"{ACCOUNT_KEY_PREFIX}:{identity.strip().lower()}")
