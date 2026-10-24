@@ -69,6 +69,36 @@
             "schemaApi": "get:pages/setting-list.json?v1"
           }
         ]
+      },
+      {
+        "label": "客户管理",
+        "url": "/customer",
+        "redirect": "/customer/list",
+        "icon": "fa fa-user-tie",
+        "children": [
+          {
+            "label": "客户列表",
+            "url": "/customer/list",
+            "icon": "fa fa-list",
+            "schemaApi": "get:pages/customer-list.json?v=407c8d7c99dc"
+          }
+        ],
+        "x-specgen": "customer"
+      },
+      {
+        "label": "订单管理",
+        "url": "/order",
+        "redirect": "/order/list",
+        "icon": "fa fa-receipt",
+        "children": [
+          {
+            "label": "订单列表",
+            "url": "/order/list",
+            "icon": "fa fa-list",
+            "schemaApi": "get:pages/order-list.json?v=f4b6ab414cd1"
+          }
+        ],
+        "x-specgen": "order"
       }
     ]
   }

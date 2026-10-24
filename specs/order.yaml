@@ -1,0 +1,40 @@
+# 订单：belongs_to customer 的示例规格。
+resource: order
+table: orders
+plural: orders
+label: 订单
+description: 客户订单
+fields:
+  - name: title
+    type: string
+    max_length: 128
+    required: true
+    label: 标题
+    list: true
+    searchable: true
+  - name: amount
+    type: float
+    required: true
+    label: 金额
+    list: true
+  - name: quantity
+    type: int
+    default: 1
+    label: 数量
+    list: true
+  - name: status
+    type: string
+    max_length: 16
+    default: pending
+    choices: [pending, paid, cancelled]
+    label: 状态
+    list: true
+belongs_to:
+  - name: customer
+    target: customer
+    required: true
+    label: 客户
+    list: true
+menu:
+  icon: fa-receipt
+  order: 70

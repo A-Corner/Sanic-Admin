@@ -1,0 +1,49 @@
+# 客户：带 choices 与 default 的示例规格。规格是唯一事实源，只改本文件，然后运行
+#   python -m tools.specgen generate
+resource: customer
+table: customer
+label: 客户
+description: 客户档案
+fields:
+  - name: name
+    type: string
+    max_length: 128
+    required: true
+    label: 名称
+    list: true
+    searchable: true
+  - name: email
+    type: string
+    format: email
+    max_length: 255
+    required: true
+    unique: true
+    label: 邮箱
+    list: true
+  - name: status
+    type: string
+    max_length: 16
+    default: active
+    choices: [active, inactive, archived]
+    label: 状态
+    list: true
+  - name: notes
+    type: text
+    label: 备注
+  # (b) date / datetime 全链路示例
+  - name: birthday
+    type: date
+    label: 生日
+    list: true
+  - name: onboarded_at
+    type: datetime
+    label: 建档时间
+# (c) 列表排序白名单（未列入的字段传 ?ordering= 一律 400）
+sorting:
+  default: -id
+  allowed: [id, name, status, birthday]
+# (d) 软删除：DELETE 只置标记，列表/详情默认过滤已删除
+soft_delete: true
+menu:
+  icon: fa-user-tie
+  order: 60

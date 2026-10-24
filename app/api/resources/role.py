@@ -131,6 +131,19 @@ async def _assignable(actor: Account, role: Role) -> Optional[str]:
 # 就能被仅持 ``account:update`` 的非管理员账户撤销 admin 角色 / 改邮箱，
 # 形成提权路径。
 
+def _core_resources() -> list:
+    """
+    判定「全权限角色」时参与比较的资源：注册表去掉 specgen 生成的资源。
+
+    生成资源是后来新增的权限点，存量角色不可能覆盖它们；若把它们计入，
+    新增一份规格就会让现有「全权限」角色（含内置 admin 之外的自建全权限角色）
+    集体失去受保护管理员身份，形成提权路径。
+    """
+    from app.generated.permissions import GENERATED_PERMISSIONS
+
+    return [r for r in all_resources() if r not in GENERATED_PERMISSIONS]
+
+
 def _role_grants_all_permissions(role: Role) -> bool:
     """
     该角色是否授予了注册表里的**全部**权限。
@@ -142,7 +155,7 @@ def _role_grants_all_permissions(role: Role) -> bool:
     if not isinstance(permissions, dict):
         return False
 
-    for resource in all_resources():
+    for resource in _core_resources():
         actions = permissions.get(resource)
         if actions is None:
             return False

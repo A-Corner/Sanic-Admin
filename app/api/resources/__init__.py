@@ -32,6 +32,9 @@ from app.api.resources.dashboard_performance import (
     PerformanceResource, ExceptionsResource, AlertsResource
 )
 
+# specgen 生成的资源（specs/*.yaml -> app/generated/resources）；导入即注册路由与权限点
+from app.generated.resources import GENERATED_RESOURCE_CLASSES
+
 # 资源列表 - 用于配置文档
 all_resources = [
     AccountResource,
@@ -63,6 +66,7 @@ all_resources = [
     ExceptionsResource,
     AlertsResource
 ]
+all_resources += GENERATED_RESOURCE_CLASSES
 
 __all__ = [
     'all_resources',

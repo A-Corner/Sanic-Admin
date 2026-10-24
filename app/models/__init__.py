@@ -28,6 +28,10 @@ from app.models.system_setting import SystemSetting
 from app.models.operation_log import OperationLog
 from app.models.uploaded_file import UploadedFile
 
+# specgen 生成的模型（specs/*.yaml -> app/generated/models）；自动注册，勿手工追加
+from app.generated.models import *  # noqa: F401,F403,E402
+from app.generated.models import __all__ as _generated_model_names  # noqa: E402
+
 
 # 导出所有模型类，方便其他模块导入
 __all__ = [
@@ -46,6 +50,7 @@ __all__ = [
     'UploadedFile',
     'init_db',
 ]
+__all__ += list(_generated_model_names)
 
 
 def _redact_db_url(db_url: str) -> str:

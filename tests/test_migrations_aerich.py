@@ -31,12 +31,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = REPO / "migrations" / "models"
 MIGRATIONS_ROOT = REPO / "migrations"
 BASELINE_SCRIPT = REPO / "scripts" / "migrations" / "baseline_existing_db.py"
 HANDWRITTEN_SCRIPT = REPO / "scripts" / "migrate_v0_3_2_must_change_password.py"
 CHECK_SCRIPT = REPO / "scripts" / "check_migrations.py"
+SELECT_SCRIPT = REPO / "scripts" / "migrations" / "select_dialect_baseline.py"
 PYTHON = sys.executable
 TEST_ADMIN_PASSWORD = "Mig-Test-Initial-Pass-1"
 
@@ -175,16 +178,30 @@ def test_fresh_db_flow(tmp_path):
 
 
 def test_existing_db_baseline_then_noop_upgrade(tmp_path):
+    """
+    存量库（表已存在、没有账本）基线化后，upgrade 不应破坏结构。
+
+    本轮起迁移链不只一条基线（还有 specgen 增量），所以 upgrade **会**记录增量。
+    但存量库的表是用**当前模型**建的，已经含 customer/orders，增量的
+    ``CREATE TABLE IF NOT EXISTS`` 是空操作——断言点因此从「一条都不跑」改为
+    「跑完结构与基线化时一致」。语义上仍然守住「不破坏存量库」这个目的。
+    """
     db = tmp_path / "existing.sqlite3"
     _run_ok(["-c", GENERATE_CODE, str(db)], db)
     conn = sqlite3.connect(str(db))
     pre = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert "account" in pre and "aerich" not in pre, f"前置不符: {pre}"
+    pre_schema = check_migrations.dump_sqlite_schema(db)
 
     _run_ok([str(BASELINE_SCRIPT), str(db), str(MIGRATIONS_DIR)], db)
     out = _run_ok(["-c", UPGRADE_CODE, str(db), str(MIGRATIONS_ROOT)], db).stdout
-    assert _migrated(out) == [], f"存量库 upgrade 应为 no-op，实际: {out}"
+    # 基线之外只允许出现增量迁移；若冒出别的版本号，说明迁移链被改动过
+    extra = [m for m in _migrated(out) if not m.startswith("1_")]
+    assert extra == [], f"upgrade 应只应用 specgen 增量，实际: {out}"
+
+    post_schema = check_migrations.dump_sqlite_schema(db)
+    assert post_schema == pre_schema, "存量库 upgrade 改变了表结构"
 
 
 def test_baseline_script_is_idempotent(tmp_path):
@@ -275,9 +292,10 @@ def test_c_v031_db_handwritten_then_baseline_then_upgrade(tmp_path):
     # 2) 基线化
     _run_ok([str(BASELINE_SCRIPT), str(db), str(MIGRATIONS_DIR)], db)
 
-    # 3) upgrade：no-op，不报错
+    # 3) upgrade：基线化之后只剩 specgen 增量待应用（存量库表已含它创建的表，
+    #    IF NOT EXISTS 使其为空操作）；不应报错，也不应冒出其它版本
     out = _run_ok(["-c", UPGRADE_CODE, str(db), str(MIGRATIONS_ROOT)], db).stdout
-    assert _migrated(out) == []
+    assert [m for m in _migrated(out) if not m.startswith("1_")] == [], out
 
     # 4) 表结构与模型一致
     assert check_migrations.diff_schemas(check_migrations.dump_sqlite_schema(db), _expected_schema(tmp_path)) == []
@@ -486,3 +504,158 @@ def test_dialect_mismatch_is_rejected(tmp_path):
         f"stdout={result.stdout[-300:]}\nstderr={result.stderr[-300:]}"
     )
     assert "select_dialect_baseline" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# 切方言必须连增量迁移一起装（只换基线会在 MySQL/PG 上执行 SQLite 语法）
+# ---------------------------------------------------------------------------
+
+
+def _load_select_module():
+    spec = importlib.util.spec_from_file_location(
+        "select_dialect_baseline", SELECT_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_select_dialect_installs_increments_too(tmp_path):
+    """
+    切方言后，`migrations/models/` 里的增量迁移必须与目标方言那份逐字节相同。
+
+    只换基线是不够的：增量里的类型也分方言（MySQL `DATETIME(6)` vs
+    PG `TIMESTAMPTZ`），沿用旧方言的增量会在 upgrade 时执行错误语法。
+    """
+    mod = _load_select_module()
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+
+    # 先把 sqlite 那份装进去（模拟当前是 sqlite 部署）
+    for src in sorted((REPO / "migrations" / "dialects" / "sqlite").glob("*.py")):
+        shutil.copyfile(src, models_dir / src.name)
+
+    # 切到 mysql
+    mod.install("mysql", models_dir)
+
+    mysql_dir = REPO / "migrations" / "dialects" / "mysql"
+    for src in sorted(mysql_dir.glob("*.py")):
+        target = models_dir / src.name
+        assert target.is_file(), f"切到 mysql 后缺少 {src.name}"
+        assert target.read_bytes() == src.read_bytes(), (
+            f"{src.name} 装进去的不是 mysql 版本"
+        )
+
+    # 正向对照：mysql 与 sqlite 的增量内容必须真的不同，否则上面的断言是空转
+    sqlite_dir = REPO / "migrations" / "dialects" / "sqlite"
+    inc = [p.name for p in mysql_dir.glob("*.py") if not p.name.startswith("0_")]
+    assert inc, "没有增量迁移可供对照，测试前提不成立"
+    differ = [
+        n for n in inc
+        if (mysql_dir / n).read_bytes() != (sqlite_dir / n).read_bytes()
+    ]
+    assert differ, "mysql 与 sqlite 的增量内容完全相同，本用例无法证明方言区分生效"
+
+
+def test_verify_rejects_wrong_dialect_increment(tmp_path):
+    """
+    增量装错方言必须被方言校验拦住（原来只比基线，增量错了会漏过）。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "baseline_existing_db", BASELINE_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    # 基线装对（mysql），增量故意装成 sqlite 的
+    shutil.copyfile(REPO / "migrations" / "dialects" / "mysql" / mod.BASELINE_FILENAME,
+                    models_dir / mod.BASELINE_FILENAME)
+    sqlite_incs = [
+        p for p in (REPO / "migrations" / "dialects" / "sqlite").glob("*.py")
+        if not p.name.startswith("0_")
+    ]
+    assert sqlite_incs, "没有 sqlite 增量可供对照"
+    for src in sqlite_incs:
+        shutil.copyfile(src, models_dir / src.name)
+
+    err = mod.verify_installed_baseline_matches_dialect(
+        "mysql://u:p@127.0.0.1:3306/db", models_dir)
+    assert err is not None, "增量装成 sqlite 版时，方言校验必须报错"
+    assert "select_dialect_baseline" in err
+
+    # 正向对照：换成正确的 mysql 增量后必须通过
+    for src in (REPO / "migrations" / "dialects" / "mysql").glob("*.py"):
+        shutil.copyfile(src, models_dir / src.name)
+    assert mod.verify_installed_baseline_matches_dialect(
+        "mysql://u:p@127.0.0.1:3306/db", models_dir) is None
+
+
+def test_select_dialect_rejects_incomplete_dialect_set(tmp_path):
+    """三方言增量不成套时（某方言少一条）必须报错，而不是静默装半套。"""
+    mod = _load_select_module()
+    fake = tmp_path / "dialects"
+    for d in ("sqlite", "mysql", "postgres"):
+        (fake / d).mkdir(parents=True)
+        # 每家都放基线
+        shutil.copyfile(REPO / "migrations" / "dialects" / d / mod.BASELINE_FILENAME,
+                        fake / d / mod.BASELINE_FILENAME)
+    # sqlite 多一条增量，其它两家没有
+    (fake / "sqlite" / "1_x_specgen.py").write_text("# only sqlite\n")
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    orig = mod.DIALECTS_DIR
+    mod.DIALECTS_DIR = fake
+    try:
+        with pytest.raises(SystemExit) as exc:
+            mod.install("sqlite", models_dir)
+        assert "不成套" in str(exc.value)
+    finally:
+        mod.DIALECTS_DIR = orig
+
+
+# ---------------------------------------------------------------------------
+# 迁移 DDL 的引号转义：只有真连 MySQL 才会暴露，必须静态守住
+# ---------------------------------------------------------------------------
+
+
+def test_mysql_baseline_comment_quotes_are_escaped():
+    """
+    MySQL 基线里注释文本内含单引号时，Python 源码必须写 `\\\\'`（两个字符）。
+
+    写 `\\'` 会被 Python 三引号字符串还原成裸 `'`，实际发出的 SQL 就变成
+    `COMMENT '令牌类型，如 'activation', ...'`——MySQL 报 1064。
+    这个缺陷本地 sqlite 测试与 check_migrations 都发现不了（它们不执行 MySQL
+    DDL），只能靠真实 MySQL 实跑或本用例。
+
+    守的是「实际发出的 SQL 里，注释字符串内部没有未转义的裸引号」。
+    """
+    import asyncio
+    import importlib.util
+
+    path = REPO / "migrations" / "dialects" / "mysql" / "0_20261024125437_init.py"
+    assert path.is_file(), f"MySQL 基线不存在: {path}"
+    spec = importlib.util.spec_from_file_location("mysql_baseline", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sql = asyncio.run(mod.upgrade(None))
+
+    # 逐行找 COMMENT '...'，检查其中的单引号是否都已用反斜杠转义
+    import re
+
+    problems = []
+    for lineno, line in enumerate(sql.splitlines(), 1):
+        m = re.search(r"COMMENT\s+'(.*)',?\s*$", line.strip())
+        if not m:
+            continue
+        body = m.group(1)
+        # 去掉已转义的 \' 后，仍出现的 ' 就是裸引号
+        unescaped = body.replace("\\'", "")
+        if "'" in unescaped:
+            problems.append(f"第 {lineno} 行注释里有未转义的引号：{line.strip()[:100]}")
+    assert not problems, "MySQL DDL 注释中的单引号未正确转义：\n" + "\n".join(problems)
+
+    # 正向对照：确认令牌类型那条注释确实含引号，否则上面的循环是空转
+    assert "token_type" in sql, "基线里找不到 token_type 列，用例前提不成立"
+    token_line = next(ln for ln in sql.splitlines() if "token_type" in ln)
+    assert "activation" in token_line, "token_type 注释内容与预期不符"

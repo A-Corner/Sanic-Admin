@@ -191,3 +191,27 @@ async def test_admin_can_write(client, auth_headers):
     assert updated.status_code == 200, (
         f"管理员更新设置返回 {updated.status_code}，应为 200：{updated.text}"
     )
+
+
+def test_specgen_resources_are_in_route_table(protected_api_routes):
+    """
+    specgen 生成的资源必须出现在受保护路由表里（于是上面的全路由 401/伪造 token 检查自动覆盖它们）。
+
+    期望路径由 ``specs/*.yaml`` 推出，规格新增资源时本用例自动跟着变。
+    """
+    from pathlib import Path
+
+    from tools.specgen.schema import load_specs
+
+    specs = load_specs(Path(__file__).resolve().parent.parent / "specs")
+    assert specs, "specs/ 下应至少有一份规格"
+    routes = set(protected_api_routes)
+    for spec in specs.values():
+        for method, path in (
+            ("GET", f"/api/v1/{spec.plural}"),
+            ("POST", f"/api/v1/{spec.plural}"),
+            ("GET", f"/api/v1/{spec.plural}/1"),
+            ("PUT", f"/api/v1/{spec.plural}/1"),
+            ("DELETE", f"/api/v1/{spec.plural}/1"),
+        ):
+            assert (method, path) in routes, f"路由表缺少 {method} {path}"

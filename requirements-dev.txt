@@ -10,3 +10,6 @@ ruff>=0.5
 httpx>=0.24
 # 端到端冒烟脚本（对真实 HTTP 端口发请求）用
 requests>=2.31
+
+# specgen（规格即代码生成器）读取规格 YAML
+pyyaml>=6,<7

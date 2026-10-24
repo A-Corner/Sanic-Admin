@@ -100,32 +100,53 @@ def _dialect_of(db_url: str) -> str:
 
 def verify_installed_baseline_matches_dialect(db_url: str,
                                               models_dir: Path) -> Optional[str]:
-    """核对 migrations/models/ 里装的基线是否就是目标方言的那份（md5 比对）。
+    """核对 migrations/models/ 里装的**全部**迁移是否都是目标方言那份（md5 比对）。
 
     装错方言的后果：SQLite 基线在 MySQL/PG 上执行会直接报语法错误；反过来虽能跑，
     但 DDL 类型不匹配（例如 PG 的 SERIAL vs SQLite 的 AUTOINCREMENT）。在写账本之前
     拦住，比事后排查便宜得多。
+
+    范围包含**增量迁移**（``1_*``、``2_*`` …），不只基线——只比基线的话，切方言后
+    沿用旧方言的增量会被放行，upgrade 在 MySQL 上执行 SQLite 语法。
     """
     import hashlib
 
     dialect = _dialect_of(db_url)
-    src = DIALECTS_DIR / dialect / BASELINE_FILENAME
+    src_dir = DIALECTS_DIR / dialect
+    src = src_dir / BASELINE_FILENAME
     installed = models_dir / BASELINE_FILENAME
     if not src.is_file():
         return f"方言基线不存在: {src}"
     if not installed.is_file():
         return (f"migrations/models/ 下找不到基线 {BASELINE_FILENAME}；"
                 f"请先执行 select_dialect_baseline.py {dialect}")
-    src_md5 = hashlib.md5(src.read_bytes()).hexdigest()
-    ins_md5 = hashlib.md5(installed.read_bytes()).hexdigest()
-    if src_md5 != ins_md5:
+
+    def _md5(p: Path) -> str:
+        return hashlib.md5(p.read_bytes()).hexdigest()
+
+    if _md5(src) != _md5(installed):
         other = [d.name for d in DIALECTS_DIR.iterdir() if d.is_dir()]
         return (
             f"当前安装的基线不是 {dialect} 方言（md5 不匹配: "
-            f"installed={ins_md5[:8]} expected={src_md5[:8]}）；"
+            f"installed={_md5(installed)[:8]} expected={_md5(src)[:8]}）；"
             f"请先执行 `python scripts/migrations/select_dialect_baseline.py {dialect}`"
             f"（可用方言: {', '.join(sorted(other))}）"
         )
+
+    # 增量迁移同样要逐文件核对
+    expected = {
+        f.name: _md5(f) for f in src_dir.glob("*.py") if not f.name.startswith("__")
+    }
+    for name, want in sorted(expected.items()):
+        target = models_dir / name
+        if not target.is_file():
+            return (f"migrations/models/ 缺少 {dialect} 方言的迁移 {name}；"
+                    f"请先执行 select_dialect_baseline.py {dialect}")
+        if _md5(target) != want:
+            return (
+                f"迁移 {name} 不是 {dialect} 方言版本（md5 不匹配）；"
+                f"请先执行 `python scripts/migrations/select_dialect_baseline.py {dialect}`"
+            )
     return None
 
 
