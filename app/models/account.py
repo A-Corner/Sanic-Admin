@@ -83,13 +83,57 @@ class Account(BaseModel):
             "is_admin": self.is_admin,
         }
 
-    def set_password(self, raw_password: str) -> None:
+    def set_password(self, raw_password: str, *, context: str = "change") -> None:
         """
-        设置口令（仅修改内存中的字段，调用方负责 save）
+        设置口令（仅修改内存中的字段，调用方负责 save）。
+
+        **这里是唯一的口令写入点**：强度与拒绝清单的校验收敛在此处，
+        所有能设置口令的路径（注册、管理员建账户/改他人口令、重置口令、
+        自助改密）都经过它，避免校验只覆盖其中一条。
 
         Args:
             raw_password (str): 明文口令
+
+        Args:
+            raw_password: 明文口令
+            context: ``"change"``（默认，严格校验）或 ``"initial"``。
+                ``"initial"`` **只给** ``create_initial_admin_account`` 用：跳过
+                拒绝清单，但长度与字符类别照常校验。理由：初始管理员本来就要
+                使用配置里的 ``INITIAL_ADMIN_PASSWORD``，而该值在拒绝清单里
+                （拒绝清单是为了防止**用户**把口令改成部署默认值）。
+                默认值是 ``"change"``——漏传参数时走严格路径，属 fail-safe。
+
+        Raises:
+            ValidationError: 口令为空、强度不足，或（``context="change"`` 时）
+                命中拒绝清单/等于本人邮箱。
         """
+        from app.services.exceptions import ValidationError
+
+        if not raw_password:
+            raise ValidationError("口令不能为空")
+
+        from app.auth.authentication import (
+            MAX_PASSWORD_LENGTH,
+            MIN_PASSWORD_LENGTH,
+            validate_not_banlisted,
+            validate_password_strength,
+        )
+
+        if len(raw_password) < MIN_PASSWORD_LENGTH:
+            raise ValidationError(f"口令至少需要 {MIN_PASSWORD_LENGTH} 位")
+        if len(raw_password) > MAX_PASSWORD_LENGTH:
+            raise ValidationError(f"口令不能超过 {MAX_PASSWORD_LENGTH} 位")
+
+        strength_error = validate_password_strength(raw_password)
+        if strength_error:
+            raise ValidationError(strength_error)
+        if context not in ("initial", "change"):
+            raise ValidationError(f"未知的口令设置场景: {context!r}")
+        if context == "change":
+            banned_error = validate_not_banlisted(raw_password, self)
+            if banned_error:
+                raise ValidationError(banned_error)
+
         self.password = password_hasher.hash(raw_password)
 
     def verify_password(self, raw_password: str) -> bool:

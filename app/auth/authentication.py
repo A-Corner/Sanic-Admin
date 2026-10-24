@@ -74,8 +74,21 @@ def validate_password_strength(password: str) -> Optional[str]:
 
 
 def _banned_password_list() -> list:
-    """当前生效的弱口令拒绝清单（环境变量 + 硬编码常量）。"""
+    """当前生效的弱口令拒绝清单（当前环境配置的初始口令 + 硬编码常量）。
+
+    必须读 ``BaseConfig.INITIAL_ADMIN_PASSWORD`` 而不是只读 ``os.environ``：
+    dev/testing 下该值由 ``app/config.py`` 在启动时生成（只进配置、不写回环境
+    变量），只查环境变量会漏掉它，等于允许把口令改成系统自己刚生成的初始值。
+    """
     banned = list(BANNED_PASSWORDS)
+    try:
+        from app.config import BaseConfig
+
+        configured = getattr(BaseConfig, "INITIAL_ADMIN_PASSWORD", None)
+        if configured:
+            banned.append(configured)
+    except Exception:  # 配置不可用时退化为只用硬编码清单
+        pass
     env_password = os.environ.get("INITIAL_ADMIN_PASSWORD")
     if env_password:
         banned.append(env_password)
@@ -93,10 +106,13 @@ def validate_not_banlisted(password: str, account=None) -> Optional[str]:
         if hmac.compare_digest(digest, hashlib.sha256(banned.encode("utf-8")).digest()):
             return "新口令不能使用系统已知的弱口令"
     email = getattr(account, "email", None) if account is not None else None
-    if email and hmac.compare_digest(
-        digest, hashlib.sha256(str(email).encode("utf-8")).digest()
-    ):
-        return "新口令不能与邮箱相同"
+    if email:
+        # 不区分大小写：口令里的邮箱若只是大小写不同，同样视为相同。
+        lowered = hashlib.sha256(str(email).lower().encode("utf-8")).digest()
+        if hmac.compare_digest(
+            hashlib.sha256(password.lower().encode("utf-8")).digest(), lowered
+        ):
+            return "新口令不能与邮箱相同"
     return None
 
 MAX_PASSWORD_LENGTH = 128
@@ -206,7 +222,9 @@ async def create_initial_admin_account(app=None):
         # 环境变量注入的口令只是交付通道，首次登录强制改为只有持有者知道的口令
         must_change_password=True,
     )
-    admin.set_password(BaseConfig.INITIAL_ADMIN_PASSWORD)
+    # 初始管理员：context="initial" 跳过拒绝清单（这条路径本来就要用配置里的
+    # 初始口令），但长度与字符类别仍校验。
+    admin.set_password(BaseConfig.INITIAL_ADMIN_PASSWORD, context="initial")
     await admin.save()
 
     admin_role = await Role.get_or_none(name="admin")

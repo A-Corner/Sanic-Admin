@@ -5,7 +5,26 @@
 
 ## [Unreleased]
 
-<!-- 下一版变更写在这里。 -->
+### Changed
+
+- **改密成功后不再保留当前会话。** `POST /auth/change-password` 过去只作废其它
+  会话、保留发起改密的那个；现在**一并作废**，并轮换签发新会话（响应新增
+  `token_rotated: true`，通过 `Set-Cookie` 与 `Authorization` 头下发）。
+  浏览器 cookie 客户端无需改动；**自己管理 token 的客户端必须改用响应里新下发的
+  `Authorization`**，否则下一次请求 401。
+
+### Security
+
+- **认证路径开始写入操作日志。** 登录成功/失败、登出、改密（成功/失败/2FA 未完成）、
+  2FA 成功/失败均记入 `OperationLog`（`operation_type="auth"`）。此前
+  `OperationLog` 的模型、只读 API 与仪表盘统计都存在，但**没有任何写入点**。
+  审计不含口令、token 与验证码。
+- **改密的当前口令试错限速**：复用登录限流器，账户维度独立计数，窗口内达阈值 429。
+- **新口令强度**：除长度外要求至少两类字符，且不得为 `SAdmin@123`、当前
+  `INITIAL_ADMIN_PASSWORD` 的值，或与本人邮箱相同（比较不区分大小写）。
+  校验收敛到 `Account.set_password`，所有口令入口统一经过它。
+- **初始口令也要求强度**（**breaking**）：`INITIAL_ADMIN_PASSWORD` 若少于两类字符，
+  production 启动即报 `ConfigError`。升级时请确认该值足够强。
 
 ## [0.3.3] — 2026-10-24
 

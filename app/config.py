@@ -414,6 +414,25 @@ def _generate_admin_password(env: str) -> str:
 
 MIN_ADMIN_PASSWORD_LENGTH = 8
 
+#: 初始口令至少需要的字符类别数（与 app/auth/authentication.MIN_PASSWORD_CLASSES 一致；
+#: 这里重复定义是为了避免 config 反向依赖 auth 模块造成循环导入）
+MIN_ADMIN_PASSWORD_CLASSES = 2
+
+
+def _password_class_count(password: str) -> int:
+    """口令包含的字符类别数（大写 / 小写 / 数字 / 其它符号）。"""
+    classes = 0
+    if any(ch.isupper() for ch in password):
+        classes += 1
+    if any(ch.islower() for ch in password):
+        classes += 1
+    if any(ch.isdigit() for ch in password):
+        classes += 1
+    if any(not ch.isalnum() for ch in password):
+        classes += 1
+    return classes
+
+
 
 def _initial_admin_password(env: str) -> str:
     """
@@ -421,8 +440,20 @@ def _initial_admin_password(env: str) -> str:
     缺失时 production 报错、development/testing 生成临时值。
     """
     explicit = os.getenv("INITIAL_ADMIN_PASSWORD")
-    if explicit and len(explicit) < MIN_ADMIN_PASSWORD_LENGTH:
-        raise ConfigError(f"INITIAL_ADMIN_PASSWORD 至少需要 {MIN_ADMIN_PASSWORD_LENGTH} 位")
+    if explicit:
+        if len(explicit) < MIN_ADMIN_PASSWORD_LENGTH:
+            raise ConfigError(
+                f"INITIAL_ADMIN_PASSWORD 至少需要 {MIN_ADMIN_PASSWORD_LENGTH} 位")
+        # 强度检查：初始口令若达不到「至少两类字符」，改密策略会把它当成弱口令，
+        # 而它又是管理员登录后立刻要换掉的起点。与其让人在运行时困惑，不如在
+        # 启动时直接拒绝并说清原因（v0.3.4 起的行为，属 breaking）。
+        probe = _password_class_count(explicit)
+        if probe < MIN_ADMIN_PASSWORD_CLASSES:
+            raise ConfigError(
+                f"INITIAL_ADMIN_PASSWORD 强度不足：需要至少 {MIN_ADMIN_PASSWORD_CLASSES} "
+                "类字符（大写/小写/数字/符号）。这是 v0.3.4 起的新要求——"
+                "初始口令也是口令，必须与改密策略一致。"
+            )
     return _env_secret(
         "INITIAL_ADMIN_PASSWORD", env,
         lambda: _generate_admin_password(env), "初始管理员口令",

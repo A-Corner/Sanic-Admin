@@ -24,7 +24,7 @@ from app.auth.verification import (
     request_captcha,
 )
 from app.middleware.security_middleware import issue_csrf_token
-from app.services.exceptions import CredentialsError, ValidationError
+from app.services.exceptions import CredentialsError, RateLimitExceededError, ValidationError
 
 
 # 创建认证相关蓝图
@@ -33,6 +33,22 @@ capt_bp = Blueprint("capt", url_prefix="/capt")
 two_step_bp = Blueprint("two-step", url_prefix="/two-step")
 role_bp = Blueprint("roles", url_prefix="/roles")
 account_bp = Blueprint("account", url_prefix="/account")
+
+
+def _mask_identity(identity: str) -> str:
+    """把登录标识脱敏后写进审计：只保留域名或首尾字符。
+
+    审计需要「是谁在尝试」以便事后归因，但不能留下完整邮箱或用户名——
+    日志往往比口令库更容易被读到。
+    """
+    text = str(identity or "").strip()
+    if not text:
+        return "-"
+    if "@" in text:
+        _, _, domain = text.partition("@")
+        return f"***@{domain}"
+    return f"{text[:2]}***({len(text)})"
+
 
 
 def _delivery_code(request, code: str):
@@ -92,7 +108,15 @@ async def on_login(request):
     limiter = LoginRateLimiter.from_request(request)
     identity = limiter.submitted_identity(request)
     if identity:
-        await limiter.raise_if_blocked(identity, request)
+        try:
+            await limiter.raise_if_blocked(identity, request)
+        except RateLimitExceededError:
+            # 被限流拦下的尝试也要留痕，否则事后查不到「有人在这个窗口内被拒」
+            from app.services.audit import record_auth_event
+
+            await record_auth_event(request, "login_failure", status="failure",
+                                    detail=f"限流拦截 identity={_mask_identity(identity)}")
+            raise
 
     # 是否启用二次验证只由服务端配置决定，忽略客户端参数
     two_factor_authentication = bool(getattr(settings, "REQUIRE_TWO_FACTOR", False))
@@ -104,16 +128,18 @@ async def on_login(request):
         # 仅凭据错误计入失败次数（未验证/禁用等账户状态问题不属于口令猜测）
         if identity:
             await limiter.record_failure(identity, request)
-        await record_auth_event(request, "login_failure", status="failure",
-                                detail="凭据错误")
+        await record_auth_event(
+            request, "login_failure", status="failure",
+            detail=f"凭据错误 identity={_mask_identity(identity) if identity else '-'}")
         raise
     except Exception:
         # 其它登录失败（未验证/禁用/已删除等）：同样留痕后原样抛出
-        await record_auth_event(request, "login_failure", status="failure",
-                                detail="账户状态不可用")
+        await record_auth_event(
+            request, "login_failure", status="failure",
+            detail=f"账户状态不可用 identity={_mask_identity(identity) if identity else '-'}")
         raise
 
-    # 成功登录清零该维度的失败计数
+    # 成功登录清零该维度的失败计数（登录成功时两个维度都清，属正常语义）
     if identity:
         await limiter.clear(identity, request)
     await record_auth_event(request, "login_success",
@@ -223,19 +249,23 @@ async def on_change_password(request):
                                 status="failure", detail="当前口令错误")
         raise CredentialsError("当前口令错误")
 
-    await limiter.clear(identity, request)
+    # 只清该账户的计数：IP 键是同一出口下多个账户共享的，改密成功就把它清零，
+    # 会让一个账户的正常操作替别人解封。
+    await limiter.clear_account_only(identity)
 
     account.set_password(new_password)
     account.must_change_password = False
     await account.save(update_fields=["password", "must_change_password"])
 
-    # 安全惯例：改密后作废该账户的**全部**会话（含当前会话）——旧 token 立即失效。
+    # 轮换：**先创建新会话，再作废旧会话**。
+    # 顺序不能颠倒——若先作废、再建新会话，而建会话恰好失败（DB 抖动等），
+    # 用户会被登出且拿不到新凭据，等于改密把人锁在门外。
+    new_session = await AuthenticationSession.create_from_request(request, bearer=account)
+
+    # 作废该账户除新会话以外的全部会话（含发起改密的那个）——旧 token 立即失效。
     await AuthenticationSession.filter(
         bearer=account, deleted=False, disabled=False
-    ).update(deleted=True)
-
-    # 轮换：为当前客户端签发一个新会话，避免改密后立刻被登出。
-    new_session = await AuthenticationSession.create_from_request(request, bearer=account)
+    ).exclude(id=new_session.id).update(deleted=True)
     response = json("密码修改成功", {
         "must_change_password": False,
         "token_rotated": True,
