@@ -49,6 +49,50 @@ PAGES = {
     "console": "/amis/index.html",
 }
 
+
+def _api_accounts_total(page, base: str):
+    """用浏览器的同一会话调 dashboard API，取 accounts.total。
+
+    复用 page.context.request 而非另建客户端：这个会话已带登录 cookie，
+    与页面看到的数据完全同源，比对才有意义。
+    """
+    try:
+        resp = page.context.request.get(base + "/api/v1/dashboard/summary")
+        if not resp.ok:
+            return None
+        payload = resp.json()
+        return int(((payload.get("data") or {}).get("accounts") or {}).get("total"))
+    except Exception:
+        return None
+
+
+def _card_number(page, title: str, value_selector: str = ".cxd-Card-fieldValue"):
+    """读取标题为 ``title`` 的仪表盘卡片里显示的数值（int），取不到返回 None。
+
+    真实 DOM 结构（AMIS 3.4.0）：
+      .cxd-Card > .cxd-Card-heading > .cxd-Card-title
+                > .cxd-Card-body  > .cxd-Card-field > .cxd-Card-fieldValue
+    数值在 fieldValue 里的 tpl 渲染结果中，取第一段连续数字。
+    """
+    import re as _re
+
+    try:
+        cards = page.locator(".cxd-Card")
+        for i in range(cards.count()):
+            card = cards.nth(i)
+            card_title = card.locator(".cxd-Card-title").inner_text() or ""
+            if title not in card_title:
+                continue
+            value_loc = card.locator(value_selector)
+            if value_loc.count() == 0:
+                return None
+            text = value_loc.nth(0).inner_text() or ""
+            m = _re.search(r"\d+", text)
+            return int(m.group()) if m else None
+    except Exception:
+        return None
+    return None
+
 #: 页面选择器。每个值都必须能被真实 DOM 命中；不要写逗号并集兜底——
 #: 那会把「选择器写错」变成「换个选择器也能过」，验收就失去意义。
 SELECTORS = {
@@ -66,6 +110,8 @@ SELECTORS = {
     "dialog_name": 'input[name="name"]',
     "dialog_permissions": 'textarea[name="permissions"]',
     "dialog_confirm": 'button:has-text("确认")',
+    # 仪表盘卡片数值容器（AMIS 3.4.0：.cxd-Card-body > .cxd-Card-field > .cxd-Card-fieldValue）
+    "card_value": ".cxd-Card-fieldValue",
 }
 
 #: 表格空态占位行文本。amis crud 在无数据时仍在 tbody 渲染一行占位，
@@ -79,6 +125,9 @@ EXPECTED_CHECKS = 19
 BROKEN_SELECTORS = {
     "dialog": ".amis-dialog-widget-does-not-exist",
     "login_password": 'input[name="password-does-not-exist"]',
+    # 仪表盘数值：破坏 fieldValue 定位后 _card_number 取不到值（None），
+    # 数值断言必须失败——证明该断言不是恒真。
+    "card_value": ".cxd-Card-fieldValue-does-not-exist",
 }
 
 #: 「设置有数据行」断言用的探针设置值与键
@@ -388,22 +437,22 @@ def main() -> int:
             dash = page.locator("body").inner_text()
             check("仪表盘标题渲染", "仪表盘" in dash)
             check("仪表盘卡片渲染（账户总数）", "账户总数" in dash)
-            # 收紧（CPL 复核第 4 项）：原先只要「账户总数」之后 40 个字符里出现任意数字
-            # 就算通过——而仪表盘正文里到处是数字，这条断言等于恒真。
+
+            # 数值断言（SA-v034-DASH）：卡片必须显示 API 返回的真实数值。
             #
-            # 实测（AMIS 3.4.0 + Chrome）：`.cxd-Card` 只渲染了 title 与 subTitle，
-            # 卡片的 `body`（含 ${accounts.total} 模板）**没有被渲染**，因此卡片里
-            # 本来就没有数值可断言。这是 v0.3.x 既有的页面行为，不是本次改动引入的。
-            #
-            # 所以这条断言改成「结构断言」：仪表盘必须渲染出预期数量的卡片，且每张
-            # 卡片都有标题。数值绑定另由 API 层测试覆盖（dashboard 端点 200 + 信封结构）。
-            # 这样它不再恒真，也不会因为页面本身不渲染数值而长期红着。
-            card_count = page.locator(".cxd-Card").count()
-            title_count = page.locator(".cxd-Card-title").count()
+            # 更正记录：此前这里一度被改成「结构断言」，理由写作「AMIS 3.4.0 下
+            # Card 的 body 不渲染」。**那个结论是错的**——复查发现当时只用
+            # inner_html()[:600] 截取了卡片头部，没看到后面的 .cxd-Card-body；
+            # 实际 DOM 里 body 正常渲染，数值在 .cxd-Card-fieldValue 内。
+            # 现在改为真正的数值比对：从 API 取 accounts.total，与页面上
+            # 「账户总数」卡片的数值比对。
+            expected_total = _api_accounts_total(page, base)
+            shown = _card_number(page, "账户总数", selectors["card_value"])
             check(
-                "仪表盘卡片结构渲染（4 张卡片且均有标题）",
-                card_count >= 4 and title_count >= 4,
-                "cards=%d titles=%d" % (card_count, title_count),
+                "仪表盘数据绑定生效（卡片数值 == API 返回的 accounts.total）",
+                shown is not None and expected_total is not None
+                and shown == expected_total,
+                "page=%r api=%r" % (shown, expected_total),
             )
 
             # 4. 角色列表
@@ -594,6 +643,7 @@ def _report_negative(args, checks, failures, cleanup_error) -> int:
 _CHECK_FOR_CONTROL = {
     "dialog": "新增角色成功（无 VALIDATION_ERROR）",
     "login_password": "登录跳转管理台",
+    "card_value": "仪表盘数据绑定生效（卡片数值 == API 返回的 accounts.total）",
 }
 
 #: 正向对照：被破坏的选择器 -> 允许随之失败（级联）的其它断言
@@ -610,7 +660,7 @@ _CASCADE = {
         "头部/退出登录渲染",
         "仪表盘标题渲染",
         "仪表盘卡片渲染（账户总数）",
-        "仪表盘数据绑定生效（数字非空）",
+        "仪表盘数据绑定生效（卡片数值 == API 返回的 accounts.total）",
         "角色列表 crud 表格渲染",
         "角色列表有新增入口",
         "role crud 无组件未找到报错",
@@ -623,6 +673,8 @@ _CASCADE = {
         "系统设置页有真实数据行（排除空态占位）",
         "操作日志页渲染（表头含 操作/IP）",
     },
+    # 仪表盘数值取不到时，其余断言互不依赖，无级联
+    "card_value": set(),
 }
 
 
