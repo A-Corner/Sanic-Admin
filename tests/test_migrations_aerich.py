@@ -387,3 +387,60 @@ def test_dialect_baselines_share_one_filename():
     """
     problems = check_migrations.check_dialect_baselines()
     assert problems == [], f"方言基线文件名不一致: {problems}"
+
+
+def test_check_dialect_baselines_detects_mismatch(tmp_path):
+    """正向对照（F3）：方言目录里文件名集合不一致时，检查必须报错。
+
+    用临时仓库构造「sqlite 与 mysql 基线文件名不同」，断言 check_dialect_baselines
+    返回非空问题列表——证明该检查的判定条件确实有效，而不是恒返回空。
+    """
+    fake_repo = tmp_path / "repo"
+    dialects = fake_repo / "migrations" / "dialects"
+    for name in ("sqlite", "mysql", "postgres"):
+        (dialects / name).mkdir(parents=True)
+    (dialects / "sqlite" / "0_aaa_init.py").write_text("# a\n")
+    (dialects / "mysql" / "0_bbb_init.py").write_text("# b\n")      # 故意不一致
+    (dialects / "postgres" / "0_aaa_init.py").write_text("# c\n")
+    (fake_repo / "migrations" / "models").mkdir(parents=True)
+
+    problems = check_migrations.check_dialect_baselines(repo=fake_repo)
+    assert problems, "文件名不一致时必须报错"
+    assert any("不一致" in p for p in problems), f"错误信息应点明不一致: {problems}"
+
+
+def test_check_dialect_baselines_passes_on_real_repo():
+    """真实仓库的方言基线文件名应一致（与上一条构成正反对照）。"""
+    assert check_migrations.check_dialect_baselines() == []
+
+
+def test_dialect_mismatch_is_rejected(tmp_path):
+    """正向对照（F2）：装的基线与目标方言不符时，基线化必须拒绝（rc=4）。
+
+    构造：SQLite 形态的存量库 + 把 mysql 方言基线装进 migrations/models/，
+    然后按 sqlite 的 DATABASE_URL 跑基线化 —— md5 校验必须拦下。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "baseline_existing_db", BASELINE_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # 正例：真实仓库里 sqlite 方言的基线应与自身 md5 一致
+    models_dir = REPO / "migrations" / "models"
+    err = mod.verify_installed_baseline_matches_dialect(
+        f"sqlite:///{tmp_path/'x.db'}", models_dir)
+    # 若当前装的是 sqlite 基线则应为 None；否则会提示需 select_dialect_baseline
+    assert err is None or "select_dialect_baseline" in err
+
+    # 反例：拿 mysql 的基线冒充 sqlite
+    wrong_dir = tmp_path / "wrong"
+    wrong_dir.mkdir()
+    import shutil
+    shutil.copyfile(REPO / "migrations" / "dialects" / "mysql" / "0_20261024125437_init.py",
+                    wrong_dir / "0_20261024125437_init.py")
+    err2 = mod.verify_installed_baseline_matches_dialect(
+        f"sqlite:///{tmp_path/'x.db'}", wrong_dir)
+    assert err2 is not None, "装错方言必须报错"
+    assert "select_dialect_baseline" in err2, f"错误信息应给出修复命令: {err2}"

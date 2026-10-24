@@ -21,7 +21,7 @@ MySQL `1064`、PG `syntax error at or near "AUTOINCREMENT"`）。因此仓库按
 python scripts/migrations/select_dialect_baseline.py mysql    # 或 sqlite / postgres / --auto
 ```
 
-它把 `migrations/dialects/<方言>/0_init.py` 装进 `migrations/models/`（替换现有 `0_*_init.py`）。
+它把 `migrations/dialects/<方言>/0_20261024125437_init.py` 装进 `migrations/models/`（替换现有同名基线）。
 **部署前务必确认装的是目标方言的那份。**
 
 MySQL / PostgreSQL 新库：`aerich upgrade` 会在目标库上创建 `aerich` 账本表——**已在 UB26 的
@@ -99,14 +99,18 @@ DATABASE_URL="<生产库 DSN>" aerich upgrade
 
 ## 5. 已知限制
 
-- `baseline_existing_db.py` 已支持 SQLite / MySQL / PostgreSQL（`--url <dsn>`），但
-  **MySQL/PG 的存量库（非空库）基线化尚未实测**——只验证了空库基线生成与执行。
+- `baseline_existing_db.py` 已支持 SQLite / MySQL / PostgreSQL（`--url <dsn>`）。
+  **MySQL/PG 的存量非空库已实测通过**（改造 v0.3.1 形态库 → 四步走完 → upgrade 为
+  no-op → production 启动成功且原数据保留），证据见
+  `editor-b/evidence-scratch/mig-s2-dialects.md` 的「追加」节。
 - 方言基线的 `downgrade()` 未实测。
 - **基线化的放行行为**：结构核对只拦「缺表 / 缺列」；库里**多出来的列**与**类型差异**
   当前直接放行、不阻断。理由是存量库常有手写脚本或历史迁移留下的额外列，一律拦会
-  让基线化无法进行；类型差异的守卫交给 `scripts/check_migrations.py`（CI 用 SQLite 比对）。
-  需要严格类型校验时，请单独跑该脚本而不是依赖基线化。
-- CI 里只做 SQLite 的模型比对与「三份方言基线文件名一致性」检查；**MySQL / PG 的
-  结构与迁移验证是 UB26 上的手工门禁**（见 `editor-b/evidence-scratch/mig-s2-dialects.md`），
-  不进常规 CI。
-- 手写脚本在 SQLite 上补列的声明类型是 `BOOLEAN`，aerich 生成的是 `INT`，两者读写行为一致；`scripts/check_migrations.py` 对比时按同类归一。
+  让基线化无法进行。`scripts/check_migrations.py` 只比对 **SQLite** 上「迁移链建出的
+  结构」与「模型 generate_schemas 的结构」，**不覆盖 MySQL/PG 的类型差异**；
+  需要严格类型校验时请在该脚本支持的方言上单独跑，或走 UB26 手工门禁。
+- CI 里做 SQLite 的模型比对与「三份方言基线文件名一致性」检查；**MySQL / PG 的
+  结构与迁移验证是 UB26 上的手工门禁**（`editor-b/evidence-scratch/mig-s2-dialects.md`）。
+  该证据已包含**存量非空库**的完整实测：MySQL 8 与 PG 16 上按 §2b 四步走完后
+  `upgrade` 为 no-op、production 启动成功、原种子数据保留。
+- 手写脚本在 SQLite 上补列已统一用 `INT`（与 aerich 基线一致），守门脚本不再做类型归一。

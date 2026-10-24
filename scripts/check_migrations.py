@@ -75,13 +75,13 @@ def diff_schemas(migrated: dict, expected: dict) -> list:
     return problems
 
 
-def check_dialect_baselines() -> list:
+def check_dialect_baselines(repo: Path = None) -> list:
     """检查三份方言基线的迁移文件名集合是否一致（纯文件检查，CI 用）。
 
     文件名是 aerich 的版本键：若三份方言基线的文件名不一致，切方言后账本里
     记录的版本名与目录里的文件名对不上，upgrade 会把基线当成未应用而重复建表。
     """
-    repo = Path(__file__).resolve().parent.parent
+    repo = repo or Path(__file__).resolve().parent.parent
     dialects_dir = repo / "migrations" / "dialects"
     if not dialects_dir.is_dir():
         return [f"方言基线目录不存在: {dialects_dir}"]
@@ -174,6 +174,15 @@ def main(argv=None) -> int:
     if not (mig / "models").is_dir():
         print(f"!! 迁移目录不存在或无 models 子目录: {mig}", file=sys.stderr)
         return 2
+
+    # 先做纯文件检查：三份方言基线的文件名集合必须一致（F3 接入 CI）
+    dialect_problems = check_dialect_baselines()
+    if dialect_problems:
+        print("!! 方言基线文件名不一致：", file=sys.stderr)
+        for item in dialect_problems:
+            print(f"   - {item}", file=sys.stderr)
+        return 1
+
     try:
         return asyncio.run(check(mig))
     except Exception as exc:  # 跑不通必须报错，不能静默通过

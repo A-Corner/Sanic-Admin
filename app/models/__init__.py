@@ -60,7 +60,7 @@ async def _aerich_ledger_present() -> bool:
     """检查 aerich 版本账本表是否存在（不依赖 aerich 包，直接查系统表）。"""
     try:
         conn = Tortoise.get_connection("default")
-        if "sqlite" in str(getattr(conn, "filename", "") or "").lower() or hasattr(conn, "sqlite"):
+        if getattr(conn.capabilities, "dialect", "") == "sqlite":
             rows = await conn.execute_query_dict(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='aerich'"
             )

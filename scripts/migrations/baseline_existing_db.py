@@ -33,6 +33,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Optional
 
 # 脚本在 scripts/migrations/ 下：仓库根加入 sys.path 以便导入 app.models
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -80,6 +81,52 @@ def models_snapshot(db_path: str, app: str) -> str:
             await Tortoise.close_connections()
 
     return asyncio.run(_run())
+
+
+#: 三方基线统一文件名（与 aerich 账本版本键一致）
+BASELINE_FILENAME = "0_20261024125437_init.py"
+
+DIALECTS_DIR = Path(__file__).resolve().parent.parent.parent / "migrations" / "dialects"
+
+
+def _dialect_of(db_url: str) -> str:
+    scheme = (db_url or "").split("://", 1)[0].lower()
+    if scheme in ("mysql", "mariadb"):
+        return "mysql"
+    if scheme in ("postgres", "psycopg", "asyncpg"):
+        return "postgres"
+    return "sqlite"
+
+
+def verify_installed_baseline_matches_dialect(db_url: str,
+                                              models_dir: Path) -> Optional[str]:
+    """核对 migrations/models/ 里装的基线是否就是目标方言的那份（md5 比对）。
+
+    装错方言的后果：SQLite 基线在 MySQL/PG 上执行会直接报语法错误；反过来虽能跑，
+    但 DDL 类型不匹配（例如 PG 的 SERIAL vs SQLite 的 AUTOINCREMENT）。在写账本之前
+    拦住，比事后排查便宜得多。
+    """
+    import hashlib
+
+    dialect = _dialect_of(db_url)
+    src = DIALECTS_DIR / dialect / BASELINE_FILENAME
+    installed = models_dir / BASELINE_FILENAME
+    if not src.is_file():
+        return f"方言基线不存在: {src}"
+    if not installed.is_file():
+        return (f"migrations/models/ 下找不到基线 {BASELINE_FILENAME}；"
+                f"请先执行 select_dialect_baseline.py {dialect}")
+    src_md5 = hashlib.md5(src.read_bytes()).hexdigest()
+    ins_md5 = hashlib.md5(installed.read_bytes()).hexdigest()
+    if src_md5 != ins_md5:
+        other = [d.name for d in DIALECTS_DIR.iterdir() if d.is_dir()]
+        return (
+            f"当前安装的基线不是 {dialect} 方言（md5 不匹配: "
+            f"installed={ins_md5[:8]} expected={src_md5[:8]}）；"
+            f"请先执行 `python scripts/migrations/select_dialect_baseline.py {dialect}`"
+            f"（可用方言: {', '.join(sorted(other))}）"
+        )
+    return None
 
 
 def _dump_live_schema(db_url: str) -> dict:
@@ -217,6 +264,12 @@ def main(db_path: str, migrations_dir: str, app: str = "models", fresh: bool = F
         return _run_sqlite(db, db_url, baseline_file, app, fresh)
 
     # 非 SQLite：走 Tortoise（asyncpg / aiomysql），不依赖本地 sqlite3
+    if not fresh:
+        dialect_err = verify_installed_baseline_matches_dialect(
+            db_url, Path(migrations_dir))
+        if dialect_err:
+            print(f"!! {dialect_err}", file=sys.stderr)
+            return 4
     problems = [] if fresh else verify_schema_matches_models(db_url)
     if problems:
         print("!! 库结构与模型不一致，拒绝写入基线：", file=sys.stderr)
