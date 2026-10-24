@@ -73,7 +73,23 @@ def render_model(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
         '            "id": self.id,',
     ]
     for f in spec.fields:
-        L.append(f'            "{f.name}": self.{f.name},')
+        if f.type == "datetime":
+            # datetime 字段必须 isoformat。此前无条件输出 `self.<name>`，
+            # 序列化器虽然在 `isinstance(data, datetime)` 分支会格式化，
+            # 但 `.json` 属性是自己拼字典、不经过那条分支——实测 customer 的
+            # onboarded_at 就是这样漏掉的。
+            L.append(
+                f'            "{f.name}": self.{f.name}.isoformat() '
+                f'if self.{f.name} else None,'
+            )
+        elif f.type == "date":
+            # date 同理：date.isoformat() 是 YYYY-MM-DD，与 API 契约一致。
+            L.append(
+                f'            "{f.name}": self.{f.name}.isoformat() '
+                f'if self.{f.name} else None,'
+            )
+        else:
+            L.append(f'            "{f.name}": self.{f.name},')
     for b in spec.belongs_to:
         L.append(f'            "{b.column}": self.{b.column},')
     L += [

@@ -140,7 +140,9 @@ def format_datetime(dt: datetime.datetime) -> str:
     """
     if not dt:
         return ""
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    # naive 视为 UTC（与 ensure_aware 的语义一致），输出 ISO 8601 带偏移。
+    # 原先用 strftime("%Y-%m-%d %H:%M:%S")——无时区、无 T，与其他接口不一致。
+    return ensure_aware(dt).isoformat()
 
 
 def parse_datetime(dt_str: str) -> Optional[datetime.datetime]:
@@ -156,17 +158,25 @@ def parse_datetime(dt_str: str) -> Optional[datetime.datetime]:
     if not dt_str:
         return None
     
+    # 优先按 ISO 8601 解析（与 format_datetime 的输出、以及 API 契约一致）。
+    # `Z` 后缀要换成 +00:00——Python 3.10 及更早的 fromisoformat 不认 Z。
+    try:
+        return datetime.datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+
+    # 兼容旧的、非 ISO 的历史格式（存量调用方可能仍会传）
     formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
         "%Y/%m/%d %H:%M:%S",
         "%Y/%m/%d",
     ]
-    
+
     for format_str in formats:
         try:
             return datetime.datetime.strptime(dt_str, format_str)
         except ValueError:
             continue
-    
+
     return None 

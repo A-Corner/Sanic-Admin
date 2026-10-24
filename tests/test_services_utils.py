@@ -103,13 +103,24 @@ def test_get_expiration_date_is_future_utc():
 
 
 def test_format_datetime_and_parse_roundtrip():
+    """
+    `format_datetime` 输出 ISO 8601（v0.4.1 起），`parse_datetime` 能解回来。
+
+    改动前 format_datetime 输出 `"2026-10-23 07:30:05"`——**空格分隔、无时区**，
+    与 API 其他时间字段的契约（带偏移的 ISO 8601）不一致。现在统一走 isoformat：
+    naive 输入按 UTC 解释，输出带 `+00:00`。
+    """
     dt = datetime.datetime(2026, 10, 23, 7, 30, 5)
     text = format_datetime(dt)
-    assert text == "2026-10-23 07:30:05"
+    assert text == "2026-10-23T07:30:05+00:00", text
+    assert "T" in text and text.endswith("+00:00")
     parsed = parse_datetime(text)
-    assert parsed == dt
+    # 输出带时区，解析回来也是 aware；与输入的 naive 按 UTC 比对
+    assert parsed == dt.replace(tzinfo=datetime.timezone.utc)
     assert format_datetime(None) == ""
     assert parse_datetime("not-a-date") is None
+    # 兼容旧格式（存量调用方可能仍传）
+    assert parse_datetime("2026-10-23 07:30:05") == dt
 
 
 def test_json_response_helper_shapes_envelope():
