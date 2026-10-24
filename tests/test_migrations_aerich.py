@@ -54,6 +54,17 @@ def _load_check_module():
 check_migrations = _load_check_module()
 
 
+def _baseline_names() -> set:
+    """当前迁移目录里的基线文件名（``0_*``）。
+
+    判「有没有重跑基线」必须按**文件名**，不能写死版本号前缀：
+    早先用 `not m.startswith("1_")` 当「不是增量」，加第 2 条增量（M3 的
+    ticket 迁移，`2_*`）后立刻误报。这与 `scripts/check_dialect_ddl.py`
+    里修过的是同一类问题。
+    """
+    return {p.name for p in (REPO / "migrations" / "models").glob("0_*.py")}
+
+
 def _env(db_file) -> dict:
     env = dict(os.environ)
     env.update(
@@ -196,9 +207,9 @@ def test_existing_db_baseline_then_noop_upgrade(tmp_path):
 
     _run_ok([str(BASELINE_SCRIPT), str(db), str(MIGRATIONS_DIR)], db)
     out = _run_ok(["-c", UPGRADE_CODE, str(db), str(MIGRATIONS_ROOT)], db).stdout
-    # 基线之外只允许出现增量迁移；若冒出别的版本号，说明迁移链被改动过
-    extra = [m for m in _migrated(out) if not m.startswith("1_")]
-    assert extra == [], f"upgrade 应只应用 specgen 增量，实际: {out}"
+    # 基线之外只允许出现增量迁移；若冒出基线本身，说明账本没写对
+    extra = [m for m in _migrated(out) if m in _baseline_names()]
+    assert extra == [], f"upgrade 不该重跑基线，实际: {out}"
 
     post_schema = check_migrations.dump_sqlite_schema(db)
     assert post_schema == pre_schema, "存量库 upgrade 改变了表结构"
@@ -295,7 +306,7 @@ def test_c_v031_db_handwritten_then_baseline_then_upgrade(tmp_path):
     # 3) upgrade：基线化之后只剩 specgen 增量待应用（存量库表已含它创建的表，
     #    IF NOT EXISTS 使其为空操作）；不应报错，也不应冒出其它版本
     out = _run_ok(["-c", UPGRADE_CODE, str(db), str(MIGRATIONS_ROOT)], db).stdout
-    assert [m for m in _migrated(out) if not m.startswith("1_")] == [], out
+    assert [m for m in _migrated(out) if m in _baseline_names()] == [], out
 
     # 4) 表结构与模型一致
     assert check_migrations.diff_schemas(check_migrations.dump_sqlite_schema(db), _expected_schema(tmp_path)) == []

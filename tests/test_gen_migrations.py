@@ -396,16 +396,35 @@ def test_positive_control_failure_reason_is_visible(sandbox):
     测试补强：正向对照要断言**红灯的原因**，不只断言退出码非 0。
 
     只看退出码的话，「因别的原因恰好返回 1」也会让对照通过。
+
+    做法：**两边同时删掉最新增量**（dialects/ 与 models/ 保持一致，避免先触发
+    方言一致性检查），然后给规格加一个字段并 `generate` —— 模型领先于迁移链，
+    check 必须报「模型有、迁移链没有」。
     """
+    # 两边同步删最新增量，保持 dialects 与 models 一致
+    versions = sorted(
+        {p.name for d in mig.DIALECTS
+         for p in (sandbox / "migrations" / "dialects" / d).glob("*.py")
+         if not p.name.startswith("0_")},
+        key=mig._version_num)
+    assert versions, "没有增量迁移可供移除，用例前提不成立"
+    newest = versions[-1]
     for d in mig.DIALECTS:
-        files = sorted(
-            (p for p in (sandbox / "migrations" / "dialects" / d).glob("*.py")
-             if not p.name.startswith("0_")),
-            key=lambda p: mig._version_num(p.name))
-        if files:
-            files[-1].unlink()
-    for p in (sandbox / "migrations" / "models").glob("[1-9]_*.py"):
-        p.unlink()
+        f = sandbox / "migrations" / "dialects" / d / newest
+        if f.is_file():
+            f.unlink()
+    f = sandbox / "migrations" / "models" / newest
+    if f.is_file():
+        f.unlink()
+
+    # 给规格加字段 -> 模型领先迁移链
+    spec = sandbox / "specs" / "customer.yaml"
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "  - name: notes",
+            "  - name: probe_col\n    type: int\n    label: 探针\n  - name: notes"),
+        encoding="utf-8")
+    assert _run(["-m", "tools.specgen", "generate"], sandbox).returncode == 0
 
     script = sandbox / "scripts" / "check_migrations.py"
     result = _run([str(script), str(sandbox / "migrations")], sandbox)
