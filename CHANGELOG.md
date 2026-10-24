@@ -42,12 +42,16 @@ v0.3.2 的热修版本。修复控制台角色弹窗无法渲染的回归，并�
 
 ### Known issues
 
-- **控制台仪表盘卡片只显示标题，统计数值（如账户总数）不显示。** AMIS 3.4.0 下
-  `card` 组件只渲染 `header.title` 与 `header.subTitle`，承载 `${accounts.total}`
-  等模板的 `body` 没有渲染（实测：页面渲染出 4 个 `.cxd-Card`，均有标题、无数值）。
-  **接口本身正常**——`GET /api/v1/dashboard/summary` 返回 200 且数据正确，由 API
-  测试覆盖；问题在页面 JSON 把 payload 绑定进卡片 body 的写法。修复排进后续版本，
-  届时须由 E2E 断言**真实渲染出的数值**来验收。
+- **【已撤回】曾记「控制台仪表盘卡片只显示标题、不显示数值」——该结论是误判，卡片数值一直正常渲染。**
+  误判原因：当时用 `inner_html()[:600]` 查看卡片 HTML，截断点恰在 `.cxd-Card-heading`
+  之后，没看到紧随其后的 `.cxd-Card-body`，于是把「我没看到」写成了「AMIS 不渲染」。
+  复核实测（真实浏览器，AMIS 3.4.0）：`.cxd-Card` 的 body 正常渲染，数值位于
+  `.cxd-Card-fieldValue > .tpl` 内，卡片文本形如
+  `账户总数 / 已验证 / 管理员 / 1 / 活跃账户：1　管理员：1`。
+  E2E 断言已据此改为**数值断言**：从 `/api/v1/dashboard/summary` 取
+  `data.accounts.total`，与「账户总数」卡片实际渲染的数字比较；并做正向对照
+  （把页面模板变量改成 `${accounts.totalTYPO}` → 页面显示 0、API 返回 1 →
+  断言精确失败，其余 18 条照常通过），证明这条断言不是恒真。
 
 ## [0.3.2] — 2026-10-24
 
