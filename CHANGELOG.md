@@ -7,6 +7,58 @@
 
 <!-- 下一版变更写在这里。 -->
 
+## [0.4.0] — 未发布
+
+规格即代码（specs as code）主线版本。一份 YAML 描述资源，确定性生成器产出模型、
+CRUD API、权限、AMIS 页面、测试与三方言迁移；AI 通过 MCP 层驱动这条链路。
+
+**含 breaking**：production 环境**缺 aerich 账本即拒绝启动**，v0.3.x 升级必须先走
+迁移链四步（见 [docs/migrations.md](docs/migrations.md) §2b）。
+
+### Added
+
+- **规格即代码生成器**（#11）——`specs/*.yaml` → 模型 / API / 页面 / 测试，
+  `python -m tools.specgen generate`。字段类型 `string/text/int/float/bool/date/datetime`，
+  支持 `choices`、`belongs_to` 外键、`sorting` 白名单、`soft_delete`。
+- **三方言迁移链**（#10）——aerich 0.7.2，`migrations/dialects/{sqlite,mysql,postgres}`，
+  按方言选基线（`select_dialect_baseline.py`），升级入口 `upgrade.py` 带方言校验。
+- **`specgen migrate`**（#17）——为结构变化产出三方言增量迁移，**离线渲染、不需要
+  数据库驱动**。新表/新列自动生成；删列、删表、改类型、加 UNIQUE/外键、
+  NOT NULL 无 DEFAULT 一律拒绝并要求手写。
+- **MCP 只读层**（#15）——`tools/mcp_server`，五个工具（列规格、看详情、校验、预览 diff、
+  check），stdio 传输，**全程不写仓库**。含输入上限、路径穿越双重防护、统一脱敏。
+- **浏览器 E2E 扩展到 22 条断言**（#21）——新增工单模块用例，含 API 二次核验。
+- **演示文档** `docs/demo/ai-module-in-10-minutes.md`——从写规格到 CI 绿的可复现记录。
+
+### Changed
+
+- **production 缺 aerich 账本拒绝启动**（**breaking**，#10）——v0.3.x 及更早的库
+  必须先完成迁移链接入，否则启动即失败。四步流程见 `docs/migrations.md` §2b。
+- `check_migrations` 接入 CI（#11）——模型集合与迁移链建出的表集合必须相等。
+- 新增 `migrations-dialects` CI job（#14）——在真实 MySQL 8 与 PostgreSQL 16 上
+  执行 DDL，并用 `information_schema` 断言列类型、唯一约束、外键与 `ON DELETE` 规则。
+
+### Fixed
+
+- **MySQL 基线注释引号未转义**（#17）——`\'` 在 Python 三引号字符串里被还原成裸引号，
+  MySQL 报 1064，**任何 MySQL 全新部署都在基线第一步失败**，而当时 CI 全绿。
+- **`specgen migrate` 渲染依赖数据库驱动**（#17）——CI 只装 `requirements.txt`，
+  `aiomysql` 缺失导致 `migrate` 直接失败。渲染与连接已解耦。
+- **date/datetime 字段在 AMIS 表单里缺 `type`**（#21）——AMIS 报「找不到对应的渲染器」，
+  **整个新增/编辑弹窗无法提交**。`customer.birthday` 同样中招。
+- **切方言只换基线、不换增量**（#17）——增量里的类型也分方言，装错会在 MySQL 上
+  执行 SQLite 语法。
+- **鉴权加固**（#13，详见 [v0.3.4 发布说明](docs/release/v0.3.4-release-notes.md)）——
+  审计日志、改密限速、口令强度、会话轮换，两处 breaking。
+
+### Known limitations
+
+- **MCP 写入路径未实现**——只有只读层；改规格仍需人工执行 `generate` / `migrate` 并开 PR。
+- **`discard` 只按前缀判断**——软删除的唯一约束仍占位，删了再建同值会冲突。
+- **`datetime` 不带时区**——存库为带时区值，客户端提交裸时间按服务端时区解释。
+- **AMIS 仍是 3.4.0**——6.x 升级评估在 v0.4 之后。
+- **生成器只处理新增**——删列/改类型等需手写迁移。
+
 ## [0.3.4] — 2026-10-24
 
 鉴权加固版本（SA-v034-L1）。新增认证审计日志、改密限速、口令强度校验与会话轮换。
