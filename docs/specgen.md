@@ -182,16 +182,66 @@ soft_delete: true
 
 若后续确有强需求，可在 v0.4 引入 `partial_unique` 规格开关并配套迁移。
 
-## 迁移 TODO（待 aerich 合并后处理）
+## 迁移
 
-customer / order 的生成物在本轮新增了表结构变更，**接入 aerich 时必须生成对应迁移**：
+生成模型的结构变化直接落在迁移链上，不再手工 ALTER。
 
-- customer 新增 `birthday`（date）、`onboarded_at`（datetime）两列；
-- `soft_delete: true` 依赖的 `deleted` 列已由 `BaseModel` 提供（无需新增），
-  但**索引/查询计划**需按 `deleted=False` 过滤复查；
-- order 的表结构本轮未变。
+### 改规格后的固定流程
 
-PR #10（aerich 迁移链）合并后，由生成器自动产出迁移脚本，而不是手工 ALTER。
+```bash
+python -m tools.specgen generate    # 重写生成物（模型/API/页面/测试）
+python scripts/check_migrations.py  # 守门：迁移链与模型必须一致
+```
+
+改动涉及**结构**（新表、新列）时，需要新增一条迁移。迁移按方言各存一份：
+
+```
+migrations/models/                          # aerich 的工作目录（装当前部署方言）
+migrations/dialects/sqlite/0_*_init.py      # 基线
+migrations/dialects/sqlite/1_*_specgen.py   # 增量
+migrations/dialects/mysql/...
+migrations/dialects/postgres/...
+```
+
+三方言的**文件名必须一致**：aerich 以文件名作账本版本键，切方言后要在目录里找到
+同名文件，否则会被当成「没跑过」而重复建表。
+
+### 增量迁移使用 `CREATE TABLE IF NOT EXISTS`（重要限制）
+
+本轮 `customer` / `orders` 的增量用的是 `CREATE TABLE IF NOT EXISTS`（与基线一致）。
+这带来两个行为，**部署前必须知道**：
+
+1. **已有同名但结构不同的表会被静默跳过。** `IF NOT EXISTS` 只检查表名是否存在，
+   不检查列是否一致。如果某个存量库里已经有一张结构不同（缺列、多列、类型不同）
+   的 `customer`，这条增量不会报错、也不会改它，而是直接跳过，然后账本记下「已应用」。
+   之后 `check_migrations` 在**该库**上仍会报不一致，但那是事后检测——上线时不会拦住你。
+2. **对「用当前模型建的存量库」是安全的空操作。** v0.3.2 的库由
+   `generate_schemas` 用当前模型建出，已含这些表，跳过正是期望行为。
+
+**部署前自查**：在目标库上跑一次 `python scripts/check_migrations.py`
+（它会在临时库上比对，不碰真实库），确认结构与模型一致；不一致就先手工迁移，
+再应用增量。
+
+若将来需要「表已存在但缺列时也能自动补」，应改用 `ALTER TABLE ... ADD COLUMN`
+形式的增量，而不是依赖 `IF NOT EXISTS`。
+
+### 切方言部署
+
+```bash
+python scripts/migrations/select_dialect_baseline.py mysql   # 装基线 + 全部增量
+DATABASE_URL="..." python scripts/migrations/upgrade.py      # 应用（含方言校验）
+```
+
+`select_dialect_baseline.py` 会连同**增量**一起装（只换基线不够——增量里的类型也分
+方言：MySQL `DATETIME(6)` vs PG `TIMESTAMPTZ`）。`upgrade.py` 在升级前对**每个**
+迁移文件做 md5 比对，装错方言返回退出码 4。
+
+### 本轮补齐的缺口
+
+`customer` 与 `orders` 此前不在迁移链里（迁移链分支不含生成模型，基线只有 11 张表）。
+本轮补的增量 `1_*_specgen.py` 三方言各一份：`customer` 含 `birthday`(DATE)、
+`onboarded_at`(DATETIME/TIMESTAMPTZ)，`orders` 含 `customer_id` 外键
+`ON DELETE RESTRICT`。
 
 ## CI 集成
 
