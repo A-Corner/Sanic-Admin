@@ -16,6 +16,10 @@ must_change_password=True（交付口令未换，必须走强制改密）。脚�
 （管理员邮箱已改过）时，默认打印警告并跳过创建，避免静默多建一个管理员；
 确需创建时加 ``--create-initial-admin``。
 
+边界：仅比对 **未禁用的管理员**（is_admin=True 且 disabled=False）。
+被禁用的管理员与非管理员账户即使口令仍是默认值也不比对、不置标志——
+禁用账户无法登录，非管理员不经此流程管理。
+
 支持方言：SQLite / MySQL / PostgreSQL（生产默认 MySQL，见 app/config.py）。
 用法（在仓库根目录、已配置数据库环境变量的环境下）：
     python scripts/migrate_v0_3_2_must_change_password.py [--create-initial-admin]

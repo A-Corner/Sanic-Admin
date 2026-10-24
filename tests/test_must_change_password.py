@@ -364,7 +364,10 @@ async def test_flagged_user_can_complete_two_factor(client, monkeypatch):
 
 
 async def test_two_factor_paths_exempt_with_boundary():
-    """/two-step 与 /auth/validate-2fa 放行，且按边界匹配（同前缀的其它路径仍拦）。"""
+    """/auth/validate-2fa 放行，且按边界匹配（同前缀的其它路径仍拦）。
+
+    /two-step 已从白名单移除（无对应业务路由参与强制改密流程）。
+    """
     from types import SimpleNamespace
 
     import pytest
@@ -377,9 +380,8 @@ async def test_two_factor_paths_exempt_with_boundary():
         session = SimpleNamespace(bearer=bearer)
         return SimpleNamespace(path=path, ctx=SimpleNamespace(authentication_session=session))
 
-    for path in ("/auth/validate-2fa", "/two-step", "/two-step/request"):
-        assert await enforce_password_change(_req(path)) is None, path
-    for path in ("/auth/validate-2fax", "/two-steps", "/api/v1/roles"):
+    assert await enforce_password_change(_req("/auth/validate-2fa")) is None
+    for path in ("/auth/validate-2fax", "/two-step", "/two-step/request", "/api/v1/roles"):
         with pytest.raises(PasswordChangeRequiredError):
             await enforce_password_change(_req(path))
 
