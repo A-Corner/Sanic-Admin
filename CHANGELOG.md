@@ -11,6 +11,8 @@
 
 鉴权收尾版本。新增首登强制改密，修复 2FA 登录 500 与 AMIS 角色表单校验；**存量库需手工跑一次迁移脚本**（见下）。
 
+**API 契约变更**：登录与 `/auth/validate-2fa` 响应新增 `must_change_password` 布尔字段；新增错误码 `PASSWORD_CHANGE_REQUIRED`（HTTP 403，改密未完成时返回）。请求体与路径未变。
+
 ### Added
 
 - **首次登录强制改密。** 由 `INITIAL_ADMIN_PASSWORD` 创建的初始管理员携带
@@ -34,6 +36,10 @@
   回填为缩进 JSON。
 
 ### Migration — 存量库必读
+
+> **破坏性提示：** 升级并完成迁移后，口令仍是 `INITIAL_ADMIN_PASSWORD` 或历史默认
+> `SAdmin@123` 的管理员，访问 `/api/**` 会返回 **403 `PASSWORD_CHANGE_REQUIRED`**，
+> 必须先调用 `POST /auth/change-password` 改密（或用控制台的改密对话框）。
 
 项目尚未引入迁移框架，`generate_schemas` 不会给已有表加列。**v0.3.1 及更早版本升级
 必须手工执行一次**：
