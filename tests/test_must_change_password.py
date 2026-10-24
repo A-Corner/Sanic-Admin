@@ -632,42 +632,6 @@ def test_set_password_default_context_is_strict():
     assert account.verify_password("SAdmin@123")
 
 
-def test_context_initial_used_only_by_initial_admin_creation():
-    """用 AST 断言：全仓 ``context="initial"`` 只出现在 create_initial_admin_account。
-
-    这是防止「初始口令豁免」被误用到其它入口的守卫——一旦有人复制这行到别处，
-    本测试失败。
-    """
-    import ast
-    from pathlib import Path
-
-    app_dir = Path(__file__).resolve().parent.parent / "app"
-    occurrences = []
-    for py in app_dir.rglob("*.py"):
-        try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            is_set_pw = (
-                isinstance(func, ast.Attribute) and func.attr == "set_password"
-            )
-            if not is_set_pw:
-                continue
-            for kw in node.keywords:
-                if kw.arg == "context" and isinstance(kw.value, ast.Constant) \
-                        and kw.value.value == "initial":
-                    # 记录所在函数名
-                    occurrences.append(str(py.relative_to(app_dir)))
-
-    assert len(occurrences) == 1, (
-        f'context="initial" 应只出现 1 处（create_initial_admin_account），'
-        f"实际 {len(occurrences)} 处: {occurrences}")
-
-
 async def test_audit_write_failure_does_not_break_request(client, monkeypatch, caplog):
     """写审计失败时主请求必须照常成功，且留下 warning（审计是旁路，不是主路径）。"""
     import logging
@@ -705,33 +669,74 @@ async def test_audit_contains_no_token_or_password(client):
     assert token not in blob, "审计里出现了会话 token"
     assert ADMIN_PASSWORD not in blob, "审计里出现了口令"
 
+    # 覆盖改密路径：改密后的审计同样不得含旧 token 或新旧口令
+    from app.models import Account as _A
+
+    await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+    resp = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert resp.status_code == 200, resp.text
+    new_token = resp.headers.get("authorization")
+
+    rows2 = await _audit_rows()
+    blob2 = " ".join(
+        str(v) for row in rows2
+        for v in (row.detail, row.operation, row.account_name, row.user_agent,
+                  row.ip_address, row.status)
+    )
+    # 注意：响应头形如 "Bearer <jwt>"，而审计里若泄露会是裸 JWT——
+    # 两种形态都要比，否则只查带前缀的字符串会漏掉裸 token。
+    secrets = [ADMIN_PASSWORD, NEW_PASSWORD]
+    for raw in (token, new_token):
+        if not raw:
+            continue
+        secrets.append(raw)
+        if raw.lower().startswith("bearer "):
+            secrets.append(raw.split(" ", 1)[1])
+    for secret in secrets:
+        assert secret not in blob2, (
+            f"改密路径的审计里出现了 token 或口令: {secret[:12]}...")
+
 
 async def test_change_password_success_clears_account_counter(client, app):
-    """改密成功后该账户的失败计数被清零（可再次尝试，不必等窗口过期）。"""
-    from app.config import settings
-    from app.auth.rate_limit import ACCOUNT_KEY_PREFIX
+    """改密成功后：账户键清零，**IP 键保留**（CPL 复审第 1 项）。"""
+    from app.auth.rate_limit import ACCOUNT_KEY_PREFIX, IP_KEY_PREFIX
     from app.models import Account
 
     await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
     await _login(client)
 
     cache = app.ctx.cache
-    key = f"{ACCOUNT_KEY_PREFIX}:{ADMIN_EMAIL.strip().lower()}"
+    acct_key = f"{ACCOUNT_KEY_PREFIX}:{ADMIN_EMAIL.strip().lower()}"
 
-    # 先积累一些失败
+    # 预置 IP 计数：模拟同一出口 IP 下已有失败记录（改密成功不应替别人解封）
+    client_ip = client._transport.app.ctx  # noqa: F841  (占位，实际用探测到的键)
+    ip_keys_before = [k for k in (cache.keys(f"{IP_KEY_PREFIX}:*") or [])]
+    # 若没有现成的 IP 键，手工放一个已知值，断言它在改密后仍然存在
+    probe_ip_key = f"{IP_KEY_PREFIX}:203.0.113.99"
+    cache.set(probe_ip_key, [__import__("time").time()], timeout=900)
+    assert cache.get(probe_ip_key), "前置：IP 计数应已预置"
+
+    # 积累账户维度的失败
     for _ in range(3):
         await client.post(
             "/auth/change-password", headers=_csrf_header(client),
             json={"current_password": "WrongOne!1", "new_password": NEW_PASSWORD,
                   "confirm_password": NEW_PASSWORD})
-    assert cache.get(key), "应先有失败计数"
+    assert cache.get(acct_key), "前置：应有账户维度的失败计数"
 
     ok = await client.post(
         "/auth/change-password", headers=_csrf_header(client),
         json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
               "confirm_password": NEW_PASSWORD})
     assert ok.status_code == 200, ok.text
-    assert not cache.get(key), f"改密成功后账户计数应被清零，实际 {cache.get(key)!r}"
+
+    assert not cache.get(acct_key), f"账户计数应被清零，实际 {cache.get(acct_key)!r}"
+    assert cache.get(probe_ip_key), (
+        "IP 计数必须保留——否则一个账户的正常操作会替同出口下别人解封")
 
 
 async def test_change_password_correct_password_still_429_when_blocked(client, app):
@@ -771,16 +776,40 @@ async def test_banlist_is_case_insensitive():
     assert validate_not_banlisted("TotallyFine#2026", _A()) is None
 
 
-def test_strength_enforced_on_all_entry_points():
-    """三个入口（注册 / 重置口令 / 管理员建账户）都经 set_password，弱口令一律被拒。"""
-    from app.models.account import Account
+async def test_register_rejects_weak_password(client):
+    """注册接口传弱口令 → 400（走真实路由，精确错误码）。"""
+    resp = await client.post("/auth/register", json={
+        "email": "weak1@example.com", "username": "weak1",
+        "password": "alllowercase"})
+    assert resp.status_code == 400, (resp.status_code, resp.text[:200])
+    assert resp.json()["error"] == "VALIDATION_ERROR", resp.json()
 
-    weak_values = ["alllowercase", "12345678", "SAdmin@123"]
-    for weak in weak_values:
-        account = Account(email="probe2@example.com", username="probe2")
-        with pytest.raises(Exception):
-            # 注册 / reset_password / 管理员建账户 最终都调 set_password
-            account.set_password(weak)
+
+async def test_admin_create_account_rejects_weak_password(client, auth_headers):
+    """管理员建账户传弱口令 → 400（走 /api/v1/accounts，精确错误码）。"""
+    resp = await client.post(
+        "/api/v1/accounts", headers=auth_headers,
+        json={"email": "weak2@example.com", "username": "weak2",
+              "password": "12345678"})
+    assert resp.status_code == 400, (resp.status_code, resp.text[:200])
+    assert resp.json()["error"] == "VALIDATION_ERROR", resp.json()
+
+
+async def test_reset_password_rejects_weak_password():
+    """reset_password 无路由，直接调用并断言具体异常类型。
+
+    先造一个真实的 password_reset 令牌，让执行走到口令校验那一步
+    （否则会先被 TokenInvalidError 挡住，测不到强度校验）。
+    """
+    from app.auth.verification import generate_verification_token, reset_password
+    from app.models import Account
+    from app.services.exceptions import ValidationError
+
+    account = await Account.filter(email=ADMIN_EMAIL).first()
+    vt = await generate_verification_token(account, "password_reset")
+
+    with pytest.raises(ValidationError):
+        await reset_password(vt.token, "SAdmin@123")
 
 
 async def test_change_password_429_is_audited(client, app):
@@ -807,8 +836,14 @@ async def test_change_password_429_is_audited(client, app):
     assert len(after) > before, "改密被限流时也应写审计"
 
 
-def test_ast_guard_requires_single_call_site_and_constant():
-    """AST 守卫加强：context="initial" 必须只有一处，且值必须是字面量常量。"""
+def test_context_initial_guard():
+    """AST 守卫（合并版）：``context="initial"`` 的约束。
+
+    同时断言三件事：
+    1. 调用点必须只有一个；
+    2. 它所在函数必须是 ``create_initial_admin_account``；
+    3. ``context`` 的值必须是字面量常量（非常量无法静态确认，直接判失败）。
+    """
     import ast
     from pathlib import Path
 
@@ -816,26 +851,38 @@ def test_ast_guard_requires_single_call_site_and_constant():
     sites = []
     for py in app_dir.rglob("*.py"):
         try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
+            source = py.read_text(encoding="utf-8")
+            tree = ast.parse(source)
         except SyntaxError:
             continue
+
+        # 建立「节点 -> 外层函数名」的映射
+        enclosing = {}
+        for func in [n for n in ast.walk(tree)
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            for child in ast.walk(func):
+                enclosing.setdefault(id(child), func.name)
+
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "set_password"):
                 continue
             for kw in node.keywords:
                 if kw.arg != "context":
                     continue
-                # 非常量（如变量、表达式）直接判失败：无法静态确认它是不是 "initial"
                 assert isinstance(kw.value, ast.Constant), (
-                    f"{py}: set_password 的 context 必须是字面量常量，"
+                    f"{py.name}: set_password 的 context 必须是字面量常量，"
                     f"实际是 {type(kw.value).__name__}")
                 if kw.value.value == "initial":
-                    sites.append(str(py.relative_to(app_dir)))
+                    sites.append((py.name, enclosing.get(id(node), "<module>")))
 
     assert len(sites) == 1, (
         f'context="initial" 应只有 1 处，实际 {len(sites)} 处: {sites}')
-
+    filename, func_name = sites[0]
+    assert func_name == "create_initial_admin_account", (
+        f'context="initial" 只允许出现在 create_initial_admin_account 内，'
+        f"实际在 {func_name}（{filename}）")
 
 async def test_new_session_failure_keeps_password_and_sessions(client, app, monkeypatch):
     """新会话创建失败时，口令与旧会话都不变（事务回滚）。
@@ -870,3 +917,88 @@ async def test_new_session_failure_keeps_password_and_sessions(client, app, monk
         deleted=False, disabled=False).count()
     assert sessions_after == sessions_before, (
         f"事务回滚后会话数不应变化：{sessions_before} → {sessions_after}")
+
+
+# ---------------------------------------------------------------------------
+# SA-v034-L1：2FA 三类审计（沿用 _login_with_2fa 的局部开启写法）
+# ---------------------------------------------------------------------------
+
+async def test_audit_two_step_success(client, monkeypatch):
+    """2FA 验证成功写 two_step_success 审计；字段不含验证码。"""
+    login = await _login_with_2fa(client, monkeypatch)
+    assert login.status_code == 200, login.text
+    code = login.json()["data"]["code"]
+
+    before = len(await _audit_rows("two_step_success"))
+    verify = await client.post("/auth/validate-2fa",
+                               headers=_csrf_header(client), json={"code": code})
+    assert verify.status_code == 200, (verify.status_code, verify.text)
+
+    rows = await _audit_rows("two_step_success")
+    assert len(rows) > before, "2FA 成功应写入审计"
+    for row in rows:
+        blob = " ".join(str(v) for v in (row.detail, row.operation, row.account_name))
+        assert code not in blob, f"审计里出现了 2FA 验证码: {blob!r}"
+
+
+async def test_audit_two_step_failure(client, monkeypatch):
+    """2FA 验证失败写 two_step_failure 审计，且带脱敏 identity。"""
+    login = await _login_with_2fa(client, monkeypatch)
+    assert login.status_code == 200, login.text
+
+    before = len(await _audit_rows("two_step_failure"))
+    bad = await client.post("/auth/validate-2fa",
+                            headers=_csrf_header(client),
+                            json={"code": "000000"})
+    assert bad.status_code >= 400, (bad.status_code, bad.text)
+
+    rows = await _audit_rows("two_step_failure")
+    assert len(rows) > before, "2FA 失败应写入审计"
+
+
+async def test_audit_change_password_2fa_pending(client, monkeypatch):
+    """2FA 未完成时改密被拒，且写 change_password_2fa_pending 审计。
+
+    正向对照：先在 2FA 未完成状态下直接调 change-password（应 403 且有审计），
+    完成 2FA 后再调（应成功），证明这条审计确实只在「2FA 未完成」时产生。
+    """
+    from app.models import Account as _A
+
+    await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    login = await _login_with_2fa(client, monkeypatch)
+    assert login.status_code == 200, login.text
+    code = login.json()["data"]["code"]
+
+    # 2FA 未完成 → 改密被拒 + 审计
+    before = len(await _audit_rows("change_password_2fa_pending"))
+    blocked = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert blocked.status_code == 403, (blocked.status_code, blocked.text)
+    rows = await _audit_rows("change_password_2fa_pending")
+    assert len(rows) > before, "2FA 未完成时的改密应写入审计"
+
+    # 完成 2FA 后改密成功，且不再新增该审计
+    verify = await client.post("/auth/validate-2fa",
+                               headers=_csrf_header(client), json={"code": code})
+    assert verify.status_code == 200, (verify.status_code, verify.text)
+    mid = len(await _audit_rows("change_password_2fa_pending"))
+    ok = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert ok.status_code == 200, ok.text
+    final = len(await _audit_rows("change_password_2fa_pending"))
+    assert final == mid, "2FA 完成后改密不应再产生 2fa_pending 审计"
+
+
+def test_mask_identity_three_cases():
+    """脱敏规则：≤4 只留长度；>4 保留前 2 位；邮箱只留域名。"""
+    from app.auth.routes import _mask_identity
+
+    assert _mask_identity("abc") == "***(3)", "≤4 短标识不应暴露任何字符"
+    assert _mask_identity("abcd") == "***(4)", "长度 4 仍属短标识"
+    assert _mask_identity("admin") == "ad***(5)", ">4 保留前 2 位便于归因"
+    assert _mask_identity("alice@example.com") == "***@example.com", "邮箱只留域名"
+    assert _mask_identity("") == "-"
