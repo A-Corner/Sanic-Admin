@@ -270,3 +270,12 @@ jobs:
         SANIC_ENV: development
         INITIAL_ADMIN_PASSWORD: ci-check-only
       run: python scripts/check_dialect_ddl.py ${{ matrix.dialect }} "${{ matrix.existing_url }}" --existing
+
+    # 时区契约（v0.4.1）：naive 按 UTC 解释、+08:00 换算成 UTC、跨时区一致。
+    # **必须在真方言上跑**：MySQL 的 DATETIME 本身不带时区，SQLite 上 Tortoise
+    # 会自己归一，本地绿不代表这里也对。
+    - name: "Timezone contract on ${{ matrix.dialect }}"
+      env:
+        SANIC_ENV: development
+        INITIAL_ADMIN_PASSWORD: ci-check-only
+      run: python scripts/check_timezone_dialects.py ${{ matrix.dialect }} "${{ matrix.fresh_url }}"
