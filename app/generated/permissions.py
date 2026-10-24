@@ -7,6 +7,7 @@
 GENERATED_PERMISSIONS = {
     'customer': ['read', 'create', 'update', 'delete'],
     'order': ['read', 'create', 'update', 'delete'],
+    'ticket': ['read', 'create', 'update', 'delete'],
 }
 
 

@@ -152,6 +152,12 @@ DATABASE_URL="..." python scripts/migrations/upgrade.py      # 应用（含方�
 （接受 `YYYY-MM-DD` 或 ISO 8601 文本），AMIS 表单用 `input-date` / `input-datetime`。
 注意 `datetime` 回显会带时区后缀（Tortoise 归一化为 UTC），客户端按解析后的时刻比较即可。
 
+**`datetime` 不接受不带时区的输入做持久化保证**：规格里写 `type: datetime` 时，
+存进库的是**带时区**的值（MySQL `DATETIME(6)` 按 UTC 归一、PG `TIMESTAMPTZ` 保留时区）。
+客户端提交 `2026-01-01 10:00:00` 这类裸时间时，按服务端时区解释；
+跨时区部署请始终提交带偏移的 ISO 8601（`2026-01-01T10:00:00+08:00`）。
+`date` 类型没有这个问题——它只有日期，不带时刻。
+
 ## 列表排序（sorting）
 
 ```yaml

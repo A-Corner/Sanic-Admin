@@ -67,6 +67,26 @@ def _control(f, specs: Dict[str, ResourceSpec]) -> dict:
         c["type"] = "input-number"
     elif f.type == "bool":
         c["type"] = "switch"
+    elif f.type == "date":
+        # AMIS 没有通用「日期」渲染器，必须显式给 input-date。
+        # 早先漏了这两个分支，字段落空 -> 表单里出现没有 type 的控件，
+        # AMIS 报「找不到对应的渲染器」，整个新增/编辑弹窗无法提交。
+        c["type"] = "input-date"
+        c["format"] = "YYYY-MM-DD"
+        c["valueFormat"] = "YYYY-MM-DD"
+    elif f.type == "datetime":
+        c["type"] = "input-datetime"
+        c["format"] = "YYYY-MM-DD HH:mm:ss"
+        c["valueFormat"] = "YYYY-MM-DD HH:mm:ss"
+    else:
+        # 兜底：新增 FieldType 却忘了在这里加分支时，**直接报错**。
+        # 早先漏了 date/datetime，生成出没有 type 的控件，AMIS 报
+        # 「找不到对应的渲染器」，整个弹窗无法提交 —— 而且 API 测试全绿，
+        # 只有真跑浏览器才会暴露。宁可生成时炸，也不要产出一个打不开的页面。
+        raise ValueError(
+            f"AMIS 表单控件缺少映射：字段 {f.name!r} 的 type={f.type!r}、"
+            f"format={f.format!r}、choices={f.choices!r}。"
+            f"请在 tools/specgen/render_amis.py 的 _control() 里补上对应分支。")
     if f.default is not None:
         c["value"] = f.default
     return c

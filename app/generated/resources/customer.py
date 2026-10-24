@@ -26,7 +26,7 @@ from app.api.validators import (
     validate_fields,
 )
 from app.auth.authorization import has_permission, requires_permission
-from app.models import Customer, Order
+from app.models import Customer, Order, Ticket
 
 RESOURCE = 'customer'
 LABEL = '客户'
@@ -46,7 +46,7 @@ WRITE_FIELDS = ('name', 'email', 'status', 'notes', 'birthday', 'onboarded_at')
 UNIQUE_FIELDS = ('email',)
 SEARCH_FIELDS = ('name',)
 FK_TARGETS = {}
-CHILDREN = ((Order, 'customer_id', '订单'),)
+CHILDREN = ((Order, 'customer_id', '订单'), (Ticket, 'customer_id', '工单'))
 
 
 def customer_info(obj: Customer) -> dict:

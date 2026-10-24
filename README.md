@@ -323,6 +323,27 @@ The secrets are the two that gate startup — `JWT_PRIVATE_KEY` and `INITIAL_ADM
 
 ---
 
+## AI-assisted development
+
+This project is built around **specs as code**: a resource is declared once in
+`specs/<resource>.yaml`, and the model, CRUD API, permissions, AMIS page, tests and
+three-dialect migrations are all generated from it.
+
+An AI can drive this loop through the MCP read-only layer (`tools/mcp_server`): it lists
+and describes existing specs, validates a new one, and previews the exact diff — but it
+**cannot write to the repository**. Writing is always a human action, followed by a PR.
+
+See **[docs/demo/ai-module-in-10-minutes.md](docs/demo/ai-module-in-10-minutes.md)** for a
+real, reproducible walkthrough: adding a "ticket" module with every command, its actual
+output and measured timings.
+
+The walkthrough is honest about the cost: the browser E2E gate caught a real defect
+(date/datetime fields were generated without a `type`, so the AMIS dialog could not be
+submitted) that API tests, unit tests and CI all passed. That is precisely why the E2E
+gate is not optional.
+
+---
+
 ## Documentation
 
 | Document | Contents |
