@@ -188,6 +188,10 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
     hook.rename(real_hook)
     hook.write_text(
         "#!/bin/sh\n"
+        # **先读掉 stdin**：git push 会把待推的 ref 列表写进 pre-push 的 stdin。
+        # hook 不读就走，git 写管道时可能阻塞——实测这套测试偶发挂起 600 秒，
+        # 残留进程停在 `git push` 与 `git-receive-pack` 互相等待。
+        "cat >/dev/null\n"
         f'echo ran > "{marker}"\n'
         f'exec "{real_hook}" "$@"\n',
         encoding="utf-8",
@@ -224,10 +228,16 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
     ).stdout.strip()
     assert current and current != "HEAD", "clone 处于分离 HEAD，无法推出有效分支"
 
-    proc = subprocess.run(
-        ["git", "push", "evil", current],
-        cwd=str(clone), capture_output=True, text=True,
-    )
+    # 超时判**失败**：真挂起时必须报错，不能因为「没返回」而被当成「被 hook 拦截」。
+    try:
+        proc = subprocess.run(
+            ["git", "push", "evil", current],
+            cwd=str(clone), capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "git push 30 秒未返回——hook 或管道死锁，不能判定为「被 hook 拦截」"
+        )
     assert proc.returncode != 0, f"pre-push hook 没拦住 push：{proc.stderr[:300]}"
 
     # --- 核心证据：hook 确实被执行了（标记文件）---
@@ -247,10 +257,13 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
     real_hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     real_hook.chmod(0o755)
     marker.unlink()
-    ok_proc = subprocess.run(
-        ["git", "push", "evil", current],
-        cwd=str(clone), capture_output=True, text=True,
-    )
+    try:
+        ok_proc = subprocess.run(
+            ["git", "push", "evil", current],
+            cwd=str(clone), capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("反向对照的 git push 30 秒未返回——同样视为死锁，判失败")
     assert ok_proc.returncode == 0, (
         f"hook 放行后 push 应当成功，否则说明失败另有原因：{ok_proc.stderr[:300]}"
     )
