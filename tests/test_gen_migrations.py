@@ -360,39 +360,16 @@ def test_mysql_quotes_does_not_touch_string_literals():
 
 
 def test_mysql_quotes_handles_escaped_single_quote():
-    """注释里同时含 ' 与 " 时也要正确（CPL 要求的两组用例之一）。"""
-    sql = (r'ALTER TABLE "t" ADD "col" VARCHAR(32) '
-           r"COMMENT '含 \' 单引号与 \" 双引号的注释'")
-    out = mig._mysql_quotes(sql)
-    assert '`col`' in out
-    assert r"\'" in out, "转义单引号被破坏"
-    assert '"' in out, "字符串里的双引号不该被替换"
-
-
-def test_postgres_new_column_gets_comment_on():
-    """
-    F4：PG 新增列要补 `COMMENT ON COLUMN`。
-
-    PG 的列注释是独立语句，不在列定义里；不补会丢注释，与 PG 基线（每列都有
-    COMMENT ON）不一致。
-    """
-    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
-                     + _col("id", "INTEGER") + ",\n"
-                     + _col("nick", "VARCHAR(16)", " /* 昵称 */") + "\n);"}
-    content = mig.render_migration("postgres", [], [("t", '    "nick" VARCHAR(16)  /* 昵称 */')],
-                                   rendered)
-    assert "COMMENT ON COLUMN" in content, "PG 新增列缺少 COMMENT ON COLUMN"
-    assert "昵称" in content
-
-
-def test_postgres_comment_escapes_single_quote():
-    """F4：PG 注释里的单引号要用 '' 双写（CPL 要求的两组用例之二）。"""
-    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
-                     + _col("id", "INTEGER") + "\n);"}
-    col = '    "col" VARCHAR(32) /* 含 \' 单引号与 " 双引号 */'
-    content = mig.render_migration("postgres", [], [("t", col)], rendered)
-    assert "COMMENT ON COLUMN" in content
-    assert "''" in content, "PG 注释里的单引号必须双写转义"
+    """注释里同时含 ' 与 " 时也要正确——断言整体相等，不用零散子串。"""
+    sql = (
+        'ALTER TABLE "t" ADD "col" VARCHAR(32) '
+        "COMMENT '含 \\' 单引号与 \" 双引号的注释'"
+    )
+    expected = (
+        "ALTER TABLE `t` ADD `col` VARCHAR(32) "
+        "COMMENT '含 \\' 单引号与 \" 双引号的注释'"
+    )
+    assert mig._mysql_quotes(sql) == expected
 
 
 def test_mysql_increment_has_content_and_downgrade():
@@ -484,3 +461,143 @@ print("OK_WITHOUT_DRIVERS")
         "无驱动环境下渲染失败——渲染路径又引入了数据库驱动依赖：\n"
         + result.stderr[-1500:])
     assert "OK_WITHOUT_DRIVERS" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# 复审第二轮：用真实渲染做输入，单独方言也要能拒绝
+# ---------------------------------------------------------------------------
+
+
+def test_mysql_fk_detected_from_real_render_alone():
+    """
+    F2（MySQL 单独成立）：MySQL 的 FK 是表级 `CONSTRAINT .. FOREIGN KEY`，
+    必须由 split_columns 归并回列。**用真实渲染结果**，不靠跨方言汇总兜底。
+    """
+    ddl = mig.render_ddl_for("mysql")
+    _t, cols, _tail = mig.split_columns(ddl["orders"])
+    assert "REFERENCES" in cols["customer_id"].upper(), (
+        f"MySQL 真实渲染的 orders.customer_id 没有归并外键：{cols['customer_id']!r}")
+
+    # 单独用 MySQL 的渲染结果做 plan，也能判定「新列带外键 -> 拒绝」
+    rendered = {"orders": ddl["orders"]}
+    _nt, nc, unsupported = mig.plan(
+        rendered, {"orders": ["id", "title", "customer_id"]},
+        {"orders": {"id": "`id` INT NOT NULL", "title": "`title` VARCHAR(128) NOT NULL",
+                    "customer_id": "`customer_id` INT NOT NULL"}})
+    assert unsupported, "MySQL 单独渲染结果里，新列带外键应被拒绝"
+    assert any("customer_id" in u or "带外键" in u for u in unsupported), unsupported
+
+
+def test_default_case_change_is_detected():
+    """
+    F1（大小写）：默认值只改大小写也必须检测出来。
+
+    `normalize_column_def` 早先整串 `.upper()`，`DEFAULT 'open'` 与 `'OPEN'`
+    会被抹成一样，这种语义变化被漏报。
+    """
+    a = mig.normalize_column_def("    \"status\" VARCHAR(16) DEFAULT 'open'")
+    b = mig.normalize_column_def("    \"status\" VARCHAR(16) DEFAULT 'OPEN'")
+    assert a != b, f"只改字面量大小写应能区分，实际都是 {a!r}"
+
+
+def test_keyword_case_is_still_normalized():
+    """反向对照：关键字大小写不该造成差异（否则每天都会被误报）。"""
+    a = mig.normalize_column_def("    \"x\" varchar(16) DEFAULT 'a'")
+    b = mig.normalize_column_def("    \"x\" VARCHAR(16) DEFAULT 'a'")
+    assert a == b, f"关键字大小写不该产生差异：{a!r} vs {b!r}"
+
+
+def test_mysql_increment_has_add_and_drop_column():
+    """测试补强：MySQL 加列增量要同时有 `ADD` 与 downgrade 的 `DROP COLUMN`。"""
+    rendered = {"t": "CREATE TABLE IF NOT EXISTS `t` (\n"
+                     + "    `a` INT NOT NULL DEFAULT 1 /* 甲 */\n);"}
+    content = mig.render_migration("mysql", [], [("t", "    `a` INT NOT NULL DEFAULT 1 /* 甲 */")],
+                                   rendered)
+    assert "ALTER TABLE `t` ADD `a`" in content, content
+    assert "DROP COLUMN `a`" in content, "downgrade 缺少 DROP COLUMN"
+
+
+def test_postgres_increment_has_add_and_drop_column():
+    """测试补强：PG 加列增量要同时有 `ADD` 与 downgrade 的 `DROP COLUMN`。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + '    "a" INT NOT NULL DEFAULT 1 /* 甲 */\n);'}
+    content = mig.render_migration(
+        "postgres", [], [("t", '    "a" INT NOT NULL DEFAULT 1 /* 甲 */')], rendered)
+    assert 'ALTER TABLE "t" ADD "a"' in content, content
+    assert 'DROP COLUMN "a"' in content, "downgrade 缺少 DROP COLUMN"
+
+
+def test_render_without_drivers_checks_mysql_charset():
+    """测试补强：无驱动渲染的 MySQL 结果要带 `CHARACTER SET`。"""
+    code = """
+import sys
+for _m in ("aiomysql", "asyncmy", "asyncpg", "psycopg", "psycopg2"):
+    sys.modules[_m] = None
+sys.path.insert(0, {root!r})
+from tools.specgen import migrations as m
+rendered = m.render_ddl_for("mysql")
+assert "CHARACTER SET" in rendered["customer"], rendered["customer"][:400]
+print("OK_CHARSET")
+""".format(root=str(REPO))
+    result = subprocess.run([PYTHON, "-c", code], capture_output=True, text=True,
+                            timeout=300, cwd=str(REPO), env=_env())
+    assert result.returncode == 0, result.stderr[-1200:]
+    assert "OK_CHARSET" in result.stdout
+
+
+def test_tortoise_version_is_asserted():
+    """F4（版本断言）：tortoise 版本不符时必须给明确报错，而不是静默产出错 DDL。"""
+    import inspect
+    src = inspect.getsource(mig._load_generator_class)
+    assert "0.20." in src, "缺少 tortoise 0.20.x 的版本断言"
+    assert "MigrationPlanError" in src, "版本不符时应抛 MigrationPlanError"
+
+
+def test_postgres_comment_comes_from_real_render():
+    """
+    F4（PG，复审第二轮）：新增列的注释必须能从**真实渲染结果**里取到。
+
+    PG 的列注释是 `CREATE TABLE` 之后独立的 `COMMENT ON COLUMN` 语句。
+    `split_columns` 早先只截到 `);`，真实流程里新列拿到的注释永远是空——
+    加列的 `COMMENT ON` 因此永远不会生成。早先这条测试用手写 SQL 做输入，
+    所以掩盖了问题。
+
+    这里全程用 `render_ddl_for("postgres")` 的真实输出。
+    """
+    ddl = mig.render_ddl_for("postgres")
+    _t, cols, _tail = mig.split_columns(ddl["customer"])
+    notes_def = cols["notes"]
+    assert "备注" in notes_def, (
+        f"split_columns 没能从真实 PG 渲染里取回列注释：{notes_def!r}\n"
+        "（PG 的注释是 CREATE TABLE 之后的独立 COMMENT ON 语句，必须归并回来）")
+
+    content = mig.render_migration("postgres", [], [("customer", notes_def)], ddl)
+    assert "COMMENT ON COLUMN" in content, "PG 新增列缺少 COMMENT ON COLUMN"
+    assert "备注" in content, content[-400:]
+
+
+def test_postgres_comment_escape_from_real_render():
+    """
+    F4（PG 转义，用真实渲染）：注释里的单引号必须按 PG 规则 `''` 双写。
+
+    真实配置里 `verification_tokens` 的注释含单引号（`如 'activation', ...`），
+    用它做输入比手写更接近生产。
+    """
+    ddl = mig.render_ddl_for("postgres")
+    _t, cols, _tail = mig.split_columns(ddl["verification_tokens"])
+    token_def = cols["token_type"]
+    assert "'" in token_def, f"取到的列定义应含单引号注释：{token_def!r}"
+
+    content = mig.render_migration("postgres", [], [("verification_tokens", token_def)], ddl)
+    assert "COMMENT ON COLUMN" in content
+    # PG 里注释内部每个 ' 都要变成 ''；出现单个裸 ' 就说明转义错了
+    import re
+    m = re.search(r"COMMENT ON COLUMN [^;]+;", content)
+    assert m, f"没生成 COMMENT ON 语句：{content[-400:]}"
+    body = m.group(0)
+    assert "''" in body, f"PG 注释里的单引号必须双写：{body}"
+    # 去掉所有成对的 '' 后，字符串里不该再有 '（' 只应作为语句边界出现）
+    inner = body[body.index("IS ") + 3:].rstrip(";")
+    if inner.endswith("'"):
+        inner = inner[1:-1]
+    assert "'" not in inner.replace("''", ""), f"存在未转义的裸单引号：{body}"

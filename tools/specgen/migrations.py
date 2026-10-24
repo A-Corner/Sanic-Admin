@@ -125,6 +125,18 @@ def _load_generator_class(dialect: str):
 
     import tortoise
 
+    # 版本断言：本模块依赖 tortoise 0.20 的 _get_table_sql 返回结构
+    # （含 m2m_tables/schema_generator 私有方法）。0.21+ 改过签名，
+    # 渲染结果可能不再可信——明确报错比静默产出错误 DDL 安全。
+    from importlib.metadata import version as _pkg_version
+
+    _tv = _pkg_version("tortoise-orm")
+    if not _tv.startswith("0.20."):
+        raise MigrationPlanError(
+            f"迁移生成依赖 tortoise-orm 0.20.x 的渲染接口，当前安装 {_tv}。"
+            f"升级 tortoise 后需同步复核 tools/specgen/migrations.py 的 "
+            f"_get_table_sql 用法（含 m2m_tables 与 schema_generator 私有方法）。")
+
     mod_rel, cls_name = _GENERATOR_BY_DIALECT[dialect]
     # "tortoise.backends.mysql.schema_generator" -> <tortoise 包>/backends/mysql/schema_generator.py
     parts = mod_rel.split(".")
@@ -234,6 +246,34 @@ def parse_existing(sql_text: str) -> Dict[str, List[str]]:
     return {t: list(d) for t, d in parse_existing_definitions(sql_text).items()}
 
 
+def _create_stmt_with_followups(sql_text: str, table: str) -> str:
+    """
+    从整段迁移 SQL 里取出「某表的 CREATE TABLE + 其后的 COMMENT ON 语句」。
+
+    PG 的列注释在 `CREATE TABLE` 之后独立成句，`split_columns` 需要它们才能
+    把注释归并回列。历史迁移里表与注释可能隔着索引语句，所以这里按
+    「从 CREATE TABLE 起，到下一个非 COMMENT/非本表的语句前」截取。
+    """
+    import re
+
+    m = re.search(
+        r"(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?" + re.escape(table)
+        + r"[`\"]?\s*\(.*?\n\s*\)[^;]*;)",
+        sql_text, re.S | re.I,
+    )
+    if not m:
+        return ""
+    stmt = m.group(1)
+    # 收集该表后续的 COMMENT ON COLUMN / COMMENT ON TABLE
+    for cmt in re.finditer(
+        r"COMMENT\s+ON\s+(?:COLUMN\s+)?[`\"]?" + re.escape(table) + r"[`\"]?"
+        r"(?:\s*\.\s*[`\"]?\w+[`\"]?)?\s+IS\s+'(?:[^']|'')*'\s*;",
+        sql_text, re.I,
+    ):
+        stmt += "\n" + cmt.group(0)
+    return stmt
+
+
 def parse_existing_definitions(sql_text: str) -> Dict[str, Dict[str, str]]:
     """
     从迁移 SQL 文本里解析出 ``{表名: {列名: 列定义}}``。
@@ -251,22 +291,10 @@ def parse_existing_definitions(sql_text: str) -> Dict[str, Dict[str, str]]:
         re.S | re.I,
     ):
         table, body = m.group(1), m.group(2)
-        cols: Dict[str, str] = {}
-        current = None
-        for line in body.splitlines():
-            line = line.strip().rstrip(",")
-            if not line:
-                continue
-            if line.upper().startswith(("CONSTRAINT", "PRIMARY KEY", "KEY ",
-                                        "UNIQUE KEY", "FOREIGN KEY", "INDEX")):
-                current = None
-                continue
-            cm = re.match(r"[`\"]?(\w+)[`\"]?\s+\w", line)
-            if cm:
-                current = cm.group(1)
-                cols[current] = line
-            elif current:
-                cols[current] += " " + line
+        # 复用 split_columns 的解析（含表级 FK/UNIQUE 归并与 PG COMMENT ON 归并），
+        # 保证「历史迁移里读到的定义」与「模型渲染的定义」用同一套口径解析。
+        full = _create_stmt_with_followups(sql_text, table)
+        _tname, cols, _tail = split_columns(full)
         tables.setdefault(table, {}).update(cols)
     # ALTER TABLE <q>t<q> ADD [COLUMN] <q>c<q> <定义>
     for m in re.finditer(
@@ -369,14 +397,23 @@ def parse_create(sql_text: str) -> Dict[str, str]:
 
 def split_columns(create_sql: str) -> Tuple[str, Dict[str, str], str]:
     """
-    把一条 CREATE TABLE 拆成 ``(表名, {列名: 列定义}, 尾部)``。
+    把一条 ``CREATE TABLE``（含其后的附属语句）拆成
+    ``(表名, {列名: 列定义}, 尾部)``。
 
-    尾部是 ``)`` 之后到 ``;`` 之前的内容（``CHARACTER SET`` / ``COMMENT`` 等，
-    MySQL 有、其它方言可能为空）。用于「只取新增列的定义」。
+    「含附属语句」是关键：
+      - **PostgreSQL** 的列注释是 `CREATE TABLE` **之后**独立的
+        `COMMENT ON COLUMN "t"."c" IS '..'` 语句，不在列定义里。早先只切到
+        `);` 就停，结果真实渲染下新列拿到的注释永远是空 —— 加列的
+        `COMMENT ON` 因此永远不会生成（测试用手写 SQL 做输入才「通过」）。
+      - **MySQL** 的外键是表级 `CONSTRAINT .. FOREIGN KEY (col) REFERENCES ..`，
+        早先丢弃后，新列的外键约束检测只能靠「别的方言也丢」这种跨方言巧合兜住。
 
-    **表级约束行（``CONSTRAINT … FOREIGN KEY`` / ``UNIQUE KEY`` 等）不挂到任何列**：
-    它们是表的属性，不是列的属性。挂上去会把外键约束当成列定义的一部分，
-    生成 ``ALTER TABLE ADD <列> …, CONSTRAINT …`` 这种语法非法的语句。
+    现在：
+      - 表级 ``CONSTRAINT ... FOREIGN KEY (col) ...`` 归并回 ``col`` 的定义；
+      - 表级 ``UNIQUE KEY (col)`` / ``UNIQUE (col)`` 给 ``col`` 标记 UNIQUE；
+      - ``COMMENT ON COLUMN "t"."c" IS '..'`` 转成该列定义里的 ``/* .. */``。
+
+    尾部是 ``)`` 之后到 ``;`` 之前的内容（``CHARACTER SET`` / ``COMMENT`` 等）。
     """
     import re
 
@@ -390,15 +427,41 @@ def split_columns(create_sql: str) -> Tuple[str, Dict[str, str], str]:
     table, body, tail = m.group(1), m.group(2), m.group(3)
     cols: Dict[str, str] = {}
     current = None
+
     for line in body.splitlines():
         if not line.strip():
             continue
         stripped = line.strip().rstrip(",")
-        if stripped.upper().startswith(("CONSTRAINT", "PRIMARY KEY", "KEY ", "UNIQUE KEY",
-                                        "FOREIGN KEY", "INDEX")):
-            # 表级约束：与列定义无关，丢弃（新增单列时不需要重建约束）
+
+        fk = re.match(
+            r"CONSTRAINT\s+[`\"]?\w+[`\"]?\s+FOREIGN\s+KEY\s*\(\s*[`\"]?(\w+)[`\"]?\s*\)"
+            r"\s+REFERENCES\s+[`\"]?(\w+)[`\"]?\s*\(\s*[`\"]?(\w+)[`\"]?\s*\)"
+            r"(?:\s+ON\s+DELETE\s+(\w+(?:\s+\w+)?))?",
+            stripped, re.I,
+        )
+        if fk:
+            col, ref_table, ref_col, on_delete = fk.group(1), fk.group(2), fk.group(3), fk.group(4)
+            if col in cols:
+                cols[col] += (f" REFERENCES \"{ref_table}\" (\"{ref_col}\")"
+                              + (f" ON DELETE {on_delete}" if on_delete else ""))
             current = None
             continue
+
+        uq = re.match(
+            r"(?:UNIQUE\s+KEY\s+[`\"]?\w+[`\"]?|UNIQUE)\s*\(\s*[`\"]?(\w+)[`\"]?\s*\)",
+            stripped, re.I,
+        )
+        if uq:
+            col = uq.group(1)
+            if col in cols and "UNIQUE" not in cols[col].upper():
+                cols[col] += " UNIQUE"
+            current = None
+            continue
+
+        if stripped.upper().startswith(("PRIMARY KEY", "KEY ", "FOREIGN KEY", "INDEX")):
+            current = None
+            continue
+
         cm = re.match(r"([`\"]?)(\w+)\1\s+\w", stripped)
         if cm:
             current = cm.group(2)
@@ -406,6 +469,18 @@ def split_columns(create_sql: str) -> Tuple[str, Dict[str, str], str]:
         elif current:
             # 列定义的续行（跨行的长类型/默认值）
             cols[current] += "\n" + line
+
+    # PostgreSQL：把表后的 COMMENT ON COLUMN 归并回列定义
+    for cmt in re.finditer(
+        r"COMMENT\s+ON\s+COLUMN\s+[`\"]?(\w+)[`\"]?\.\s*[`\"]?(\w+)[`\"]?\s+IS\s+'((?:[^']|'')*)'",
+        create_sql, re.I,
+    ):
+        tbl, col, text = cmt.group(1), cmt.group(2), cmt.group(3)
+        if tbl.lower() != table.lower():
+            continue
+        if col in cols and "/*" not in cols[col]:
+            cols[col] += f" /* {text.replace(chr(39)*2, chr(39))} */"
+
     return table, cols, tail
 
 
@@ -420,6 +495,10 @@ def normalize_column_def(col_def: str) -> str:
 
     只保留语义项，丢掉引号、多余空白、注释（`/* */` 与 MySQL 的 `COMMENT '...'`）：
     注释变化不该触发「结构变更」，但类型/默认值/约束变化必须能看出来。
+
+    **只把关键字转大写，字符串字面量保持原样**：早先整串 `.upper()`，`DEFAULT 'open'`
+    改成 `'closed'` 会被误判成「只有大小写差异」而漏报；反过来只改字面量的大小写
+    （`'OPEN'` → `'open'`，语义确实变了）也会被抹平。
     """
     import re
 
@@ -432,7 +511,12 @@ def normalize_column_def(col_def: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     # 去掉开头的列名（本函数只比较「列定义」部分）
     s = re.sub(r'^"\w+"\s+', "", s)
-    return s.upper()
+
+    # 只对大写单引号之外的片段做 upper，字面量原样保留
+    parts = re.split(r"('(?:[^']|'')*')", s)
+    return "".join(
+        p if i % 2 == 1 else p.upper() for i, p in enumerate(parts)
+    )
 
 
 def _new_column_blocker(col_def: str) -> Optional[str]:
@@ -525,7 +609,8 @@ def render_migration(
     """产出 aerich 格式的迁移文件内容（upgrade/downgrade 两个函数）。"""
     up: List[str] = [rendered[t] for t in new_tables]
     for table, col_def in new_columns:
-        up.append(f'ALTER TABLE "{table}" ADD {col_def}')
+        # col_def 来自渲染结果，带前导缩进；直接拼会产出 `ADD     "a"` 这种多余空白
+        up.append(f'ALTER TABLE "{table}" ADD {col_def.strip()}')
         # PostgreSQL 的列注释是独立语句，不在列定义里。不补的话新增列会丢注释，
         # 与「模型声明了 description」不一致（PG 基线里每列都有 COMMENT ON）。
         comment = _extract_comment(col_def)
