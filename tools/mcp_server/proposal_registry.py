@@ -34,7 +34,9 @@ tag、notes 冲突。``discard_proposal`` 的判据变成：
 - 只考虑名字匹配 ``sanic-specgen-*`` 的目录
 - 目录里**必须**有本工具写入的标记文件 ``.sanic-specgen-workspace``
 - 且 mtime 超过 24 小时
-- 且目录名不等于当前进程正在使用的目录（用 pid 后缀区分）
+- 且标记文件记录的 pid 既不是当前进程、也不是仍存活的进程
+  （目录名**不含** pid，pid 只写在标记文件里；`make_workspace` 用
+  `tempfile.mkdtemp` 生成随机后缀，不自己拼 pid）
 
 任何一条不满足就跳过。**绝不按通配删除**——即使有人恰好建了同名目录，
 没有标记文件也不会被碰。
@@ -85,6 +87,74 @@ def make_workspace() -> Path:
     return root
 
 
+def _is_live_process(pid: int) -> bool:
+    """
+    pid 对应的进程是否还活着。
+
+    ``os.kill(pid, 0)`` 不发信号，只做存在性检查：进程存在返回 None（不抛），
+    不存在抛 ProcessLookupError，无权限抛 PermissionError（进程存在但不属于我们）。
+
+    **已知局限**：pid 会被系统复用。极端情况下一个过期目录记录的 pid 恰好被
+    新进程占用，我们就会把它当作「活的」而跳过——这是**安全方向的失败**
+    （漏删，不误删），可以接受。反过来若为了「删干净」忽略这个检查，风险是
+    删掉正在使用的工作区，不可接受。
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # 进程存在，只是不属于当前用户
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _is_ours_and_stale(entry: Path, now_ts: float) -> bool:
+    """
+    判断一个目录条目是否「属于本工具 + 已过期 + 非本进程」。
+
+    判据顺序有意为之：先做便宜的排除（不是目录 / 名字不匹配 / 是符号链接），
+    再读标记文件，最后看 mtime 和 pid。任何一步不满足都返回 False。
+
+    **符号链接单独检查**：``entry.is_dir()`` 对指向目录的符号链接也返回 True，
+    如果跟着删，``shutil.rmtree`` 的行为会受目标影响——可能删到链接目标里。
+    直接拒绝，不与符号链接打交道。
+    """
+    if entry.is_symlink():
+        return False
+    if not entry.is_dir():
+        return False
+    if not entry.name.startswith(TMP_PREFIX):
+        return False
+    marker = entry / TMP_MARKER
+    if not marker.is_file() or marker.is_symlink():
+        return False
+    try:
+        text = marker.read_text(encoding="utf-8", errors="replace")
+        st = entry.stat()
+    except OSError:
+        return False
+    pid = _parse_pid(text)
+    if pid == os.getpid() or _is_live_process(pid):
+        return False
+    return now_ts - st.st_mtime >= STALE_AFTER_SECONDS
+
+
+def _parse_pid(text: str) -> int:
+    """从标记文件内容取 pid；取不到返回 -1。"""
+    for line in text.splitlines():
+        if line.startswith("pid="):
+            try:
+                return int(line.split("=", 1)[1])
+            except (IndexError, ValueError):
+                return -1
+    return -1
+
+
 def cleanup_stale_workspaces(
     *, temp_root: Optional[Path] = None, now: Optional[float] = None
 ) -> List[str]:
@@ -95,11 +165,12 @@ def cleanup_stale_workspaces(
 
     1. 只扫 ``temp_root`` 这一层，不递归
     2. 名字必须以 ``TMP_PREFIX`` 开头
-    3. 必须存在 ``TMP_MARKER`` 文件
-    4. mtime 必须早于 ``now - STALE_AFTER_SECONDS``
-    5. 标记文件里的 pid 若是当前进程，跳过（不能删自己正在用的）
+    3. 不能是符号链接
+    4. 必须存在 ``TMP_MARKER`` 文件（且它本身不是符号链接）
+    5. mtime 必须早于 ``now - STALE_AFTER_SECONDS``
+    6. 标记里的 pid 若是当前进程、或该进程仍存活，跳过
 
-    任何异常都不影响其它目录的清理，也不向上抛——清理是旁路。
+    任何单目录的失败都不影响其它目录，也不向上抛——清理是旁路。
     """
     root = Path(temp_root or tempfile.gettempdir())
     now_ts = now if now is not None else time.time()
@@ -110,56 +181,27 @@ def cleanup_stale_workspaces(
         return removed
 
     for entry in entries:
-        try:
-            if not entry.is_dir():
-                continue
-            if not entry.name.startswith(TMP_PREFIX):
-                continue
-            marker = entry / TMP_MARKER
-            if not marker.is_file():
-                # 没有标记 = 不是我们的产物，即使名字像也不碰
-                continue
-            text = marker.read_text(encoding="utf-8", errors="replace")
-            pid_line = next(
-                (ln for ln in text.splitlines() if ln.startswith("pid=")), ""
-            )
-            try:
-                pid = int(pid_line.split("=", 1)[1])
-            except (IndexError, ValueError):
-                pid = -1
-            if pid == os.getpid():
-                continue
-            if now_ts - entry.stat().st_mtime < STALE_AFTER_SECONDS:
-                continue
-            shutil.rmtree(entry)
-            removed.append(entry.name)
-        except OSError:
-            # 单个目录失败不影响其它
+        if not _is_ours_and_stale(entry, now_ts):
             continue
+        # 只有真正删除这一步的错误被吞掉并记 warning——上面的判据错误不该被
+        # 同一层 except 掩盖（那样会让「判据写错」看起来像「删不掉」）。
+        try:
+            shutil.rmtree(entry)
+        except OSError:
+            _log.warning("清理临时工作区失败：%s", entry.name, exc_info=True)
+            continue
+        removed.append(entry.name)
     return removed
 
 
 def count_stale_workspaces(
     *, temp_root: Optional[Path] = None, now: Optional[float] = None
 ) -> int:
-    """只统计不删除，便于测试与诊断。判据与 cleanup 完全一致。"""
+    """只统计不删除，便于测试与诊断。**判据与 cleanup 完全一致**（共用 `_is_ours_and_stale`）。"""
     root = Path(temp_root or tempfile.gettempdir())
     now_ts = now if now is not None else time.time()
-    n = 0
     try:
         entries = list(root.iterdir())
     except OSError:
         return 0
-    for entry in entries:
-        try:
-            if not entry.is_dir() or not entry.name.startswith(TMP_PREFIX):
-                continue
-            marker = entry / TMP_MARKER
-            if not marker.is_file():
-                continue
-            if now_ts - entry.stat().st_mtime < STALE_AFTER_SECONDS:
-                continue
-            n += 1
-        except OSError:
-            continue
-    return n
+    return sum(1 for e in entries if _is_ours_and_stale(e, now_ts))

@@ -385,7 +385,28 @@ def make_proposal(
         fetch_from_local_clone(repo_root, clone_dir, branch)
         # 8) 写归属标记 ref：discard 靠它判断「是不是本工具建的」。
         #    放在 fetch 之后——分支确实落地了才登记，否则会留下指向空气的标记。
-        _git(["update-ref", proposal_ref(branch), commit], cwd=repo_root)
+        #    必须走 `_git_on_user_repo`（屏蔽用户仓库自己的 reference-transaction
+        #    hook），不能走 `_git`——后者只净化环境，不屏蔽 hook。
+        try:
+            _git_on_user_repo(
+                repo_root,
+                ["update-ref", proposal_ref(branch), commit],
+            )
+        except subprocess.CalledProcessError as exc:
+            # L1：标记写失败时回滚刚落地的分支——否则会留下一个「无归属」的
+            # 提案分支，既不能被 discard（没有标记），又占着名字。
+            # 用带期望值的 update-ref -d 保证只删我们刚写的那个 commit。
+            try:
+                _git_on_user_repo(
+                    repo_root,
+                    ["update-ref", "-d", f"refs/heads/{branch}", commit],
+                )
+            except subprocess.CalledProcessError:
+                pass
+            raise GitNotAllowed(
+                f"提案分支已创建但归属标记写入失败，已尝试回滚分支 {branch!r}。"
+                f"请人工检查：{(exc.stderr or '').strip()[:200]}"
+            ) from None
         return {
             "branch": branch,
             "commit": commit,
@@ -394,6 +415,47 @@ def make_proposal(
         }
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def _git_on_user_repo(repo_root: Path, args: Sequence[str]) -> str:
+    """
+    在**用户仓库**上执行 git 命令，并屏蔽该仓库自己的 hook。
+
+    为什么不能直接走 ``_git``：``_git`` 只做环境净化，但用户仓库里可能装了
+    ``reference-transaction`` / ``post-checkout`` 等 hook——任何改 ref 的操作
+    （``update-ref``、``branch -D``）都会触发它们。我们不该替用户跑他们的 hook：
+    副作用不可控（可能部署、可能通知、可能失败导致我们的操作中途失败）。
+
+    做法：独立起 subprocess，带 ``-c core.hooksPath=/dev/null -c gc.auto=0``
+    （与 ``fetch_from_local_clone`` 一致），并做同样的环境净化。
+    """
+    for arg in args:
+        if arg in _FORBIDDEN_ARGS or arg.startswith("--force"):
+            raise GitNotAllowed(f"用户仓库操作不允许参数 {arg!r}")
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    result = subprocess.run(
+        ["git",
+         "-c", "core.hooksPath=" + os.devnull,
+         "-c", "gc.auto=0",
+         *args],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, ["git", *args],
+            output=result.stdout, stderr=result.stderr,
+        )
+    return result.stdout
 
 
 def fetch_from_local_clone(repo_root: Path, clone_dir: Path, branch: str) -> None:
@@ -457,6 +519,10 @@ def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> No
     """
     if not branch.startswith(PROPOSAL_PREFIX):
         raise GitNotAllowed(f"只能删除 {PROPOSAL_PREFIX!r} 前缀的分支，实际 {branch!r}")
+    # L2：形态校验放在最前——`refs/heads/<b>` 全名拼出来之前先确认名字合法，
+    # 否则 `proposal/../x` 这类输入可能拼出意料之外的 ref 路径。
+    if not _BRANCH_RE.fullmatch(branch):
+        raise GitNotAllowed(f"分支名不合法：{branch!r}")
 
     if not branch_exists(repo_root, branch):
         raise GitNotAllowed(f"分支不存在：{branch!r}")
@@ -478,13 +544,28 @@ def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> No
             f"分支现在 {current[:7]}）。请人工确认后再处理。"
         )
 
-    flag = "-D" if force else "-d"   # -d 对未合并分支会失败，形成二次确认
-    _git(["branch", flag, branch], cwd=repo_root)
-    # 分支删掉后归属标记也要清掉，否则下次同名分支会撞上一个陈旧标记
+    # M3：用**原子的** `update-ref -d refs/heads/<b> <expected>` 删除分支。
+    # 带期望值时，若分支在「我们比对 SHA」和「实际删除」之间又变了，git 会
+    # 自己拒绝（TOCTOU 窗口由 git 的原子性封住），而不是靠我们两次读之间的假设。
+    # L2：全程用 refs/heads/<b> 全名，避免与同名 tag 混淆。
+    full_branch = f"refs/heads/{branch}"
     try:
-        _git(["update-ref", "-d", ref], cwd=repo_root)
+        _git_on_user_repo(
+            repo_root, ["update-ref", "-d", full_branch, marked]
+        )
+    except subprocess.CalledProcessError as exc:
+        raise GitNotAllowed(
+            f"删除分支 {branch!r} 失败（可能已被并发修改）："
+            f"{(exc.stderr or '').strip()[:200]}"
+        ) from None
+
+    # 分支删掉后归属标记也要清掉，否则下次同名分支会撞上一个陈旧标记。
+    # 失败不致命：标记指向一个已不存在的 commit，下次 discard 会因 SHA 不一致拒绝，
+    # 但不会误删——这是安全方向的失败。
+    try:
+        _git_on_user_repo(repo_root, ["update-ref", "-d", ref])
     except subprocess.CalledProcessError:
-        pass
+        _log.warning("归属标记 %s 清理失败（分支已删除）", ref)
 
 
 def branch_exists(repo_root: Path, branch: str) -> bool:
