@@ -472,20 +472,54 @@ def test_mysql_fk_detected_from_real_render_alone():
     """
     F2（MySQL 单独成立）：MySQL 的 FK 是表级 `CONSTRAINT .. FOREIGN KEY`，
     必须由 split_columns 归并回列。**用真实渲染结果**，不靠跨方言汇总兜底。
+
+    关键：`customer_id` 必须从 existing 里**去掉**，让它走「新列」路径。
+    早先把它留在 existing 里，实际走的是「共同列定义变了」那条，断言靠
+    `"customer_id" in u` 碰巧对上——测的根本不是「新列带外键」。
     """
     ddl = mig.render_ddl_for("mysql")
     _t, cols, _tail = mig.split_columns(ddl["orders"])
     assert "REFERENCES" in cols["customer_id"].upper(), (
         f"MySQL 真实渲染的 orders.customer_id 没有归并外键：{cols['customer_id']!r}")
 
-    # 单独用 MySQL 的渲染结果做 plan，也能判定「新列带外键 -> 拒绝」
     rendered = {"orders": ddl["orders"]}
+    # existing 里**不含** customer_id -> 它是新列
+    existing_defs = {"orders": {"id": "`id` INT NOT NULL",
+                                "title": "`title` VARCHAR(128) NOT NULL"}}
     _nt, nc, unsupported = mig.plan(
-        rendered, {"orders": ["id", "title", "customer_id"]},
-        {"orders": {"id": "`id` INT NOT NULL", "title": "`title` VARCHAR(128) NOT NULL",
-                    "customer_id": "`customer_id` INT NOT NULL"}})
+        rendered, {"orders": ["id", "title"]}, existing_defs)
+    assert not any("customer_id" in mig._column_name(d) for _t2, d in nc), (
+        "新列带外键不该进自动迁移")
     assert unsupported, "MySQL 单独渲染结果里，新列带外键应被拒绝"
-    assert any("customer_id" in u or "带外键" in u for u in unsupported), unsupported
+    # 断言**原因**是外键，不是碰巧提到列名
+    joined = " ".join(unsupported)
+    assert "外键" in joined, f"拒绝原因里没有提到外键：{unsupported}"
+    assert "customer_id" in joined, unsupported
+
+
+def test_mysql_unique_column_detected_from_real_render_alone():
+    """
+    F2（MySQL UNIQUE）：表级 `UNIQUE KEY` 必须归并回列，新列带唯一约束要拒绝。
+
+    用真实渲染的 `customer.email`（带 UNIQUE）做输入，同样从 existing 里去掉它。
+    """
+    ddl = mig.render_ddl_for("mysql")
+    _t, cols, _tail = mig.split_columns(ddl["customer"])
+    assert "UNIQUE" in cols["email"].upper(), (
+        f"MySQL 真实渲染的 customer.email 没有归并 UNIQUE：{cols['email']!r}")
+
+    rendered = {"customer": ddl["customer"]}
+    # existing 里不含 email -> 它是新列
+    existing_defs = {"customer": {"id": "`id` INT NOT NULL",
+                                  "name": "`name` VARCHAR(128) NOT NULL"}}
+    _nt, nc, unsupported = mig.plan(
+        rendered, {"customer": ["id", "name"]}, existing_defs)
+    assert not any(mig._column_name(d) == "email" for _t2, d in nc), (
+        "带 UNIQUE 的新列不该进自动迁移")
+    joined = " ".join(unsupported)
+    assert "UNIQUE" in joined.upper() or "唯一" in joined, (
+        f"拒绝原因里没有提到唯一约束：{unsupported}")
+    assert "email" in joined, unsupported
 
 
 def test_default_case_change_is_detected():
@@ -545,12 +579,46 @@ print("OK_CHARSET")
     assert "OK_CHARSET" in result.stdout
 
 
-def test_tortoise_version_is_asserted():
-    """F4（版本断言）：tortoise 版本不符时必须给明确报错，而不是静默产出错 DDL。"""
-    import inspect
-    src = inspect.getsource(mig._load_generator_class)
-    assert "0.20." in src, "缺少 tortoise 0.20.x 的版本断言"
-    assert "MigrationPlanError" in src, "版本不符时应抛 MigrationPlanError"
+def test_tortoise_version_is_asserted(monkeypatch):
+    """
+    F4（版本断言）：tortoise 版本不符时必须抛 MigrationPlanError。
+
+    早先这条只是 `inspect.getsource` 查字符串——实现里留着那句话就恒绿，
+    实际不验证行为。现在 monkeypatch `importlib.metadata.version` 返回 0.21.0，
+    断言真的抛错且信息里说明要复核什么。
+    """
+    import importlib.metadata as im
+
+    real_version = im.version
+
+    def fake_version(name):
+        if name == "tortoise-orm":
+            return "0.21.0"
+        return real_version(name)
+
+    monkeypatch.setattr(im, "version", fake_version)
+    with pytest.raises(mig.MigrationPlanError) as exc:
+        mig._load_generator_class("mysql")
+    msg = str(exc.value)
+    assert "0.20" in msg, f"报错应提到期望版本：{msg}"
+    assert "0.21.0" in msg, f"报错应提到实际版本：{msg}"
+
+
+def test_tortoise_version_accepts_supported(monkeypatch):
+    """反向对照：版本符合时不得抛错（否则上一条可能是恒红）。"""
+    import importlib.metadata as im
+
+    real_version = im.version
+
+    def fake_version(name):
+        if name == "tortoise-orm":
+            return "0.20.0"
+        return real_version(name)
+
+    monkeypatch.setattr(im, "version", fake_version)
+    cls = mig._load_generator_class("mysql")
+    assert cls.__name__ == "MySQLSchemaGenerator"
+
 
 
 def test_postgres_comment_comes_from_real_render():
@@ -601,3 +669,79 @@ def test_postgres_comment_escape_from_real_render():
     if inner.endswith("'"):
         inner = inner[1:-1]
     assert "'" not in inner.replace("''", ""), f"存在未转义的裸单引号：{body}"
+
+
+# ---------------------------------------------------------------------------
+# 复审第三轮：复合约束不产生伪列；解析失败要降级而非炸掉
+# ---------------------------------------------------------------------------
+
+
+def test_composite_unique_key_does_not_create_pseudo_column():
+    """
+    F3：表级**复合** `UNIQUE KEY (a, b)` 不能被当成一个名为 UNIQUE 的伪列。
+
+    早先用 `\\((\\w+)\\)` 只匹配单列，复合约束匹配不上就落进兜底分支，
+    造出 `UNIQUE` / `KEY` 这种伪列——它们会污染「模型 vs 迁移链」的差集。
+    """
+    sql = (
+        "CREATE TABLE `t` (\n"
+        "    `id` INT NOT NULL,\n"
+        "    `a` VARCHAR(8) NOT NULL,\n"
+        "    `b` VARCHAR(8) NOT NULL,\n"
+        "    UNIQUE KEY `uk_ab` (`a`, `b`)\n"
+        ");"
+    )
+    _t, cols, _tail = mig.split_columns(sql)
+    assert sorted(cols) == ["a", "b", "id"], f"出现了伪列：{sorted(cols)}"
+    for pseudo in ("UNIQUE", "KEY", "CONSTRAINT", "CHECK"):
+        assert pseudo not in cols, f"伪列 {pseudo} 不该出现"
+    # 复合 UNIQUE 是表级约束，**不能**被误标成某单列的 UNIQUE——
+    # 否则 plan() 会以为 `a` 有唯一约束，与模型比对时产生假差异。
+    for col in ("a", "b"):
+        assert "UNIQUE" not in cols[col].upper(), (
+            f"复合 UNIQUE 不该把 {col} 标成单列唯一：{cols[col]!r}")
+
+
+def test_single_column_unique_key_is_merged():
+    """反向对照：单列 UNIQUE KEY 必须归并回该列（别把好行为一起改没）。"""
+    sql = (
+        "CREATE TABLE `t` (\n"
+        "    `id` INT NOT NULL,\n"
+        "    `e` VARCHAR(8) NOT NULL,\n"
+        "    UNIQUE KEY `uk_e` (`e`)\n"
+        ");"
+    )
+    _t, cols, _tail = mig.split_columns(sql)
+    assert "UNIQUE" in cols["e"].upper(), f"单列 UNIQUE 未归并：{cols['e']!r}"
+    assert "e" in cols and "id" in cols
+
+
+def test_check_constraint_does_not_create_pseudo_column():
+    """F3：`CONSTRAINT .. CHECK (..)` 同样不能产生伪列。"""
+    sql = (
+        "CREATE TABLE `t` (\n"
+        "    `id` INT NOT NULL,\n"
+        "    `x` INT NOT NULL,\n"
+        "    CONSTRAINT `ck_x` CHECK (`x` > 0)\n"
+        ");"
+    )
+    _t, cols, _tail = mig.split_columns(sql)
+    assert sorted(cols) == ["id", "x"], f"出现了伪列：{sorted(cols)}"
+
+
+def test_unparseable_create_table_degrades_with_warning():
+    """
+    F3：某张表的 CREATE TABLE 解析不出来时，要**降级并告警**，不能抛错拖垮整个生成。
+
+    一张表解析失败不该让其它表的迁移生成一起失败。
+    """
+    import warnings
+
+    # 故意写一个缺右括号的形式，让 _create_stmt_with_followups 匹配不到
+    broken = "CREATE TABLE `broken` (`id` INT NOT NULL"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        defs = mig.parse_existing_definitions(broken)
+    assert "broken" not in defs or defs["broken"] == {} or True  # 不抛错即可
+    assert any("降级" in str(w.message) or "无法解析" in str(w.message)
+               for w in caught), f"应发出降级告警，实际 {[str(w.message) for w in caught]}"

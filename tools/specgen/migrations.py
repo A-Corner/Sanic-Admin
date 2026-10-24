@@ -285,15 +285,32 @@ def parse_existing_definitions(sql_text: str) -> Dict[str, Dict[str, str]]:
 
     tables: Dict[str, Dict[str, str]] = {}
     # CREATE TABLE [IF NOT EXISTS] <q>name<q> ( <body> ) ... ;
-    for m in re.finditer(
-        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?(\w+)[`\"]?\s*\((.*?)\n\s*\)",
-        sql_text,
-        re.S | re.I,
-    ):
-        table, body = m.group(1), m.group(2)
+    # 先用一个**宽松**的表名扫描找出所有表，再逐表尝试完整解析：
+    # 外层用严格正则过滤的话，写法不合（例如单行 `CREATE TABLE t (id INT)`，
+    # 没有 `\n )`）的表会被**静默跳过**——比降级告警更糟，因为完全无声。
+    found = {
+        m.group(1)
+        for m in re.finditer(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?(\w+)[`\"]?",
+            sql_text, re.I)
+    }
+    for table in sorted(found):
         # 复用 split_columns 的解析（含表级 FK/UNIQUE 归并与 PG COMMENT ON 归并），
         # 保证「历史迁移里读到的定义」与「模型渲染的定义」用同一套口径解析。
         full = _create_stmt_with_followups(sql_text, table)
+        if not full:
+            # 严格正则匹配不到（例如单行写法）。这里**降级**：只记录该表存在、
+            # 跳过列级解析，而不是让 split_columns 抛 MigrationPlanError 把整个
+            # 迁移生成打断——一张表解析不出来不该拖垮其它表。但必须说清后果。
+            tables.setdefault(table, {})
+            import warnings
+
+            warnings.warn(
+                f"迁移链里表 {table} 的 CREATE TABLE 无法解析出列定义，"
+                f"已降级为「只记录表存在」。该表的列变更将无法自动检测，"
+                f"请人工核对。源 SQL 片段：{sql_text[:120]!r}",
+                RuntimeWarning, stacklevel=2)
+            continue
         _tname, cols, _tail = split_columns(full)
         tables.setdefault(table, {}).update(cols)
     # ALTER TABLE <q>t<q> ADD [COLUMN] <q>c<q> <定义>
@@ -447,18 +464,24 @@ def split_columns(create_sql: str) -> Tuple[str, Dict[str, str], str]:
             current = None
             continue
 
+        # 表级唯一约束：可能是复合的 `(a, b)`。单列才归并回列；复合约束不产生列。
         uq = re.match(
-            r"(?:UNIQUE\s+KEY\s+[`\"]?\w+[`\"]?|UNIQUE)\s*\(\s*[`\"]?(\w+)[`\"]?\s*\)",
+            r"(?:UNIQUE\s+KEY\s+[`\"]?\w+[`\"]?|UNIQUE|CONSTRAINT\s+[`\"]?\w+[`\"]?\s+UNIQUE)"
+            r"\s*\(([^)]*)\)",
             stripped, re.I,
         )
         if uq:
-            col = uq.group(1)
-            if col in cols and "UNIQUE" not in cols[col].upper():
-                cols[col] += " UNIQUE"
+            names = [x.strip().strip("`\"") for x in uq.group(1).split(",") if x.strip()]
+            if len(names) == 1 and names[0] in cols and "UNIQUE" not in cols[names[0]].upper():
+                cols[names[0]] += " UNIQUE"
             current = None
             continue
 
-        if stripped.upper().startswith(("PRIMARY KEY", "KEY ", "FOREIGN KEY", "INDEX")):
+        # 其余表级约束一律跳过：不能落进「列定义」分支，否则会造出名为
+        # UNIQUE / KEY / CONSTRAINT / CHECK 的伪列。
+        if stripped.upper().startswith((
+                "PRIMARY KEY", "UNIQUE", "KEY ", "FOREIGN KEY", "INDEX",
+                "CONSTRAINT", "CHECK", "FULLTEXT", "SPATIAL")):
             current = None
             continue
 
