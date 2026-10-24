@@ -39,6 +39,8 @@ Python 版本：**3.10 – 3.12**（CI 在这三个版本上运行）。
 
 > **Docker 路径已真机跑通（无任何运行时补丁）。** 2026-10-22 在一台真实的 Linux Docker 宿主机上从仓库源码直接构建并验收：`/health` 返回 200、管理员经 HTTP 登录成功、`/amis/login.html` 返回 200、容器日志 `[降级]` 计数为 0、去掉 `JWT_PRIVATE_KEY` 后容器以退出码 1 重启（fail-closed 生效）。构建用时约 49 分钟——绝大部分耗在受限网络的 apt 与 pip 下载上（见下面的换源说明），不是应用本身的问题。镜像以非 root 用户运行，内置 `libmagic`，**不含任何密钥**——所有密钥在运行时由 `.env` 注入。
 >
+> **注意**：上述 `/amis/login.html` 200 只验证了页面可达性，**未**验证控制台的功能可用性；浏览器端功能验收见 `scripts/amis_e2e_check.py`。
+>
 > `Dockerfile`、`docker-compose.yml`、`.env.example`、`.dockerignore` 都在本仓库中。GitHub Actions（`.github/workflows/docker.yml`）为该路径提供持续回归。
 
 ```bash
