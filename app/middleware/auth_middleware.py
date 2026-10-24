@@ -17,13 +17,14 @@ async def authenticate_request(request: Request) -> None:
     认证失败不中断请求，由视图函数决定如何处理。
     """
     session_id = None
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Bearer '):
-        session_id = auth_header.split('Bearer ', 1)[1]
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        session_id = auth_header.split("Bearer ", 1)[1]
 
     if not session_id and request.cookies:
         # Cookie 名以会话模型实际下发的为准（Session.encode 使用 cookie_name）
         from app.models import AuthenticationSession
+
         session_id = request.cookies.get(AuthenticationSession.cookie_name)
 
     if not session_id:

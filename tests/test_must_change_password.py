@@ -26,9 +26,7 @@ NEW_PASSWORD = "NewSecurePass456!"
 
 async def _login(client, email=ADMIN_EMAIL, password=ADMIN_PASSWORD):
     """登录并返回响应（CSRF token 已由响应头/cookie 下发，随 client cookie jar 自动携带）。"""
-    response = await client.post(
-        "/auth/login", json={"email": email, "password": password}
-    )
+    response = await client.post("/auth/login", json={"email": email, "password": password})
     return response
 
 
@@ -45,8 +43,11 @@ def _csrf_header(client) -> dict:
 def test_account_model_defaults_to_false():
     """模型默认值：普通构造 must_change_password=False。"""
     account = Account(
-        username="default_check", email="default.check@test.local",
-        verified=True, disabled=False, is_admin=False,
+        username="default_check",
+        email="default.check@test.local",
+        verified=True,
+        disabled=False,
+        is_admin=False,
     )
     assert account.must_change_password is False
 
@@ -64,9 +65,7 @@ def test_create_initial_admin_source_sets_flag():
     from app.auth import authentication
 
     source = inspect.getsource(authentication.create_initial_admin_account)
-    assert "must_change_password=True" in source, (
-        "create_initial_admin_account 必须显式置 must_change_password=True"
-    )
+    assert "must_change_password=True" in source, "create_initial_admin_account 必须显式置 must_change_password=True"
 
 
 async def test_flagged_session_is_blocked_on_api(client):
@@ -81,12 +80,9 @@ async def test_flagged_session_is_blocked_on_api(client):
 
     await _A.filter(email=ADMIN_EMAIL).update(must_change_password=True)
     await _login(client)
-    for path in ("/api/v1/roles", "/api/v1/accounts", "/api/v1/settings",
-                 "/api/v1/files", "/api/database/query-plan"):
+    for path in ("/api/v1/roles", "/api/v1/accounts", "/api/v1/settings", "/api/v1/files", "/api/database/query-plan"):
         response = await client.get(path)
-        assert response.status_code == 403, (
-            f"GET {path} 返回 {response.status_code}，应为 403"
-        )
+        assert response.status_code == 403, f"GET {path} 返回 {response.status_code}，应为 403"
         body = response.json()
         assert body["error"] == "PASSWORD_CHANGE_REQUIRED", body
 
@@ -110,7 +106,8 @@ async def test_whitelisted_paths_not_blocked(client):
 
     # change-password 白名单：参数校验失败（缺 new_password）→ 400，而非 403
     change = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
+        "/auth/change-password",
+        headers=_csrf_header(client),
         json={"current_password": ADMIN_PASSWORD},
     )
     assert change.status_code == 400, (change.status_code, change.text)
@@ -128,18 +125,16 @@ async def test_change_password_success_clears_flag_and_unblocks(client):
     await _login(client)
 
     wrong_current = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
-        json={"current_password": "WrongCurrent123!",
-              "new_password": NEW_PASSWORD,
-              "confirm_password": NEW_PASSWORD},
+        "/auth/change-password",
+        headers=_csrf_header(client),
+        json={"current_password": "WrongCurrent123!", "new_password": NEW_PASSWORD, "confirm_password": NEW_PASSWORD},
     )
     assert wrong_current.status_code in (400, 401), wrong_current.status_code
 
     response = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
-        json={"current_password": ADMIN_PASSWORD,
-              "new_password": NEW_PASSWORD,
-              "confirm_password": NEW_PASSWORD},
+        "/auth/change-password",
+        headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD, "confirm_password": NEW_PASSWORD},
     )
     assert response.status_code == 200, response.text
     assert response.json()["data"]["must_change_password"] is False
@@ -152,9 +147,7 @@ async def test_change_password_success_clears_flag_and_unblocks(client):
     roles = await client.get("/api/v1/roles")
     assert roles.status_code == 200, f"改密后 API 仍被拦：{roles.status_code}"
 
-    old_pw = await client.post(
-        "/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
-    )
+    old_pw = await client.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
     assert old_pw.status_code == 401, "旧口令应已失效"
 
     # 改密前建立的其它会话必须已作废：改密成功后本 client 的会话是
@@ -183,10 +176,9 @@ async def test_change_password_invalidates_other_sessions(client):
 
     # 会话二（cookie jar 中的当前会话）执行改密
     response = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
-        json={"current_password": ADMIN_PASSWORD,
-              "new_password": NEW_PASSWORD,
-              "confirm_password": NEW_PASSWORD},
+        "/auth/change-password",
+        headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD, "confirm_password": NEW_PASSWORD},
     )
     assert response.status_code == 200, response.text
 
@@ -208,10 +200,9 @@ async def test_change_password_rejects_mismatched_confirm(client):
     """confirm_password 与 new_password 不一致 → 400。"""
     await _login(client)
     response = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
-        json={"current_password": ADMIN_PASSWORD,
-              "new_password": NEW_PASSWORD,
-              "confirm_password": "Different123!"},
+        "/auth/change-password",
+        headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD, "confirm_password": "Different123!"},
     )
     assert response.status_code == 400, response.text
 
@@ -220,10 +211,9 @@ async def test_change_password_rejects_same_as_current(client):
     """新口令等于当前口令 → 400。"""
     await _login(client)
     response = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
-        json={"current_password": ADMIN_PASSWORD,
-              "new_password": ADMIN_PASSWORD,
-              "confirm_password": ADMIN_PASSWORD},
+        "/auth/change-password",
+        headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": ADMIN_PASSWORD, "confirm_password": ADMIN_PASSWORD},
     )
     assert response.status_code == 400, response.text
 
@@ -232,10 +222,9 @@ async def test_change_password_requires_minimum_length(client):
     """新口令低于 8 位下限 → 400（与注册/登录同一长度策略）。"""
     await _login(client)
     response = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
-        json={"current_password": ADMIN_PASSWORD,
-              "new_password": "short1!",
-              "confirm_password": "short1!"},
+        "/auth/change-password",
+        headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": "short1!", "confirm_password": "short1!"},
     )
     assert response.status_code == 400, response.text
 
@@ -244,9 +233,7 @@ async def test_change_password_requires_session(client):
     """未登录调用 change-password → 401（无会话）。"""
     response = await client.post(
         "/auth/change-password",
-        json={"current_password": ADMIN_PASSWORD,
-              "new_password": NEW_PASSWORD,
-              "confirm_password": NEW_PASSWORD},
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD, "confirm_password": NEW_PASSWORD},
     )
     assert response.status_code in (401, 403), response.status_code
 
@@ -269,7 +256,8 @@ async def test_blocked_paths_cover_post_trailing_slash_query_associated(client):
     await _login(client)
 
     post = await client.post(
-        "/api/v1/roles", headers=_csrf_header(client),
+        "/api/v1/roles",
+        headers=_csrf_header(client),
         json={"name": "mcp_probe_role", "description": "probe", "permissions": {}},
     )
     assert post.status_code == 403, f"POST 被漏拦：{post.status_code}"
@@ -283,47 +271,39 @@ async def test_blocked_paths_cover_post_trailing_slash_query_associated(client):
 
     associated = await client.post("/auth/associated", headers=_csrf_header(client))
     assert associated.status_code == 403, (
-        f"/auth/associated 被漏拦（fail-closed 不得漏会话信息端点）："
-        f"{associated.status_code}"
+        f"/auth/associated 被漏拦（fail-closed 不得漏会话信息端点）：{associated.status_code}"
     )
 
 
 async def test_normal_users_not_affected(client):
     """普通账户（非初始管理员）must_change_password=False，API 正常可用。"""
     other = Account(
-        username="mcp_normal", email="mcp.normal@test.local",
-        verified=True, disabled=False, is_admin=True,
+        username="mcp_normal",
+        email="mcp.normal@test.local",
+        verified=True,
+        disabled=False,
+        is_admin=True,
     )
     other.set_password("OtherPass123!")
     await other.save()
 
-    response = await client.post(
-        "/auth/login", json={"email": "mcp.normal@test.local",
-                             "password": "OtherPass123!"}
-    )
+    response = await client.post("/auth/login", json={"email": "mcp.normal@test.local", "password": "OtherPass123!"})
     assert response.status_code == 200
     assert response.json()["data"]["must_change_password"] is False
 
     roles = await client.get("/api/v1/roles")
-    assert roles.status_code == 200, (
-        f"普通账户（标志 False）不应被强制改密拦截：{roles.status_code}"
-    )
+    assert roles.status_code == 200, f"普通账户（标志 False）不应被强制改密拦截：{roles.status_code}"
     assert "PASSWORD_CHANGE_REQUIRED" not in roles.text
 
     # 反向：普通账户标志被置 True 时同样被拦（拦截不看 is_admin）
     from app.models import Account as _A
 
     await _A.filter(email="mcp.normal@test.local").update(must_change_password=True)
-    relogin = await client.post(
-        "/auth/login", json={"email": "mcp.normal@test.local",
-                             "password": "OtherPass123!"}
-    )
+    relogin = await client.post("/auth/login", json={"email": "mcp.normal@test.local", "password": "OtherPass123!"})
     assert relogin.status_code == 200
     blocked = await client.get("/api/v1/roles")
     assert blocked.status_code == 403
-    assert blocked.json()["error"] == "PASSWORD_CHANGE_REQUIRED", (
-        "普通用户标志 True 时也必须被拦，且 error 字段正确"
-    )
+    assert blocked.json()["error"] == "PASSWORD_CHANGE_REQUIRED", "普通用户标志 True 时也必须被拦，且 error 字段正确"
 
 
 async def _login_with_2fa(client, monkeypatch):
@@ -366,9 +346,7 @@ async def test_flagged_user_can_complete_two_factor(client, monkeypatch):
     assert pending.status_code == 403, pending.status_code
     assert pending.json()["error"] == "PASSWORD_CHANGE_REQUIRED"
 
-    verify = await client.post(
-        "/auth/validate-2fa", headers=_csrf_header(client), json={"code": code}
-    )
+    verify = await client.post("/auth/validate-2fa", headers=_csrf_header(client), json={"code": code})
     assert verify.status_code == 200, (verify.status_code, verify.text)
     assert verify.json()["data"]["must_change_password"] is True
 
@@ -378,10 +356,9 @@ async def test_flagged_user_can_complete_two_factor(client, monkeypatch):
     assert blocked.json()["error"] == "PASSWORD_CHANGE_REQUIRED"
 
     change = await client.post(
-        "/auth/change-password", headers=_csrf_header(client),
-        json={"current_password": ADMIN_PASSWORD,
-              "new_password": NEW_PASSWORD,
-              "confirm_password": NEW_PASSWORD},
+        "/auth/change-password",
+        headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD, "confirm_password": NEW_PASSWORD},
     )
     assert change.status_code == 200, change.text
 
@@ -418,10 +395,7 @@ async def test_password_check_runs_before_api_blueprint_middleware(app):
     for route in routes:
         chain = list(route.extra.request_middleware)
         auth_idx = [i for i, m in enumerate(chain) if isinstance(m.func, AuthMiddleware)]
-        api_idx = [
-            i for i, m in enumerate(chain)
-            if getattr(m.func, "__name__", "") == "_require_api_authentication"
-        ]
+        api_idx = [i for i, m in enumerate(chain) if getattr(m.func, "__name__", "") == "_require_api_authentication"]
         assert auth_idx, route.path  # 应用级中间件对所有路由生效
         assert chain[auth_idx[0]].priority == AUTH_MIDDLEWARE_PRIORITY
         if not api_idx:  # 部分路由不在 api_bp 组内，无蓝图鉴权中间件
@@ -440,14 +414,10 @@ async def test_change_password_requires_completed_two_factor(client, monkeypatch
     login = await _login_with_2fa(client, monkeypatch)
     assert login.status_code == 200, login.text
     code = login.json()["data"]["code"]
-    payload = {"current_password": ADMIN_PASSWORD,
-               "new_password": NEW_PASSWORD,
-               "confirm_password": NEW_PASSWORD}
+    payload = {"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD, "confirm_password": NEW_PASSWORD}
 
     # 反向：2FA 未完成 → 403 TWO_FACTOR_REQUIRED，口令与标志均不变
-    denied = await client.post(
-        "/auth/change-password", headers=_csrf_header(client), json=payload
-    )
+    denied = await client.post("/auth/change-password", headers=_csrf_header(client), json=payload)
     assert denied.status_code == 403, (denied.status_code, denied.text)
     assert denied.json()["error"] == "TWO_FACTOR_REQUIRED"
     account = await _A.get(email=ADMIN_EMAIL)
@@ -455,13 +425,9 @@ async def test_change_password_requires_completed_two_factor(client, monkeypatch
     assert account.verify_password(ADMIN_PASSWORD)
 
     # 正向：完成 2FA 后同一请求成功
-    verify = await client.post(
-        "/auth/validate-2fa", headers=_csrf_header(client), json={"code": code}
-    )
+    verify = await client.post("/auth/validate-2fa", headers=_csrf_header(client), json={"code": code})
     assert verify.status_code == 200, verify.text
-    ok = await client.post(
-        "/auth/change-password", headers=_csrf_header(client), json=payload
-    )
+    ok = await client.post("/auth/change-password", headers=_csrf_header(client), json=payload)
     assert ok.status_code == 200, (ok.status_code, ok.text)
     account = await _A.get(email=ADMIN_EMAIL)
     assert account.must_change_password is False

@@ -37,7 +37,7 @@ LEGACY_DEFAULT_ADMIN_PASSWORDS = ("SAdmin@123",)
 ALTER_SQL = {
     "sqlite": "ALTER TABLE account ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT 0;",
     "mysql": "ALTER TABLE account ADD COLUMN must_change_password BOOL NOT NULL DEFAULT FALSE;",
-    "postgres": 'ALTER TABLE account ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE;',
+    "postgres": "ALTER TABLE account ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE;",
 }
 
 
