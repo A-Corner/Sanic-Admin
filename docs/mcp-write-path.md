@@ -46,7 +46,7 @@ AI 通过 MCP 提交规格变更，系统产出：
 }
 ```
 
-- `resource` 必须匹配 `^[a-z][a-z0-9_]*$`（复用只读层的 `_guard_resource_name`）
+- `resource` 必须匹配 `^[a-z][a-z0-9_]{0,40}$`（`_guard_resource_name`；上限 41 字符）
 - `spec_yaml` 上限 64 KB（复用 `_guard_spec_text`，含 YAML 锚点/别名与嵌套深度防护）
 - `note` 上限 200 字符，仅进 commit message 与返回值，**不进任何 shell 命令**
 
@@ -90,7 +90,7 @@ AI 通过 MCP 提交规格变更，系统产出：
 
 | 层 | 内容 | 谁控制 |
 |---|---|---|
-| MCP 工具层 | 调用方以绑定账户身份经过与 HTTP API 相同的鉴权栈；`propose_spec_change` 要求 `spec:write` 权限点 | 项目 RBAC |
+| MCP 工具层 | **未实现**。设计上是「调用方以绑定账户身份经过与 HTTP API 相同的鉴权栈，`spec:write` 权限点」，但 MCP 是 stdio 本地进程、没有账户体系，当前实际的控制手段是 `--allow-write` 进程级开关（见 §9.2） | 项目 RBAC（待实现） |
 | 操作系统层 | 工具进程以**运行它的用户**身份执行 git 命令，不额外提权、不调用 `sudo` | 部署方 |
 
 ### 3.2 令牌范围
