@@ -199,8 +199,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 显式给 name：不写的话 job 名会把 matrix 全部字段拼进去，长到无法阅读
         include:
-          - dialect: mysql
+          - name: mysql
+            dialect: mysql
             image: mysql:8.0
             port: 3306
             fresh_url: mysql://root:root@127.0.0.1:3306/sanic_a
@@ -208,7 +210,8 @@ jobs:
             health: >-
               --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
               --health-interval=10s --health-timeout=5s --health-retries=12
-          - dialect: postgres
+          - name: postgres
+            dialect: postgres
             image: postgres:16
             port: 5432
             fresh_url: postgres://postgres:root@127.0.0.1:5432/sanic_a
