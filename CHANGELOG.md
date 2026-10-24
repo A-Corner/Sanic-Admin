@@ -27,6 +27,9 @@ CRUD API、权限、AMIS 页面、测试与三方言迁移；AI 通过 MCP 层�
   NOT NULL 无 DEFAULT 一律拒绝并要求手写。
 - **MCP 只读层**（#15）——`tools/mcp_server`，五个工具（列规格、看详情、校验、预览 diff、
   check），stdio 传输，**全程不写仓库**。含输入上限、路径穿越双重防护、统一脱敏。
+- **MCP 写入路径（原型，默认关闭）**（#22）——`propose_spec_change` / `list_proposals` /
+  `discard_proposal` 三个工具，需 `--allow-write` 才注册。隔离 clone 里写规格、commit、
+  fetch 回 `proposal/` 分支，**不实现 `apply_proposal`**（合并必须由人做）。
 - **浏览器 E2E 扩展到 22 条断言**（#21）——新增工单模块用例，含 API 二次核验。
 - **演示文档** `docs/demo/ai-module-in-10-minutes.md`——从写规格到 CI 绿的可复现记录。
 
@@ -53,7 +56,6 @@ CRUD API、权限、AMIS 页面、测试与三方言迁移；AI 通过 MCP 层�
 
 ### Known limitations
 
-- **MCP 写入路径未实现**——只有只读层；改规格仍需人工执行 `generate` / `migrate` 并开 PR。
 - **`discard` 只按前缀判断**——软删除的唯一约束仍占位，删了再建同值会冲突。
 - **`datetime` 不带时区**——存库为带时区值，客户端提交裸时间按服务端时区解释。
 - **AMIS 仍是 3.4.0**——6.x 升级评估在 v0.4 之后。
