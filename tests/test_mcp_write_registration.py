@@ -108,8 +108,13 @@ def test_main_parses_allow_write_flag(monkeypatch) -> None:
 
 
 def _tool_names(server) -> set:
-    """从 MCP server 对象取已注册的工具名，兼容几种常见存储位置。"""
-    # 常见形态 1：server._tool_manager._tools（dict）
+    """
+    从 MCP server 对象取已注册的工具名，兼容几种常见存储位置。
+
+    **取不到就失败，不跳过**——``pytest.skip`` 会让「没取到数据」显示成
+    「这轮不用测」，与 AGENTS.md §3.6 的纪律直接冲突（跑了 ≠ 通过 ≠ 有效）。
+    SDK 升级导致结构变化时，这里必须红，让人来适配，而不是静默通过。
+    """
     for attr_path in (
         ("_tool_manager", "_tools"),
         ("_tools",),
@@ -131,7 +136,10 @@ def _tool_names(server) -> set:
                     name = getattr(item, "name", None) or str(item)
                     out.add(name)
                 return out
-    pytest.skip("无法从 SDK 对象取出工具列表（SDK 版本差异）")
+    raise AssertionError(
+        "无法从 MCP SDK 对象取出工具列表——SDK 结构可能变了，请更新本函数。"
+        f"server 的公开属性：{sorted(a for a in dir(server) if not a.startswith('__'))}"
+    )
 
 
 # ---------------------------------------------------------------------------
