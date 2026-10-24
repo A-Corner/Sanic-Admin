@@ -666,3 +666,207 @@ def test_context_initial_used_only_by_initial_admin_creation():
     assert len(occurrences) == 1, (
         f'context="initial" 应只出现 1 处（create_initial_admin_account），'
         f"实际 {len(occurrences)} 处: {occurrences}")
+
+
+async def test_audit_write_failure_does_not_break_request(client, monkeypatch, caplog):
+    """写审计失败时主请求必须照常成功，且留下 warning（审计是旁路，不是主路径）。"""
+    import logging
+
+    from app.models import OperationLog
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("模拟审计表不可写")
+
+    monkeypatch.setattr(OperationLog, "create", _boom, raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        response = await _login(client)
+
+    assert response.status_code == 200, (
+        f"审计写失败不应影响登录，实际 {response.status_code}: {response.text[:200]}")
+    assert any("审计" in r.message for r in caplog.records if r.levelno >= logging.WARNING), (
+        "写审计失败时应留下 warning 日志，实际记录: "
+        + repr([r.message for r in caplog.records])[:300])
+
+
+async def test_audit_contains_no_token_or_password(client):
+    """审计记录的字段里不得出现 token、口令、验证码。"""
+    login_resp = await _login(client)
+    token = login_resp.headers.get("authorization")
+    assert token
+
+    rows = await _audit_rows()
+    assert rows, "应有审计记录"
+    blob = " ".join(
+        str(v) for row in rows
+        for v in (row.detail, row.operation, row.account_name, row.user_agent,
+                  row.ip_address, row.status)
+    )
+    assert token not in blob, "审计里出现了会话 token"
+    assert ADMIN_PASSWORD not in blob, "审计里出现了口令"
+
+
+async def test_change_password_success_clears_account_counter(client, app):
+    """改密成功后该账户的失败计数被清零（可再次尝试，不必等窗口过期）。"""
+    from app.config import settings
+    from app.auth.rate_limit import ACCOUNT_KEY_PREFIX
+    from app.models import Account
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+
+    cache = app.ctx.cache
+    key = f"{ACCOUNT_KEY_PREFIX}:{ADMIN_EMAIL.strip().lower()}"
+
+    # 先积累一些失败
+    for _ in range(3):
+        await client.post(
+            "/auth/change-password", headers=_csrf_header(client),
+            json={"current_password": "WrongOne!1", "new_password": NEW_PASSWORD,
+                  "confirm_password": NEW_PASSWORD})
+    assert cache.get(key), "应先有失败计数"
+
+    ok = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert ok.status_code == 200, ok.text
+    assert not cache.get(key), f"改密成功后账户计数应被清零，实际 {cache.get(key)!r}"
+
+
+async def test_change_password_correct_password_still_429_when_blocked(client, app):
+    """即使口令正确，只要账户已达限流阈值仍返回 429（限流优先于校验）。"""
+    from app.auth.rate_limit import ACCOUNT_KEY_PREFIX
+    from app.models import Account
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+
+    cache = app.ctx.cache
+    key = f"{ACCOUNT_KEY_PREFIX}:{ADMIN_EMAIL.strip().lower()}"
+    # 直接把计数灌到超阈值（模拟此前已被打满）
+    import time as _t
+
+    cache.set(key, [_t.time() for _ in range(20)], timeout=900)
+
+    resp = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert resp.status_code == 429, (
+        f"已达限流阈值时应 429（即使口令正确），实际 {resp.status_code}: {resp.text[:150]}")
+
+
+async def test_banlist_is_case_insensitive():
+    """拒绝清单比较不区分大小写：sAdmin@123 也要被拒（正反例）。"""
+    from app.auth.authentication import validate_not_banlisted
+
+    class _A:
+        email = "someone@example.com"
+
+    assert validate_not_banlisted("SAdmin@123", _A()) is not None
+    assert validate_not_banlisted("sadmin@123", _A()) is not None, "小写变体应同样被拒"
+    assert validate_not_banlisted("SaDmIn@123", _A()) is not None, "混合大小写应同样被拒"
+    # 反例：非清单值应放行
+    assert validate_not_banlisted("TotallyFine#2026", _A()) is None
+
+
+def test_strength_enforced_on_all_entry_points():
+    """三个入口（注册 / 重置口令 / 管理员建账户）都经 set_password，弱口令一律被拒。"""
+    from app.models.account import Account
+
+    weak_values = ["alllowercase", "12345678", "SAdmin@123"]
+    for weak in weak_values:
+        account = Account(email="probe2@example.com", username="probe2")
+        with pytest.raises(Exception):
+            # 注册 / reset_password / 管理员建账户 最终都调 set_password
+            account.set_password(weak)
+
+
+async def test_change_password_429_is_audited(client, app):
+    """改密被限流拦截时也要写审计。"""
+    from app.auth.rate_limit import ACCOUNT_KEY_PREFIX
+    from app.models import Account
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+
+    import time as _t
+
+    cache = app.ctx.cache
+    cache.set(f"{ACCOUNT_KEY_PREFIX}:{ADMIN_EMAIL.strip().lower()}",
+              [_t.time() for _ in range(20)], timeout=900)
+
+    before = len(await _audit_rows("change_password_failure"))
+    resp = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert resp.status_code == 429
+    after = await _audit_rows("change_password_failure")
+    assert len(after) > before, "改密被限流时也应写审计"
+
+
+def test_ast_guard_requires_single_call_site_and_constant():
+    """AST 守卫加强：context="initial" 必须只有一处，且值必须是字面量常量。"""
+    import ast
+    from pathlib import Path
+
+    app_dir = Path(__file__).resolve().parent.parent / "app"
+    sites = []
+    for py in app_dir.rglob("*.py"):
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "set_password"):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "context":
+                    continue
+                # 非常量（如变量、表达式）直接判失败：无法静态确认它是不是 "initial"
+                assert isinstance(kw.value, ast.Constant), (
+                    f"{py}: set_password 的 context 必须是字面量常量，"
+                    f"实际是 {type(kw.value).__name__}")
+                if kw.value.value == "initial":
+                    sites.append(str(py.relative_to(app_dir)))
+
+    assert len(sites) == 1, (
+        f'context="initial" 应只有 1 处，实际 {len(sites)} 处: {sites}')
+
+
+async def test_new_session_failure_keeps_password_and_sessions(client, app, monkeypatch):
+    """新会话创建失败时，口令与旧会话都不变（事务回滚）。
+
+    CPL P2-3 的正向对照：把「save 口令 + 建新会话 + 作废旧会话」包进同一个事务后，
+    任一步失败都应回滚——用户不会被留在「口令已改但拿不到新凭据」的状态。
+    """
+    from app.models import Account, AuthenticationSession
+
+    await Account.filter(email=ADMIN_EMAIL).update(must_change_password=True)
+    await _login(client)
+    before = await Account.filter(email=ADMIN_EMAIL).first()
+    old_hash = before.password
+    sessions_before = await AuthenticationSession.filter(
+        deleted=False, disabled=False).count()
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("模拟建会话失败")
+
+    monkeypatch.setattr(AuthenticationSession, "create_from_request", _boom,
+                        raising=False)
+
+    resp = await client.post(
+        "/auth/change-password", headers=_csrf_header(client),
+        json={"current_password": ADMIN_PASSWORD, "new_password": NEW_PASSWORD,
+              "confirm_password": NEW_PASSWORD})
+    assert resp.status_code >= 400, "建会话失败时改密请求应失败"
+
+    after = await Account.filter(email=ADMIN_EMAIL).first()
+    assert after.password == old_hash, "事务回滚后口令不应改变"
+    sessions_after = await AuthenticationSession.filter(
+        deleted=False, disabled=False).count()
+    assert sessions_after == sessions_before, (
+        f"事务回滚后会话数不应变化：{sessions_before} → {sessions_after}")

@@ -47,6 +47,10 @@ def _mask_identity(identity: str) -> str:
     if "@" in text:
         _, _, domain = text.partition("@")
         return f"***@{domain}"
+    # 非邮箱标识：短标识（≤4）只留长度，避免把整个用户名暴露在日志里；
+    # 较长的才保留前 2 位便于人工归因。
+    if len(text) <= 4:
+        return f"***({len(text)})"
     return f"{text[:2]}***({len(text)})"
 
 
@@ -214,7 +218,14 @@ async def on_change_password(request):
     # 当前口令试错限速：复用登录限流器（账户维度独立计数）。
     limiter = LoginRateLimiter.from_request(request)
     identity = account.email or account.username or str(account.id)
-    await limiter.raise_if_blocked(identity, request)
+    try:
+        await limiter.raise_if_blocked(identity, request)
+    except RateLimitExceededError:
+        # 被限流拦下的改密尝试也要留痕，与登录侧保持一致
+        await record_auth_event(
+            request, "change_password_failure", account=account, status="failure",
+            detail=f"限流拦截 identity={_mask_identity(identity)}")
+        raise
 
     current_password = _text_field(get_request_value(request, "current_password"), "当前口令", 128)
     new_password = _text_field(
@@ -253,19 +264,26 @@ async def on_change_password(request):
     # 会让一个账户的正常操作替别人解封。
     await limiter.clear_account_only(identity)
 
-    account.set_password(new_password)
-    account.must_change_password = False
-    await account.save(update_fields=["password", "must_change_password"])
+    # 改密 + 轮换必须是一个原子动作：
+    # 若先 save 口令、再建会话而建会话失败，密码已经变了、旧会话却还有效，
+    # 用户处于「口令已改但拿不到新凭据」的不一致状态。整段放进同一个事务，
+    # 任一步失败都回滚，口令与旧会话都保持原样。
+    from tortoise.transactions import in_transaction
 
-    # 轮换：**先创建新会话，再作废旧会话**。
-    # 顺序不能颠倒——若先作废、再建新会话，而建会话恰好失败（DB 抖动等），
-    # 用户会被登出且拿不到新凭据，等于改密把人锁在门外。
-    new_session = await AuthenticationSession.create_from_request(request, bearer=account)
+    async with in_transaction():
+        account.set_password(new_password)
+        account.must_change_password = False
+        await account.save(update_fields=["password", "must_change_password"])
 
-    # 作废该账户除新会话以外的全部会话（含发起改密的那个）——旧 token 立即失效。
-    await AuthenticationSession.filter(
-        bearer=account, deleted=False, disabled=False
-    ).exclude(id=new_session.id).update(deleted=True)
+        # 先建新会话，再作废旧会话——顺序在事务内也有意义：
+        # 新会话创建失败会直接抛出并回滚，不会留下「用户被登出且无凭据」的状态。
+        new_session = await AuthenticationSession.create_from_request(
+            request, bearer=account)
+
+        # 作废该账户除新会话以外的全部会话（含发起改密的那个）。
+        await AuthenticationSession.filter(
+            bearer=account, deleted=False, disabled=False
+        ).exclude(id=new_session.id).update(deleted=True)
     response = json("密码修改成功", {
         "must_change_password": False,
         "token_rotated": True,

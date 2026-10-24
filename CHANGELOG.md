@@ -21,10 +21,12 @@
   审计不含口令、token 与验证码。
 - **改密的当前口令试错限速**：复用登录限流器，账户维度独立计数，窗口内达阈值 429。
 - **新口令强度**：除长度外要求至少两类字符，且不得为 `SAdmin@123`、当前
-  `INITIAL_ADMIN_PASSWORD` 的值，或与本人邮箱相同（比较不区分大小写）。
+  `INITIAL_ADMIN_PASSWORD` 的值，或与本人邮箱相同（**拒绝清单与邮箱比较均不区分大小写**，
+  `sAdmin@123` 等大小写变体同样被拒）。
   校验收敛到 `Account.set_password`，所有口令入口统一经过它。
-- **初始口令也要求强度**（**breaking**）：`INITIAL_ADMIN_PASSWORD` 若少于两类字符，
-  production 启动即报 `ConfigError`。升级时请确认该值足够强。
+- **初始口令也要求强度**（**breaking**）：`INITIAL_ADMIN_PASSWORD` 若少于两类字符
+  或超过 128 位，**production 启动即报 `ConfigError`**；development/testing 只打 warning。
+  升级到 v0.3.4 前请确认该值足够强。
 
 ## [0.3.3] — 2026-10-24
 
