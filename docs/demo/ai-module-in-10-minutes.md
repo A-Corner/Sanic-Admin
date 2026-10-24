@@ -332,6 +332,43 @@ CI 会跑（`.github/workflows/ci.yml`）：
 
 ---
 
+## 实测：E2E 验收（这一步抓到过一个真实缺陷）
+
+```bash
+python scripts/amis_e2e_check.py \
+    --base-url http://127.0.0.1:22297 \
+    --admin-email SAdmin@Sanic.com \
+    --admin-password '<一次性口令>' \
+    --new-password '<新口令>'
+```
+
+真实输出（节选）：
+
+```
+✅ 工单列表页可打开（生成模块）   [data_rows=0 raw=1]
+✅ 新增工单成功（无 VALIDATION_ERROR）   [seen]
+✅ 新增的工单出现在列表里   [title=e2e-ticket-1792840643297 detail=seen]
+
+=== 22/22 项通过 ===
+✅ AMIS 浏览器 E2E 验收全部通过
+```
+
+**这一步是本流程里最有价值的一环**——第一次跑时 20/22，暴露了生成器的
+一个真实缺陷：
+
+```
+Error: 找不到对应的渲染器
+Path: app/page/crud/dialog/dialog/body/body/form/3/
+{ "name": "due_date", "label": "期望完成日", "required": false }
+```
+
+`_form_field()` 漏了 `date` / `datetime` 分支，生成出没有 `type` 的字段，
+**整个新增/编辑弹窗无法提交**。`customer.birthday` 同样中招。
+
+只测 API 完全覆盖不到——API 本身是对的，坏的是页面 JSON。
+
+**耗时：约 3 分钟**（含起隔离服务、准备测试数据）。
+
 ## 耗时汇总
 
 | 步骤 | 谁做 | 实测耗时 |
@@ -343,11 +380,19 @@ CI 会跑（`.github/workflows/ci.yml`）：
 | 5. `specgen generate` | 人 | 1 s |
 | 6. `specgen migrate` | 人 | 5 s |
 | 7. 本地门禁三条 | 人 | ~20 s |
-| 8. CI | 自动 | 约 5 分钟（GitHub runner 排队 + 三版本 pytest + 两方言 DDL） |
-| 9. 合并 | 人 | — |
+| 8. 浏览器 E2E（22 项） | 人 | ~3 分钟 |
+| 9. CI | 自动 | 约 5 分钟（GitHub runner 排队 + 三版本 pytest + 两方言 DDL） |
+| 10. 合并 | 人 | — |
 
-**机器执行时间合计：约 27 秒。**
-**端到端（含 CI）：约 6 分钟。**
+**机器执行时间合计：约 27 秒（不含 E2E 与 CI）。**
+**端到端（含 E2E 与 CI）：约 10 分钟。**
+
+> **关于「10 分钟」这个标题**：如果一切顺利，从写规格到 CI 绿约 10 分钟。
+> 但本演示实际花得更久——**E2E 第一轮就抓到了一个生成器缺陷**（日期字段缺
+> `type`，弹窗无法提交），修完再跑才 22/22。这是真实情况，不掩饰。
+>
+> 这个缺陷的价值恰恰在于：**它证明了 E2E 这一环不可省**。省掉它，页面会带着
+> 「弹窗打不开」的 bug 上线，而 API 测试、单元测试、CI 全是绿的。
 
 写规格那一步由 AI 完成，实测约 2 分钟（含它读参考规格、生成 YAML、自我校验）。
 **人工介入只有三次**：确认 diff、执行两条命令、点合并。
