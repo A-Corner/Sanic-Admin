@@ -141,7 +141,10 @@ def propose_spec_change(
                            "branch": branch})
             raise GitNotAllowed(f"分支已存在，拒绝覆盖：{branch}")
 
+        # Proposed-by 行：审计时能一眼区分「工具提案」与「人的提交」，
+        # 不依赖 git author 字段（author 可能被 clone 配置覆盖）。
         message = f"proposal: {resource}" + (f" — {note}" if note else "")
+        message += "\n\nProposed-by: MCP propose_spec_change"
 
         def _write(clone_dir: Path) -> None:
             specs = clone_dir / "specs"

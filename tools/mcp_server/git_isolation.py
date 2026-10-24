@@ -52,6 +52,24 @@ PROPOSAL_PREFIX = "proposal/"
 #: 会基于一个未完成的提交。master 才是约定的主线。
 DEFAULT_BASE_REF = "master"
 
+#: 提案提交使用的工具身份。
+#:
+#: 为什么必须显式指定：``_git`` 会设 ``GIT_CONFIG_GLOBAL=/dev/null`` 与
+#: ``GIT_CONFIG_NOSYSTEM=1``（防用户全局 hooksPath 干扰，见 §6），副作用是
+#: **读不到任何用户身份**。本地之所以能过，是因为 git 会拿「用户名+主机名」
+#: 自动推断；CI 容器里连这个推断也不成立，``git commit`` 直接 exit 128。
+#:
+#: 显式署名同时是审计要求：提案的 commit 应当能一眼看出是工具产生的，
+#: 而不是和人的提交混在一起。
+_COMMIT_IDENTITY = (
+    "user.name=sanic-specgen-mcp",
+    "user.email=specgen-mcp@noreply.invalid",
+)
+
+#: 允许通过 `git -c key=value` 前置传入的配置键。
+#: 只放行提交身份；`core.hooksPath`、`alias.*`、`filter.*` 等一律拒绝。
+_ALLOWED_CONFIG_KEYS = frozenset({"user.name", "user.email"})
+
 #: **参数级**白名单：每个子命令只放行明确列出的参数形态。
 #:
 #: 只做子命令白名单不够——`git clone --upload-pack=<恶意命令>` 能在子命令合法的
@@ -105,6 +123,27 @@ def _git(args: Sequence[str], cwd: Path, *, env_extra: Optional[dict] = None) ->
     if not args:
         raise GitNotAllowed("git 调用缺少子命令")
 
+    # 允许**受控的**前置全局选项：仅 `-c key=value`，且 key 必须在允许集合内。
+    # `git -c user.name=... commit` 是给单条命令临时配置的标准写法——我们需要它
+    # 给提案提交署上工具身份（见 _COMMIT_IDENTITY），而不写进任何配置文件。
+    # 只放行白名单里的 key，`-c core.hooksPath=...` 之类的逃逸仍然被拒。
+    prefix: List[str] = []
+    rest = list(args)
+    while len(rest) >= 2 and rest[0] == "-c":
+        kv = rest[1]
+        key = kv.split("=", 1)[0]
+        if key not in _ALLOWED_CONFIG_KEYS:
+            raise GitNotAllowed(
+                f"git -c 只允许以下配置键：{sorted(_ALLOWED_CONFIG_KEYS)}；拒绝 {key!r}"
+            )
+        if "=" not in kv:
+            raise GitNotAllowed(f"git -c 需要 key=value 形式，实际 {kv!r}")
+        prefix.extend(["-c", kv])
+        rest = rest[2:]
+    if not rest:
+        raise GitNotAllowed("git 调用缺少子命令")
+    args = rest
+
     sub = args[0]
     if sub not in ALLOWED_SUBCOMMANDS:
         raise GitNotAllowed(
@@ -157,7 +196,7 @@ def _git(args: Sequence[str], cwd: Path, *, env_extra: Optional[dict] = None) ->
         env.update(env_extra)
 
     result = subprocess.run(
-        ["git", *args],
+        ["git", *prefix, *args],
         cwd=str(cwd),
         env=env,
         capture_output=True,
@@ -304,9 +343,13 @@ def make_proposal(
         _git(["checkout", "-b", branch, base_ref], cwd=clone_dir)
         # 4) 让调用方写文件（规格 YAML 等）
         write_files(clone_dir)
-        # 5) 提交
+        # 5) 提交。**显式带上工具身份**：_git 清空了全局与系统配置，
+        #    拿不到用户身份；CI 容器里连 git 的「用户名+主机名」自动推断
+        #    也不成立，不带 -c 会直接 exit 128。
         _git(["add", "-A"], cwd=clone_dir)
-        _git(["commit", "-m", commit_message], cwd=clone_dir)
+        commit_args = ["-c", _COMMIT_IDENTITY[0], "-c", _COMMIT_IDENTITY[1],
+                       "commit", "-m", commit_message]
+        _git(commit_args, cwd=clone_dir)
         commit = _git(["rev-parse", "HEAD"], cwd=clone_dir).strip()
         diff_stat = _git(["show", "--stat", "--format=", commit], cwd=clone_dir).strip()
         diff = _git(["show", "--format=", commit], cwd=clone_dir)

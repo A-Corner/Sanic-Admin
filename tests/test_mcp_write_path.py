@@ -393,6 +393,117 @@ def test_propose_refuses_existing_branch_before_writing(user_repo: Path) -> None
 
 
 # ---------------------------------------------------------------------------
+# 提交身份：不依赖运行环境的 gitconfig
+# ---------------------------------------------------------------------------
+
+
+def test_commit_works_without_any_user_gitconfig(tmp_path: Path) -> None:
+    """
+    CI 环境没有 user.email/name 时，提案提交仍必须成功。
+
+    这是 #22 三个 Python 版本全部失败的根因：``_git`` 设了
+    ``GIT_CONFIG_GLOBAL=/dev/null`` + ``GIT_CONFIG_NOSYSTEM=1``（为防用户全局
+    hooksPath 干扰），副作用是读不到身份；本地靠 git 的「用户名+主机名」推断
+    侥幸通过，CI 容器里连推断都不成立，``git commit`` 直接 exit 128。
+
+    修法是提交时显式 ``-c user.name/-c user.email``。这条测试把「没有任何
+    身份配置」这件事造出来——注意**测试夹具本身也不能配身份**，否则又会盖住。
+    """
+    repo = tmp_path / "bare-repo"
+    repo.mkdir()
+    # 用完全空的环境建仓：HOME 指向空目录，无全局/系统配置
+    empty_home = tmp_path / "empty-home"
+    empty_home.mkdir()
+    clean = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(empty_home),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+    def _bare_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args], cwd=str(repo), capture_output=True, text=True,
+            env=clean, check=check,
+        )
+
+    _bare_git("init", "-q")
+    (repo / "specs").mkdir()
+    (repo / "specs" / "demo.yaml").write_text("name: demo\n", encoding="utf-8")
+    _bare_git("add", "-A")
+    # 先确认这个环境确实没有身份——否则测试是空的
+    probe = _bare_git("config", "--get", "user.email", check=False)
+    assert probe.returncode != 0, "测试环境意外存在 user.email，无法验证无身份场景"
+    # 用 -c 造初始 commit（模拟工具身份），避免初始提交就失败
+    _bare_git("-c", "user.name=seed", "-c", "user.email=seed@x.invalid",
+              "commit", "-q", "-m", "init")
+    _bare_git("update-ref", "refs/heads/master", "HEAD")
+
+    # 真正的断言：在**没有任何身份**的环境里跑提案。
+    # 必须同时清空进程环境里的 HOME —— make_proposal 内部调 _git 时
+    # 用的是 os.environ，虽然它会设 GIT_CONFIG_GLOBAL=/dev/null，
+    # 但如果 HOME 还指向真实用户目录，git 仍可能从别处读到身份。
+    # 早先版本没清 HOME，导致「去掉 -c user.*」时这条测试照样通过（假测试）。
+    branch = make_branch_name("demo")
+    saved = {k: os.environ.get(k) for k in ("HOME", "GIT_CONFIG_GLOBAL",
+                                            "GIT_CONFIG_NOSYSTEM")}
+    os.environ["HOME"] = str(empty_home)
+    os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+    try:
+        result = make_proposal(
+            repo, branch, "proposal: no identity in env",
+            lambda d: (d / "specs" / "demo.yaml").write_text(
+                "name: demo\nfields:\n  - name: x\n", encoding="utf-8"
+            ),
+        )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    assert result["commit"]
+    assert branch_exists(repo, branch)
+
+
+#: 上面这条测试的**已知局限**，必须写在这里而不是让它显得比实际更强：
+#:
+#: 本机（macOS）上 git 在完全拿不到 user.name/user.email 时会用「系统用户名 +
+#: 主机名」自动推断并成功提交，因此**即使在修复前的实现上，这条测试也可能通过**。
+#: 实测：把 `-c user.*` 去掉后它仍然绿。所以它守不住「CI 无身份」这个场景。
+#:
+#: 真正能守住的是 `test_commit_author_is_tool_identity` —— 它断言 author 必须是
+#: 工具身份，去掉 `-c user.*` 立刻红。CI 上的 128 失败之所以会发生，是因为
+#: 容器里连推断都不成立；那个环境本地无法完全模拟。
+#:
+#: 保留本条的理由：它至少验证「不依赖仓库级 user.* 配置也能提交」，
+#: 且当 git 行为的推断规则改变时会给出信号。**不要把它当作 CI 场景的保护。**
+
+
+def test_commit_author_is_tool_identity(user_repo: Path) -> None:
+    """提案 commit 的 author 必须是工具身份，不是运行它的机器身份。"""
+    from tools.mcp_server.git_isolation import _COMMIT_IDENTITY
+
+    expected_name = _COMMIT_IDENTITY[0].split("=", 1)[1]
+    expected_email = _COMMIT_IDENTITY[1].split("=", 1)[1]
+
+    branch = make_branch_name("demo")
+    make_proposal(
+        user_repo, branch, "proposal: authorship",
+        lambda d: (d / "specs" / "demo.yaml").write_text(
+            "name: demo\nfields:\n  - name: a\n", encoding="utf-8"
+        ),
+    )
+    # %an = author name, %ae = author email
+    actual = _run(user_repo, "log", "-1", "--format=%an|%ae", branch).strip()
+    assert actual == f"{expected_name}|{expected_email}", (
+        f"author 应为工具身份 {expected_name}，实际 {actual}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 环境净化与参数逃逸
 # ---------------------------------------------------------------------------
 
@@ -460,16 +571,32 @@ def test_param_escape_rejected(user_repo: Path, escape: list) -> None:
         _git(escape, cwd=user_repo)
 
 
-def test_param_escape_with_global_option_before_subcommand(user_repo: Path) -> None:
+def test_git_c_only_allows_identity_keys(user_repo: Path) -> None:
     """
-    ``git -c x=y <sub>`` 这种「全局选项在子命令之前」的形态也必须拒。
+    ``git -c key=value <sub>`` 只放行提交身份两个键，其余一律拒绝。
 
-    实现的 `_git` 把 ``args[0]`` 当子命令；``-c`` 不是白名单子命令，直接拒。
-    这条钉死该行为，防止将来有人为了支持 ``-c`` 而放宽。
+    ``-c`` 是受控的例外：提案提交需要 `-c user.name=... -c user.email=...`
+    给工具署名（见 `_COMMIT_IDENTITY`），因为 `_git` 清空了全局/系统配置。
+    但 ``-c core.hooksPath=...``、``-c alias.x=...`` 这类能绕过安全检查的键
+    必须继续拒绝——否则「参数级白名单」就被 ``-c`` 打开了后门。
     """
-    with pytest.raises(GitNotAllowed) as excinfo:
-        _git(["-c", "core.hooksPath=/tmp/evil", "status"], cwd=user_repo)
-    assert "不在允许列表" in str(excinfo.value)
+    # 允许的：user.name / user.email
+    out = _git(["-c", "user.name=probe", "-c", "user.email=p@x.invalid",
+                "rev-parse", "HEAD"], cwd=user_repo)
+    assert len(out.strip()) == 40
+
+    # 拒绝的：其余任何键
+    for kv in (
+        "core.hooksPath=/tmp/evil",
+        "alias.status=!rm -rf /",
+        "filter.x.clean=evil",
+        "credential.helper=evil",
+        "core.pager=evil",
+        "url.x.insteadOf=https://evil/",
+    ):
+        with pytest.raises(GitNotAllowed) as excinfo:
+            _git(["-c", kv, "status"], cwd=user_repo)
+        assert "只允许" in str(excinfo.value), f"{kv} 的拒绝理由不对：{excinfo.value}"
 
 
 # ---------------------------------------------------------------------------
