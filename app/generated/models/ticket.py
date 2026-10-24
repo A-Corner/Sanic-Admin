@@ -31,8 +31,8 @@ class Ticket(BaseModel):
             "priority": self.priority,
             "due_date": self.due_date,
             "customer_id": self.customer_id,
-            "created_at": str(self.created_at),
-            "updated_at": str(self.updated_at),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
         }
 
     def validate(self) -> None:

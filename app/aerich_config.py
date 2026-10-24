@@ -24,6 +24,11 @@ def build_tortoise_config(db_url: str) -> dict:
             "models": {
                 "models": list(MODEL_MODULES),
                 "default_connection": "default",
+                # 与 app.models.init_db 保持一致的时区契约（见那里的注释）。
+                # aerich 生成/应用迁移时也走这份配置，两处必须同值，否则
+                # 「迁移时按 naive、运行时按 aware」会在类型映射上打架。
+                "use_tz": True,
+                "timezone": "UTC",
             },
         },
     }

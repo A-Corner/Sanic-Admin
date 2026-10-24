@@ -47,7 +47,7 @@ class UploadedFile(BaseModel):
             "category": self.category,
             "account_id": self.account_id,
             "download_count": self.download_count,
-            "created_at": str(self.created_at),
+            "created_at": self.created_at.isoformat(),
         }
 
     def validate(self) -> None:

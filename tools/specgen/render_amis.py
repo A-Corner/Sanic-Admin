@@ -76,8 +76,20 @@ def _control(f, specs: Dict[str, ResourceSpec]) -> dict:
         c["valueFormat"] = "YYYY-MM-DD"
     elif f.type == "datetime":
         c["type"] = "input-datetime"
+        # 显示格式：给用户看的本地时间
         c["format"] = "YYYY-MM-DD HH:mm:ss"
-        c["valueFormat"] = "YYYY-MM-DD HH:mm:ss"
+        # **utc: true（v0.4.1）**：AMIS 默认把用户看到的本地时间**原样**提交，
+        # 而服务端按约定把它当作 UTC——上海用户输入 10:00，库里就存 10:00Z，
+        # 实际是北京时间 18:00，差 8 小时；回显时再偏移一次。
+        #
+        # 打开 utc 后 AMIS 会：提交前把本地时间换算成 UTC；回显时把 UTC
+        # 换算回本地时间。属性名见 amis@6.13.0 的 InputDate.d.ts：
+        #     /** 设定是否存储 utc 时间。 */  utc?: boolean;
+        c["utc"] = True
+        # valueFormat 用 ISO 8601 带偏移，与后端契约（docs/timezone.md）一致：
+        # 后端接受 `2026-12-01T10:00:00+08:00` 或 `...Z`，并按 UTC 存储。
+        # 不要用 "YYYY-MM-DD HH:mm:ss"——那是不带时区的裸字符串，正是缺陷来源。
+        c["valueFormat"] = "YYYY-MM-DDTHH:mm:ssZ"
     else:
         # 兜底：新增 FieldType 却忘了在这里加分支时，**直接报错**。
         # 早先漏了 date/datetime，生成出没有 type 的控件，AMIS 报
