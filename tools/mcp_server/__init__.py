@@ -545,7 +545,18 @@ def main(argv: List[str] | None = None) -> int:
         return 2
 
     ALLOW_WRITE = allow_write
+    # 启动时清理过期临时目录。**只在开启写入模式时做**——只读模式根本不会
+    # 产生临时工作区，不需要有删除动作。
     if allow_write:
+        try:
+            from tools.mcp_server.proposal_registry import cleanup_stale_workspaces
+            removed = cleanup_stale_workspaces()
+            if removed:
+                print(f"已清理 {len(removed)} 个过期临时工作区。", file=sys.stderr)
+        except Exception:
+            # 清理是旁路：失败不能阻止服务启动
+            logging.getLogger(__name__).warning(
+                "清理过期临时工作区失败（已忽略）", exc_info=True)
         print("MCP 写入工具已启用（propose_spec_change / list_proposals / "
               "discard_proposal）；仍不会 push 或合并。", file=sys.stderr)
 
