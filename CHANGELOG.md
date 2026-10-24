@@ -23,6 +23,14 @@ ISO 8601 的 `T` 分隔。
   `use_tz=True, timezone="UTC"`。此前依赖 Tortoise 默认值（实测默认行为恰好
   相同），这是把隐含依赖变成显式契约，避免升级 ORM 时行为漂移。
 
+### Fixed
+
+- **AMIS `input-datetime` 的本地时间语义**：AMIS 默认把用户看到的本地时间
+  **原样提交**，而服务端按约定当 UTC——上海用户输入 `10:00`，库里存 `10:00Z`，
+  实际差 8 小时。生成器已给控件加 `utc: true`（提交前本地→UTC、回显时 UTC→本地），
+  `valueFormat` 改为 `YYYY-MM-DDTHH:mm:ssZ`。列表列的 datetime 同样处理。
+  实测：库里 `2026-12-01T02:00:00+00:00` → 上海浏览器显示 `2026-12-01 10:00:00`。
+
 ### Docs
 
 - 新增 [docs/timezone.md](docs/timezone.md)：时间字段的存储、输入、输出约定。
