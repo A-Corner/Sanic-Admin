@@ -193,6 +193,14 @@ class ResourceSpec(_Strict):
     #: (d) 软删除：开启后 DELETE 只置 deleted，列表/详情默认过滤已删除行
     soft_delete: bool = False
 
+    @field_validator("soft_delete", mode="before")
+    @classmethod
+    def _soft_delete_bool(cls, v):
+        # 只接受真正的布尔；YAML 里写成 "yes"/"true" 字符串是笔误，必须报错
+        if not isinstance(v, bool):
+            raise ValueError(f"soft_delete 必须是布尔值 true/false，实际 {v!r}")
+        return v
+
     #: 以下为加载时填充的非规格属性
     source: str = Field(default="", exclude=True)
     digest: str = Field(default="", exclude=True)
@@ -225,6 +233,19 @@ class ResourceSpec(_Strict):
                 if k in seen:
                     raise ValueError(f"字段/关系名重复: {k!r}")
             seen.update({key, col})
+
+        # 排序白名单必须指向真实存在的字段；default 必须落在白名单内
+        if self.sorting.allowed:
+            known = set(seen) | {"id", "created_at", "updated_at"}
+            bad = [f for f in self.sorting.allowed if f not in known]
+            if bad:
+                raise ValueError(f"sorting.allowed 含不存在的字段: {', '.join(bad)}")
+        if self.sorting.default is not None:
+            d = self.sorting.default[1:] if self.sorting.default.startswith("-") else self.sorting.default
+            if self.sorting.allowed and d not in self.sorting.allowed:
+                raise ValueError(f"sorting.default {self.sorting.default!r} 不在 sorting.allowed 内")
+            if d not in (set(seen) | {"id", "created_at", "updated_at"}):
+                raise ValueError(f"sorting.default 指向不存在的字段: {d!r}")
         return self
 
     @property

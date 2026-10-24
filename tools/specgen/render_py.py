@@ -135,7 +135,7 @@ def render_resource(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
     L += [
         "from sanic.request import Request",
         "from sanic.views import HTTPMethodView",
-        "from tortoise.exceptions import IntegrityError",
+        "from tortoise.exceptions import IntegrityError, ValidationError",
     ]
     if search:
         L.append("from tortoise.expressions import Q")
@@ -281,6 +281,8 @@ def render_resource(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
         f"            obj = await {cls}.create(**payload)",
         "        except IntegrityError:",
         '            return _error("字段值已存在", APIError.CONFLICT, 409)',
+        "        except ValidationError as exc:",
+        '            return _error(f"参数验证失败：{exc}", APIError.VALIDATION_ERROR, 400)',
         "        return APIResponse.created(",
         f'            data={res}_info(obj), message=f"创建{{LABEL}}成功", location=f"/api/v1/{spec.plural}/{{obj.id}}"',
         "        )",

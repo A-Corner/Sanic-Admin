@@ -105,6 +105,28 @@ soft_delete: true
 开启后 `DELETE` 只把 `deleted` 置真（保留数据与审计痕迹），列表与详情默认过滤已删除行。
 关闭（默认）时 `DELETE` 走物理删除。
 
+**已知取舍：软删除的行仍占用 `unique` 约束。** 删除后重建同值记录会返回 **409**
+（`unique` 是表级约束，不看 `deleted`）。当前选择保留这一行为而非改成「部分唯一索引」，
+理由：
+
+- 部分唯一索引（`WHERE deleted = false`）在 SQLite 上需手写索引、MySQL 不支持表达式索引，
+  三方言的一致性成本高于收益；
+- 保留约束能防止「删了又建」造成的重复历史行堆积，审计链路更清晰；
+- 需要"删除后复用同值"的场景，可给该字段加时间戳后缀，或由业务侧改用非唯一字段。
+
+若后续确有强需求，可在 v0.4 引入 `partial_unique` 规格开关并配套迁移。
+
+## 迁移 TODO（待 aerich 合并后处理）
+
+customer / order 的生成物在本轮新增了表结构变更，**接入 aerich 时必须生成对应迁移**：
+
+- customer 新增 `birthday`（date）、`onboarded_at`（datetime）两列；
+- `soft_delete: true` 依赖的 `deleted` 列已由 `BaseModel` 提供（无需新增），
+  但**索引/查询计划**需按 `deleted=False` 过滤复查；
+- order 的表结构本轮未变。
+
+PR #10（aerich 迁移链）合并后，由生成器自动产出迁移脚本，而不是手工 ALTER。
+
 ## CI 集成
 
 ```bash

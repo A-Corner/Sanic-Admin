@@ -287,3 +287,81 @@ def test_full_permission_role_still_protected_after_generated_resources():
     assert _role_grants_all_permissions(Role(name="m", permissions=missing)) is False
     partial = dict(legacy_full.permissions, role=["read"])
     assert _role_grants_all_permissions(Role(name="p", permissions=partial)) is False
+
+
+# ---------------------------------------------------------------------------
+# M1：sorting / soft_delete / date 的规格校验
+# ---------------------------------------------------------------------------
+
+
+def _spec_with(**extra):
+    data = {
+        "resource": "thing",
+        "fields": [{"name": "title", "type": "string"}],
+        **extra,
+    }
+    return data
+
+
+def test_sorting_allowed_must_reference_existing_field(tmp_path):
+    """sorting.allowed 里写了不存在的字段 -> 规格错误。"""
+    p = _write(tmp_path, _spec_with(sorting={"allowed": ["title", "nope"]}))
+    with pytest.raises(SpecError) as exc:
+        load_spec(p, "specs")
+    assert any("不存在的字段" in reason for _, reason in exc.value.errors)
+
+
+def test_sorting_default_must_be_in_allowed(tmp_path):
+    """sorting.default 不在 allowed 里 -> 规格错误。"""
+    p = _write(tmp_path, _spec_with(sorting={"default": "title", "allowed": ["id"]}))
+    with pytest.raises(SpecError) as exc:
+        load_spec(p, "specs")
+    assert any("不在 sorting.allowed 内" in reason for _, reason in exc.value.errors)
+
+
+def test_sorting_default_must_reference_existing_field(tmp_path):
+    """sorting.default 指向不存在的字段 -> 规格错误。"""
+    p = _write(tmp_path, _spec_with(sorting={"default": "ghost"}))
+    with pytest.raises(SpecError) as exc:
+        load_spec(p, "specs")
+    assert any("不存在的字段" in reason for _, reason in exc.value.errors)
+
+
+def test_soft_delete_must_be_boolean(tmp_path):
+    """soft_delete 写成字符串（YAML 里 'yes'/'true'）-> 规格错误，不静默当真值。"""
+    p = _write(tmp_path, _spec_with(soft_delete="yes"))
+    with pytest.raises(SpecError) as exc:
+        load_spec(p, "specs")
+    assert any("必须是布尔值" in reason for _, reason in exc.value.errors)
+
+
+def test_date_field_rejects_max_length(tmp_path):
+    """date/datetime 字段配 max_length -> 规格错误（仅 string 可用）。"""
+    p = _write(tmp_path, {
+        "resource": "thing",
+        "fields": [{"name": "when", "type": "date", "max_length": 10}],
+    })
+    with pytest.raises(SpecError) as exc:
+        load_spec(p, "specs")
+    assert any("max_length 仅 string" in reason for _, reason in exc.value.errors)
+
+
+def test_sorting_and_soft_delete_valid_spec_loads(tmp_path):
+    """正向对照：合法配置能加载，且字段被正确解析。"""
+    p = _write(tmp_path, _spec_with(
+        sorting={"default": "-id", "allowed": ["id", "title"]},
+        soft_delete=True,
+    ))
+    spec = load_spec(p, "specs")
+    assert spec.sorting.allowed == ["id", "title"]
+    assert spec.soft_delete is True
+
+
+def test_customer_spec_has_m1_features():
+    """仓库内的 customer 示例规格启用了 date/sorting/soft_delete（端到端样例）。"""
+    specs = load_specs(ROOT / "specs", "specs")
+    customer = specs["customer"]
+    assert customer.soft_delete is True
+    assert "birthday" in customer.sorting.allowed
+    assert any(f.type == "date" for f in customer.fields)
+    assert any(f.type == "datetime" for f in customer.fields)

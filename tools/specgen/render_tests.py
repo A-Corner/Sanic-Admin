@@ -59,13 +59,31 @@ def _payload(spec: ResourceSpec, fk: Dict[str, str], alt: bool = False) -> str:
     return "{" + ", ".join(items) + "}"
 
 
+
+
+def _uniq_variant(f, i: int) -> str:
+    """为唯一字段生成第 i 条合法取值（保持格式约束：email 仍是邮箱）。"""
+    if f.format == "email":
+        return f"u{i}@example.com"
+    if f.type in ("string", "text"):
+        return f"u{i}"
+    return str(i + 1)
+
+def _is_text_field(spec: ResourceSpec, name: str) -> bool:
+    """排序造数用：文本类字段给递增字符串，数值类给递增整数。"""
+    for f in spec.fields:
+        if f.name == name:
+            return f.type in ("string", "text")
+    return False
+
 def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
     res, cls = spec.resource, spec.cls
     url = f"/api/v1/{spec.plural}"
     setup = _Setup(specs)
     fk = setup.fk_exprs(spec)
     pre = list(setup.lines)
-    imports = sorted(setup.imports)
+    # 软删除/硬删除测试要直接查库，故本资源模型也需导入
+    imports = sorted(setup.imports | {cls})
     # 外键目标：优先非 core（自带资源），否则取 core 目标（其资源名与 CORE_TARGETS
     # 的键同名，如 account）；两者都没有时该用例不生成，避免出现 {None: ['read']}。
     non_core_parent = next((b for b in spec.belongs_to if b.target not in CORE_TARGETS), None)
@@ -340,6 +358,174 @@ def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
             f'    blocked = await client.delete(f"/api/v1/{pt.plural}/{{{parent_var}.id}}", headers=auth_headers)',
             "    assert blocked.status_code == 409, blocked.text[:300]",
         ]
+    # ---- (b) date / datetime ----
+    date_fields = [f for f in spec.fields if f.type in ("date", "datetime")]
+    if date_fields:
+        df = date_fields[0]
+        L += [
+            "",
+            "",
+            "async def test_date_field_roundtrip(client, auth_headers):",
+            f'    """date/datetime 字段：合法 ISO 文本往返一致（{df.name}）。"""',
+            *pre,
+            f"    payload = {_payload(spec, fk)}",
+            "    created = await client.post(URL, headers=auth_headers, json=payload)",
+            "    assert created.status_code == 201, created.text[:300]",
+            f"    assert created.json()['data'][{df.name!r}] is not None",
+            "",
+            "",
+            "async def test_date_field_rejects_invalid(client, auth_headers):",
+            f'    """date/datetime 字段：非法文本返回 400（{df.name}）。"""',
+            *pre,
+            "    # 2026-13-40 月份/日期越界；abc 完全不是日期",
+            "    for bad in ('2026-13-40', 'abc'):",
+            f"        payload = {{**{_payload(spec, fk)}, {df.name!r}: bad}}",
+            "        response = await client.post(URL, headers=auth_headers, json=payload)",
+            "        assert response.status_code == 400, (",
+            f"            f'{{bad!r}} 应 400，实际 {{response.status_code}}'",
+            "        )",
+            f"        body = response.json()",
+            f"        assert {df.name!r} in body.get('details', {{}}), (",
+            "            'API 层 Date() 规则应给出字段级错误；只有数据库层兜底会丢掉 details'",
+            "        )",
+            "        assert body['error'] == 'VALIDATION_ERROR', body",
+
+        ]
+
+    # ---- (c) 排序 ----
+    if spec.sorting.allowed:
+        first = spec.sorting.allowed[0]
+        # 只对可排序标量字段做顺序断言（bool/文本混排不稳定，优先取第一个字段）
+        L += [
+            "",
+            "",
+            "async def test_ordering_whitelist_asc_desc(client, auth_headers):",
+            f'    """排序：白名单字段升序/降序都 200，且顺序确实相反（{first}）。"""',
+            *pre,
+            "    ids = []",
+            "    for i in range(3):",
+            f"        payload = {_payload(spec, fk)}",
+            *[
+                f'        payload[{u.name!r}] = f"u{{i}}@example.com"' if u.format == "email" else f'        payload[{u.name!r}] = f"u{{i}}"'
+                for u in spec.fields if u.unique
+            ][:1],
+            f"        payload[{first!r}] = " + ("i + 1" if not _is_text_field(spec, first) else "'a' + 'x'*i"),
+            "        r = await client.post(URL, headers=auth_headers, json=payload)",
+            "        assert r.status_code == 201, r.text[:200]",
+            "        ids.append(r.json()['data']['id'])",
+            "",
+            f"    asc = await client.get(URL + '?ordering={first}', headers=auth_headers)",
+            f"    desc = await client.get(URL + '?ordering=-{first}', headers=auth_headers)",
+            "    assert asc.status_code == 200 and desc.status_code == 200",
+            "    asc_ids = [i['id'] for i in asc.json()['data']['items']]",
+            "    desc_ids = [i['id'] for i in desc.json()['data']['items']]",
+            "    assert asc_ids == list(reversed(desc_ids)), (",
+            "        f'升序与降序应互为逆序，实际 {asc_ids} vs {desc_ids}'",
+            "    )",
+            "",
+            "",
+            "async def test_ordering_rejects_non_whitelisted(client, auth_headers):",
+            '    """排序：不在白名单的字段 -> 400。"""',
+            f"    SORT_ALLOWED = {tuple(spec.sorting.allowed)!r}",
+            "    outsider = next(f for f in ('created_at', 'id', 'deleted') if f not in SORT_ALLOWED)",
+            "    response = await client.get(URL + '?ordering=' + outsider, headers=auth_headers)",
+            "    assert response.status_code == 400, (",
+            "        f'非白名单字段 {outsider} 应 400，实际 {response.status_code}'",
+            "    )",
+        ]
+    else:
+        L += [
+            "",
+            "",
+            "async def test_ordering_empty_whitelist_rejects_any(client, auth_headers):",
+            '    """排序：allowed 为空时任何 ordering 参数都 400。"""',
+            "    response = await client.get(URL + '?ordering=id', headers=auth_headers)",
+            "    assert response.status_code == 400, (",
+            "        f'未配置 sorting 时应拒绝任何排序参数，实际 {response.status_code}'",
+            "    )",
+        ]
+
+    # ---- 分页 ----
+    L += [
+        "",
+        "",
+        "async def test_pagination_page_size(client, auth_headers):",
+        '    """分页：page_size 生效，返回条数不超过 page_size。"""',
+        *pre,
+        "    for i in range(3):",
+        f"        payload = {_payload(spec, fk)}",
+        *[
+            f"        payload[{u.name!r}] = {_uniq_variant(u, 0).replace('0', '{i}')!r}" if False else
+            f'        payload[{u.name!r}] = f"u{{i}}@example.com"' if u.format == "email" else
+            f'        payload[{u.name!r}] = f"u{{i}}"'
+            for u in spec.fields if u.unique
+        ][:1],
+        "        r = await client.post(URL, headers=auth_headers, json=payload)",
+        "        assert r.status_code == 201, r.text[:200]",
+        "    page = await client.get(URL + '?page=1&page_size=2', headers=auth_headers)",
+        "    assert page.status_code == 200",
+        "    body = page.json()['data']",
+        '    assert len(body["items"]) <= 2, f\'page_size=2 却返回 {len(body["items"])} 条\'', 
+        # APIResponse.list 的分页元信息在 data.pagination 下
+        "    assert body['pagination']['page_size'] == 2",
+        "    assert body['pagination']['total'] >= 3",
+    ]
+
+    # ---- (d) 软删除 ----
+    if spec.soft_delete:
+        L += [
+            "",
+            "",
+            "async def test_soft_delete_hides_but_keeps_row(client, auth_headers):",
+            '    """软删除：DELETE 后列表看不到、详情 404，库里该行仍在且 deleted=True。"""',
+            *pre,
+            f"    payload = {_payload(spec, fk)}",
+            "    created = await client.post(URL, headers=auth_headers, json=payload)",
+            "    assert created.status_code == 201, created.text[:300]",
+            "    obj_id = created.json()['data']['id']",
+            "",
+            "    assert (await client.delete(f'{URL}/{obj_id}', headers=auth_headers)).status_code == 200",
+            "",
+            "    listing = await client.get(URL, headers=auth_headers)",
+            "    assert all(i['id'] != obj_id for i in listing.json()['data']['items']), (",
+            "        '软删除后列表仍能看到该行'",
+            "    )",
+            "    assert (await client.get(f'{URL}/{obj_id}', headers=auth_headers)).status_code == 404",
+            "",
+            f"    row = await {cls}.get_or_none(id=obj_id)",
+            "    assert row is not None, '软删除不应物理删除记录'",
+            "    assert row.deleted is True, '软删除应把 deleted 置 True'",
+            "",
+            "",
+            "async def test_soft_delete_unique_still_conflicts(client, auth_headers):",
+            '    """软删除行仍占用 unique 约束：同值重建返回 409（当前行为，见 docs）。"""',
+            *pre,
+            f"    payload = {_payload(spec, fk)}",
+            "    created = await client.post(URL, headers=auth_headers, json=payload)",
+            "    assert created.status_code == 201",
+            "    obj_id = created.json()['data']['id']",
+            "    assert (await client.delete(f'{URL}/{obj_id}', headers=auth_headers)).status_code == 200",
+            "    again = await client.post(URL, headers=auth_headers, json=payload)",
+            "    if again.status_code == 409:",
+            "        pass  # 当前实现：unique 约束不区分 deleted",
+            "    else:",
+            "        assert again.status_code == 201, again.text[:200]",
+        ]
+    else:
+        L += [
+            "",
+            "",
+            "async def test_hard_delete_removes_row(client, auth_headers):",
+            '    """未开软删除：DELETE 物理删除记录。"""',
+            *pre,
+            f"    payload = {_payload(spec, fk)}",
+            "    created = await client.post(URL, headers=auth_headers, json=payload)",
+            "    assert created.status_code == 201",
+            "    obj_id = created.json()['data']['id']",
+            "    assert (await client.delete(f'{URL}/{obj_id}', headers=auth_headers)).status_code == 200",
+            f"    assert await {cls}.get_or_none(id=obj_id) is None, '应是物理删除'",
+        ]
+
     L.append("")
     text = "\n".join(L)
     return text

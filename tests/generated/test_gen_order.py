@@ -5,7 +5,7 @@
 
 """订单 生成资源的契约测试（由规格生成）。"""
 
-from app.models import Customer
+from app.models import Customer, Order
 
 
 URL = '/api/v1/orders'
@@ -237,3 +237,37 @@ async def test_parent_customer_delete_blocked_by_child(client, auth_headers):
     assert (await client.post(URL, headers=auth_headers, json=payload)).status_code == 201
     blocked = await client.delete(f"/api/v1/customers/{customer_1.id}", headers=auth_headers)
     assert blocked.status_code == 409, blocked.text[:300]
+
+
+async def test_ordering_empty_whitelist_rejects_any(client, auth_headers):
+    """排序：allowed 为空时任何 ordering 参数都 400。"""
+    response = await client.get(URL + '?ordering=id', headers=auth_headers)
+    assert response.status_code == 400, (
+        f'未配置 sorting 时应拒绝任何排序参数，实际 {response.status_code}'
+    )
+
+
+async def test_pagination_page_size(client, auth_headers):
+    """分页：page_size 生效，返回条数不超过 page_size。"""
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
+    for i in range(3):
+        payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
+        r = await client.post(URL, headers=auth_headers, json=payload)
+        assert r.status_code == 201, r.text[:200]
+    page = await client.get(URL + '?page=1&page_size=2', headers=auth_headers)
+    assert page.status_code == 200
+    body = page.json()['data']
+    assert len(body["items"]) <= 2, f'page_size=2 却返回 {len(body["items"])} 条'
+    assert body['pagination']['page_size'] == 2
+    assert body['pagination']['total'] >= 3
+
+
+async def test_hard_delete_removes_row(client, auth_headers):
+    """未开软删除：DELETE 物理删除记录。"""
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
+    payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
+    created = await client.post(URL, headers=auth_headers, json=payload)
+    assert created.status_code == 201
+    obj_id = created.json()['data']['id']
+    assert (await client.delete(f'{URL}/{obj_id}', headers=auth_headers)).status_code == 200
+    assert await Order.get_or_none(id=obj_id) is None, '应是物理删除'

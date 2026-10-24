@@ -7,7 +7,7 @@
 
 from sanic.request import Request
 from sanic.views import HTTPMethodView
-from tortoise.exceptions import IntegrityError
+from tortoise.exceptions import IntegrityError, ValidationError
 from tortoise.expressions import Q
 
 from app.api import APIResponse, v1_bp
@@ -140,6 +140,8 @@ class OrderResource(HTTPMethodView):
             obj = await Order.create(**payload)
         except IntegrityError:
             return _error("字段值已存在", APIError.CONFLICT, 409)
+        except ValidationError as exc:
+            return _error(f"参数验证失败：{exc}", APIError.VALIDATION_ERROR, 400)
         return APIResponse.created(
             data=order_info(obj), message=f"创建{LABEL}成功", location=f"/api/v1/orders/{obj.id}"
         )
