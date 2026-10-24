@@ -89,12 +89,12 @@ DATABASE_URL="<生产库 DSN>" python scripts/migrations/upgrade.py
 | 场景 | 做法 |
 |---|---|
 | 开发 / 测试（SQLite、内存库） | 保持 `generate_schemas(safe=True)`，库随时可删可重建。改了模型后，仍要生成迁移：`aerich migrate --name <说明>`，检查生成的文件后提交。 |
-| 生产 | 先 `aerich upgrade`，再启动应用（启动时检查账本表，缺失即拒绝）。**不跑** `generate_schemas`。 |
+| 生产 | 先 `python scripts/migrations/upgrade.py`，再启动应用（启动时检查账本表，缺失即拒绝）。**不跑** `generate_schemas`。 |
 | 提交前 / CI | 运行 `python scripts/check_migrations.py`。它在临时 SQLite 里 upgrade 全部迁移，再与当前模型 `generate_schemas` 的结构逐表对比；模型改了没生成迁移，退出码为 1（脚本自身出错为 2）。 |
 
 不使用 `aerich migrate` 做 CI 守门，原因是 aerich 的比较基准是账本里的模型快照，而 `upgrade` 会用“当前模型”写快照，先 upgrade 再 migrate 永远判定“无变化”。
 
-迁移日常流程：改模型 → `aerich migrate --name xxx` → 审阅 `migrations/models/` 下新文件 → `python scripts/check_migrations.py` → 提交 → 部署时 `aerich upgrade`。
+迁移日常流程：改模型 → `aerich migrate --name xxx` → 审阅 `migrations/models/` 下新文件 → `python scripts/check_migrations.py` → 提交 → 部署时 `python scripts/migrations/upgrade.py`。
 
 ## 4. 回滚
 

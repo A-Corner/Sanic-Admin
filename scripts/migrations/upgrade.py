@@ -56,14 +56,19 @@ def _load_baseline_checker():
 
 async def _upgrade(db_url: str) -> int:
     from aerich import Command
+    from tortoise import Tortoise
 
     from app.aerich_config import build_tortoise_config
 
     command = Command(build_tortoise_config(db_url), app="models",
                       location=str(MIGRATIONS_ROOT))
     await command.init()
-    # SQLite 上事务模式会死锁（aerich 官方的 --no-transaction 即为此场景）
-    migrated = await command.upgrade(run_in_transaction=False)
+    # SQLite 上事务模式会死锁（aerich 官方的 --no-transaction 即为此场景）；
+    # MySQL / PostgreSQL 保持事务，让多语句迁移具备原子性（要么全成、要么全回滚）。
+    dialect = getattr(
+        Tortoise.get_connection("default").capabilities, "dialect", "")
+    run_in_transaction = dialect != "sqlite"
+    migrated = await command.upgrade(run_in_transaction=run_in_transaction)
     if migrated:
         print(f"已应用迁移: {migrated}")
     else:
