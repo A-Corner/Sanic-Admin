@@ -2,9 +2,11 @@ name: Sanic-Admin CI
 
 on:
   push:
-    branches: [ main, master, develop, vj-mp3 ]
+    # release/**：补丁版从 release/v0.3.x 拉 hotfix 分支，PR 目标通常是 release
+    # 分支本身；不加这条，发补丁版的 PR 根本不会触发 CI。
+    branches: [ main, master, develop, vj-mp3, 'release/**' ]
   pull_request:
-    branches: [ main, master, develop, vj-mp3 ]
+    branches: [ main, master, develop, vj-mp3, 'release/**' ]
 
 jobs:
   test:
