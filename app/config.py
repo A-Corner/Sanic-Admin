@@ -419,6 +419,27 @@ MIN_ADMIN_PASSWORD_LENGTH = 8
 MIN_ADMIN_PASSWORD_CLASSES = 2
 
 
+#: 口令上限（与 app/auth/authentication.MAX_PASSWORD_LENGTH 一致）
+MAX_ADMIN_PASSWORD_LENGTH = 128
+
+
+def _check_admin_password_strength(password: str) -> Optional[str]:
+    """检查初始口令的长度与强度，返回问题描述；合规返回 None。
+
+    规则（v0.3.4 起）：
+    * 长度 >= ``MIN_ADMIN_PASSWORD_LENGTH`` 且 <= ``MAX_ADMIN_PASSWORD_LENGTH``；
+    * 至少包含 ``MIN_ADMIN_PASSWORD_CLASSES`` 类字符。
+    """
+    if len(password) < MIN_ADMIN_PASSWORD_LENGTH:
+        return f"至少需要 {MIN_ADMIN_PASSWORD_LENGTH} 位"
+    if len(password) > MAX_ADMIN_PASSWORD_LENGTH:
+        return f"不能超过 {MAX_ADMIN_PASSWORD_LENGTH} 位"
+    if _password_class_count(password) < MIN_ADMIN_PASSWORD_CLASSES:
+        return (f"强度不足：需要至少 {MIN_ADMIN_PASSWORD_CLASSES} 类字符"
+                "（大写/小写/数字/符号）")
+    return None
+
+
 def _password_class_count(password: str) -> int:
     """口令包含的字符类别数（大写 / 小写 / 数字 / 其它符号）。"""
     classes = 0
@@ -441,19 +462,14 @@ def _initial_admin_password(env: str) -> str:
     """
     explicit = os.getenv("INITIAL_ADMIN_PASSWORD")
     if explicit:
-        if len(explicit) < MIN_ADMIN_PASSWORD_LENGTH:
-            raise ConfigError(
-                f"INITIAL_ADMIN_PASSWORD 至少需要 {MIN_ADMIN_PASSWORD_LENGTH} 位")
-        # 强度检查：初始口令若达不到「至少两类字符」，改密策略会把它当成弱口令，
-        # 而它又是管理员登录后立刻要换掉的起点。与其让人在运行时困惑，不如在
-        # 启动时直接拒绝并说清原因（v0.3.4 起的行为，属 breaking）。
-        probe = _password_class_count(explicit)
-        if probe < MIN_ADMIN_PASSWORD_CLASSES:
-            raise ConfigError(
-                f"INITIAL_ADMIN_PASSWORD 强度不足：需要至少 {MIN_ADMIN_PASSWORD_CLASSES} "
-                "类字符（大写/小写/数字/符号）。这是 v0.3.4 起的新要求——"
-                "初始口令也是口令，必须与改密策略一致。"
-            )
+        problem = _check_admin_password_strength(explicit)
+        if problem:
+            # production 拒绝启动（fail-closed）；dev/testing 只告警，
+            # 否则本地开发会被一个弱口令彻底挡住。
+            if env == "production":
+                raise ConfigError(problem)
+            logger.warning("INITIAL_ADMIN_PASSWORD %s（development/testing 仅告警）",
+                           problem)
     return _env_secret(
         "INITIAL_ADMIN_PASSWORD", env,
         lambda: _generate_admin_password(env), "初始管理员口令",

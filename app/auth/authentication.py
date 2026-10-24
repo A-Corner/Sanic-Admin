@@ -101,9 +101,13 @@ def validate_not_banlisted(password: str, account=None) -> Optional[str]:
     比较使用 :func:`hmac.compare_digest`（常量时间），避免通过响应时间判断
     候选值与拒绝清单的匹配长度。口令与清单值**都不会**被写进日志或错误信息。
     """
-    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    # 大小写不敏感：sAdmin@123 与 SAdmin@123 视为同一个弱口令。
+    # 在哈希之前统一 lower，避免用大小写变形绕过。
+    digest = hashlib.sha256(password.lower().encode("utf-8")).digest()
     for banned in _banned_password_list():
-        if hmac.compare_digest(digest, hashlib.sha256(banned.encode("utf-8")).digest()):
+        if hmac.compare_digest(
+            digest, hashlib.sha256(banned.lower().encode("utf-8")).digest()
+        ):
             return "新口令不能使用系统已知的弱口令"
     email = getattr(account, "email", None) if account is not None else None
     if email:
