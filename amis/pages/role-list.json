@@ -80,7 +80,12 @@
                   "description": "JSON 对象，例如 {\"account\": [\"read\"]}",
                   "value": "",
                   "required": true,
-                  "validate": "if (!value) return true; try { const p = JSON.parse(value); if (p === null || typeof p !== 'object' || Array.isArray(p)) return '权限必须是 JSON 对象（如 {\\\"account\\\": [\\\"read\\\"]}）'; return true; } catch (e) { return '权限必须是合法 JSON'; }"
+                  "validations": {
+                    "isJson": true
+                  },
+                  "validationErrors": {
+                    "isJson": "权限必须是合法 JSON"
+                  }
                 }
               ]
             }
@@ -139,7 +144,12 @@
               "required": true,
               "description": "JSON 对象，例如 {\"account\": [\"read\"]}",
               "value": "{}",
-              "validate": "if (!value) return true; try { const p = JSON.parse(value); if (p === null || typeof p !== 'object' || Array.isArray(p)) return '权限必须是 JSON 对象（如 {\\\"account\\\": [\\\"read\\\"]}）'; return true; } catch (e) { return '权限必须是合法 JSON'; }"
+              "validations": {
+                "isJson": true
+              },
+              "validationErrors": {
+                "isJson": "权限必须是合法 JSON"
+              }
             }
           ]
         }
