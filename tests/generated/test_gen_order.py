@@ -96,28 +96,37 @@ async def test_fk_requires_target_read_permission(client, normal_auth_headers):
 
     # PUT 同样门控：撤掉 read 后更新外键必须 403
     await Role.filter(name='reader').update(permissions={'order': ['create', 'update']})
-    if allowed.status_code in (200, 201):
-        obj_id = allowed.json()['data']['id']
-        put_denied = await client.put(
-            f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload
-        )
-        assert put_denied.status_code == 403, (
-            f'PUT 无 {fk_target}:read 时应 403，实际 {put_denied.status_code}'
-        )
-        # 正向对照：授回 read 后同一 PUT 不再 403
-        await Role.filter(name='reader').update(permissions={'order': ['create', 'update'], 'customer': ['read']})
-        put_allowed = await client.put(
-            f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload
-        )
-        assert put_allowed.status_code != 403, (
-            f'PUT 授了 read 后不应再 403，实际 {put_allowed.status_code}'
-        )
 
-    # 外键为空时不触发该项权限判定（不应因缺少目标 read 而 403）
+    # 前置断言：上一步必须真的建成，否则下面的 PUT 断言会静默跳过
+    assert allowed.status_code in (200, 201), (
+        f'前置 POST 应成功，实际 {allowed.status_code}'
+    )
+    obj_id = allowed.json()['data']['id']
+    put_denied = await client.put(
+        f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload
+    )
+    assert put_denied.status_code == 403, (
+        f'PUT 无 {fk_target}:read 时应 403，实际 {put_denied.status_code}'
+    )
+    # 正向对照：授回 read 后同一 PUT 不再 403
+    await Role.filter(name='reader').update(permissions={'order': ['create', 'update'], 'customer': ['read']})
+    put_allowed = await client.put(
+        f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload
+    )
+    assert put_allowed.status_code != 403, (
+        f'PUT 授了 read 后不应再 403，实际 {put_allowed.status_code}'
+    )
+
+    # 外键缺省：reader 重置为只授 create（无目标 read），POST 不带外键
+    # 应得到 400（缺必填外键）而不是 403——证明权限判定不对缺省外键生效
+    await Role.filter(name='reader').update(permissions={'order': ['create']})
     no_fk = {k: v for k, v in payload.items() if k != FK_COLUMN}
     empty_fk = await client.post(URL, headers=normal_auth_headers, json=no_fk)
-    assert empty_fk.status_code != 403 or empty_fk.json().get('error') != 'FORBIDDEN', (
-        '外键缺省时不应因引用权限被 403'
+    assert empty_fk.status_code != 403, (
+        f'外键缺省时不应因引用权限被 403，实际 {empty_fk.status_code}'
+    )
+    assert empty_fk.status_code == 400, (
+        f'缺必填外键应 400，实际 {empty_fk.status_code}: {empty_fk.text[:200]}'
     )
 
 
