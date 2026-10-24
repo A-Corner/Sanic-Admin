@@ -597,7 +597,9 @@ async def test_mcp_tool_layer_forwards_redacted_reason(tmp_path, monkeypatch):
     ``Error executing tool <name>``，脱敏后的原因被丢掉。这里走**公开的**
     `server.call_tool()`，断言 ①原因确实到达客户端、②路径已脱敏。
     """
-    pytest.importorskip("mcp")
+    # 直接 import：缺 mcp 时必须报错，不能 pytest.skip。
+    # 跳过会让「没测到」显示成「这轮不用测」，与 AGENTS.md §3.6 的纪律冲突。
+    import mcp  # noqa: F401  缺包即 ImportError
     import tools.mcp_server as mcp_server
 
     mini = _mini_repo(tmp_path)
@@ -659,7 +661,8 @@ def test_preview_temporaries_are_cleaned_up():
 
 async def test_registered_tool_names_match_documented_contract():
     """注册给客户端的工具名须是文档里那五个，不能带 _tool 后缀。"""
-    pytest.importorskip("mcp")
+    # 直接 import：缺 mcp 时必须报错，不能 pytest.skip（见 AGENTS.md §3.6）
+    import mcp  # noqa: F401
     from tools.mcp_server import build_server
 
     server = build_server()
@@ -684,7 +687,8 @@ def test_stdio_handshake_lists_tools():
     整个测试会一直卡到 CI 的 job 超时（表现为「卡死」而不是「失败」）。这里用
     读线程 + 队列超时，超时即判失败并带上 stderr 摘要。
     """
-    pytest.importorskip("mcp")
+    # 直接 import：缺 mcp 时必须报错，不能 pytest.skip（见 AGENTS.md §3.6）
+    import mcp  # noqa: F401
     proc = subprocess.Popen(
         [sys.executable, "-m", "tools.mcp_server", "--root", str(ROOT)],
         cwd=str(ROOT),

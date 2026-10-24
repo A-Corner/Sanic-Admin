@@ -49,12 +49,17 @@ WRITE_TOOL_NAMES = frozenset({
 })
 
 
-def _audit(operation: str, *, status: str, detail: Dict[str, Any]) -> None:
+def _audit(operation: str, *, status: str, detail: Dict[str, Any]) -> bool:
     """
     往 stderr 写一行结构化审计。**永不抛出**——审计失败不能拖垮主流程。
 
     刻意不写规格全文：规格里可能有业务敏感的字段定义。只写资源名、
     分支名、commit、diff 统计这类元数据。
+
+    Returns:
+        True 表示确实写出去了；False 表示写入失败（stderr 被关、编码异常等）。
+        调用方据此决定是否在返回值里报 ``audit_written: false``——不能像早期
+        版本那样恒为 True。那会让调用方以为审计成功，实际什么都没记。
     """
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -66,9 +71,20 @@ def _audit(operation: str, *, status: str, detail: Dict[str, Any]) -> None:
     }
     try:
         print(json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
+        return True
     except Exception:
         # 审计是旁路。stderr 被关掉、编码异常都不该影响提案结果。
-        pass
+        return False
+
+
+def _resolve_commit(repo_root: Path, ref: str) -> str:
+    """把 ref 解析成完整 commit SHA。失败返回空串（不影响提案结果）。"""
+    try:
+        from tools.mcp_server.git_isolation import _git
+        return _git(["rev-parse", "--verify", f"{ref}^{{commit}}"],
+                    cwd=repo_root).strip()
+    except Exception:
+        return ""
 
 
 def propose_spec_change(
@@ -133,23 +149,27 @@ def propose_spec_change(
             (specs / f"{resource}.yaml").write_text(spec_yaml, encoding="utf-8")
 
         result = make_proposal(root, branch, message, _write, base_ref=base)
+        # base_commit：人需要它来判断「这个提案基于哪个提交」，做冲突排查
+        base_commit = _resolve_commit(root, base)
         detail = {
             "resource": resource,
             "branch": result["branch"],
             "commit": result["commit"],
             "base_ref": base,
+            "base_commit": base_commit,
         }
-        _audit("propose_spec_change", status="success", detail=detail)
+        audit_ok = _audit("propose_spec_change", status="success", detail=detail)
 
         return {
             "proposal_id": result["branch"],
             "branch": result["branch"],
             "commit": result["commit"],
             "base_ref": base,
+            "base_commit": base_commit,
             "diff_stat": result["diff_stat"],
             "diff": result["diff"],
             "next_step": "由人执行 git push 并开 PR；本工具不会 push，也不会合并。",
-            "audit_written": True,
+            "audit_written": audit_ok,
         }
     except Exception as exc:
         if not detail:
@@ -186,9 +206,9 @@ def discard_proposal_tool(
         _audit("discard_proposal", status="failure",
                detail={"branch": branch, "reason": type(exc).__name__})
         raise
-    _audit("discard_proposal", status="success",
-           detail={"branch": branch, "force": force})
-    return {"discarded": branch, "force": force, "audit_written": True}
+    audit_ok = _audit("discard_proposal", status="success",
+                      detail={"branch": branch, "force": force})
+    return {"discarded": branch, "force": force, "audit_written": audit_ok}
 
 
 def register_write_tools(server) -> None:

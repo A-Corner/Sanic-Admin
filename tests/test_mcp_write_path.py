@@ -36,10 +36,33 @@ from tools.mcp_server.git_isolation import (
 # ---------------------------------------------------------------------------
 
 
+#: 测试自己跑 git 时也做净化，避免本机全局配置影响结果
+#: （用户可能设了 core.hooksPath / init.defaultBranch / user.* 等）。
+_CLEAN_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "test",
+    "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "test",
+    "GIT_COMMITTER_EMAIL": "test@example.invalid",
+}
+
+
 def _run(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True,
+        env={**os.environ, **_CLEAN_ENV},
     ).stdout
+
+
+def _git_raw(cwd: Path, *args: str, env_extra=None) -> subprocess.CompletedProcess:
+    """跑 git 但**不检查返回码**，用于断言失败场景。"""
+    env = {**os.environ, **_CLEAN_ENV}
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env,
+    )
 
 
 @pytest.fixture()
@@ -156,20 +179,37 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
     assert "exit 1" in hook.read_text(encoding="utf-8")
 
     # --- 让 hook 留下不可伪造的执行证据 ---
+    #
+    # **不改写实现装进去的 hook**——否则跑的是测试写的 hook，不是实现的。
+    # 做法：把实现的 hook 改名为 pre-push.real（内容一字未动），再装一个
+    # wrapper 调用它，wrapper 在调用前后各写一次标记文件。
     marker = tmp_path / "hook-ran.marker"
+    real_hook = hook.with_name("pre-push.real")
+    hook.rename(real_hook)
     hook.write_text(
         "#!/bin/sh\n"
         f'echo ran > "{marker}"\n'
-        "exit 1\n",
+        f'exec "{real_hook}" "$@"\n',
         encoding="utf-8",
     )
     hook.chmod(0o755)
+    assert real_hook.read_text(encoding="utf-8") == (
+        "#!/bin/sh\n"
+        "# MCP 提案 clone：禁止任何 push。这是设计约束，不是可配置项。\n"
+        "exit 1\n"
+    ), "实现的 hook 内容被改动了，测试跑的不是实现"
 
     # 第一层：config 里没有 remote
     config_text = (clone / ".git" / "config").read_text(encoding="utf-8")
     assert "[remote " not in config_text, "隔离 clone 不该有 remote"
     assert "default = nothing" in config_text
     assert "helper =" in config_text
+    # core.hooksPath 必须指向 clone 自己的 hooks 目录——否则用户全局的
+    # hooksPath 会让实现装的 hook 失效（P2-3 的核心保护）
+    expected_hooks = str((clone / ".git" / "hooks").resolve())
+    assert f"hooksPath = {expected_hooks}" in config_text, (
+        f"core.hooksPath 未指向 clone 的 hooks 目录：{config_text}"
+    )
 
     # 手工加 remote，模拟绕过第一层
     subprocess.run(
@@ -204,13 +244,8 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
 
     # --- 反向对照：把 hook 换成放行，push 必须成功 ---
     # 这条证明「上面的失败确实是 hook 造成的」，而不是别的原因
-    hook.write_text(
-        "#!/bin/sh\n"
-        f'echo ran > "{marker}"\n'
-        "exit 0\n",
-        encoding="utf-8",
-    )
-    hook.chmod(0o755)
+    real_hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_hook.chmod(0o755)
     marker.unlink()
     ok_proc = subprocess.run(
         ["git", "push", "evil", current],
@@ -296,15 +331,15 @@ def test_fetch_does_not_overwrite_existing_branch(user_repo: Path, tmp_path: Pat
     # 让 clone 里出现同名的本地分支，否则 fetch 失败的原因是「找不到 ref」
     _run(clone, "update-ref", f"refs/heads/{branch}", "HEAD")
 
-    proc = subprocess.run(
-        ["git", "fetch", str(clone), f"{branch}:{branch}"],
-        cwd=str(user_repo), capture_output=True, text=True,
-    )
-    assert proc.returncode != 0, "分叉场景下 fetch 应当被拒绝"
-    # 失败原因必须是「非快进」——这是本测试的核心断言
-    err = (proc.stderr + proc.stdout).lower()
-    assert "non-fast-forward" in err or "非快进" in err or "rejected" in err, (
-        f"fetch 失败但不是因为非快进：{proc.stderr[:300]}"
+    # 调用**实现里的** fetch_from_local_clone，不是裸 git fetch——
+    # 否则测的是 git 的行为，改实现（加 --force）测试照样绿。
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        fetch_from_local_clone(user_repo, clone, branch)
+    err = (str(excinfo.value.stderr or "") + str(excinfo.value.output or "")).lower()
+    # 只认 non-fast-forward：去掉宽泛的 "rejected"（任何拒绝原因都含它，
+    # 会把「找不到 ref」这类无关失败也算通过）
+    assert "non-fast-forward" in err or "非快进" in err, (
+        f"fetch 失败但不是因为非快进：{err[:300]}"
     )
     assert _run(user_repo, "rev-parse", branch).strip() == first_sha, \
         "已存在的分支被覆盖了"
@@ -319,13 +354,8 @@ def test_fetch_does_not_overwrite_existing_branch(user_repo: Path, tmp_path: Pat
     _run(ff_clone, "add", "-A")
     _run(ff_clone, "commit", "-q", "-m", "fast-forward")
     _run(ff_clone, "update-ref", f"refs/heads/{branch}", "HEAD")
-    ff_proc = subprocess.run(
-        ["git", "fetch", str(ff_clone), f"{branch}:{branch}"],
-        cwd=str(user_repo), capture_output=True, text=True,
-    )
-    assert ff_proc.returncode == 0, (
-        f"快进 fetch 应当成功；stderr={ff_proc.stderr[:300]}"
-    )
+    # 同样走实现函数：快进应当成功（不带 --force 的 fetch 本来就允许快进）
+    fetch_from_local_clone(user_repo, ff_clone, branch)
     assert _run(user_repo, "rev-parse", branch).strip() != first_sha, \
         "快进之后分支应当前进"
 
@@ -360,6 +390,86 @@ def test_propose_refuses_existing_branch_before_writing(user_repo: Path) -> None
         f"拒绝理由不是前置检查：{excinfo.value}"
     )
     assert _run(user_repo, "rev-parse", branch).strip() == first_sha
+
+
+# ---------------------------------------------------------------------------
+# 环境净化与参数逃逸
+# ---------------------------------------------------------------------------
+
+
+def test_malicious_global_hookspath_is_ignored(user_repo: Path, tmp_path: Path) -> None:
+    """
+    用户全局配置里若有恶意的 ``core.hooksPath``，实现的 git 调用不得受其影响。
+
+    做法：造一个假的全局 gitconfig，把 hooksPath 指到一个「所有 hook 都 exit 0」
+    的目录，用 GIT_CONFIG_GLOBAL 指过去——模拟用户本机的恶意/特殊配置。
+    然后跑一次提案 + 一次 fetch，两者都必须正常工作，且**不能**执行那个假目录
+    里的 hook（用标记文件验证）。
+    """
+    evil_hooks = tmp_path / "evil-hooks"
+    evil_hooks.mkdir()
+    evil_marker = tmp_path / "evil-ran.marker"
+    for name in ("pre-push", "post-checkout", "reference-transaction"):
+        h = evil_hooks / name
+        h.write_text(f'#!/bin/sh\necho x >> "{evil_marker}"\nexit 0\n', encoding="utf-8")
+        h.chmod(0o755)
+
+    fake_global = tmp_path / "fake-global-config"
+    fake_global.write_text(
+        f"[core]\n\thooksPath = {evil_hooks}\n", encoding="utf-8"
+    )
+
+    # 用实现函数跑一次完整提案：实现的 _git 会强制 GIT_CONFIG_GLOBAL=/dev/null，
+    # 因此这份假配置不该生效
+    branch = make_branch_name("demo")
+    env_backup = os.environ.get("GIT_CONFIG_GLOBAL")
+    os.environ["GIT_CONFIG_GLOBAL"] = str(fake_global)
+    try:
+        result = make_proposal(
+            user_repo, branch, "proposal: under evil config",
+            lambda d: (d / "specs" / "demo.yaml").write_text(
+                "name: demo\nfields:\n  - name: evil\n", encoding="utf-8"
+            ),
+        )
+    finally:
+        if env_backup is None:
+            os.environ.pop("GIT_CONFIG_GLOBAL", None)
+        else:
+            os.environ["GIT_CONFIG_GLOBAL"] = env_backup
+
+    assert result["branch"] == branch
+    assert not evil_marker.exists(), (
+        "恶意全局 hooksPath 里的 hook 被执行了——环境净化没生效"
+    )
+
+
+@pytest.mark.parametrize("escape", [
+    ["clone", "--upload-pack=touch /tmp/pwned", "x", "y"],
+    ["clone", "--exec=x", "a", "b"],
+    ["-c", "core.pager=evil", "log"],
+    ["--git-dir=/tmp/x", "status"],
+    ["log", "--upload-pack=x"],
+    ["commit", "--exec=x"],
+    ["diff", "--output=/tmp/x"],
+    ["add", "-u", "x"],
+    ["checkout", "--template-dir=/tmp/x", "master"],
+])
+def test_param_escape_rejected(user_repo: Path, escape: list) -> None:
+    """危险参数放在子命令前后都必须被拒。"""
+    with pytest.raises(GitNotAllowed):
+        _git(escape, cwd=user_repo)
+
+
+def test_param_escape_with_global_option_before_subcommand(user_repo: Path) -> None:
+    """
+    ``git -c x=y <sub>`` 这种「全局选项在子命令之前」的形态也必须拒。
+
+    实现的 `_git` 把 ``args[0]`` 当子命令；``-c`` 不是白名单子命令，直接拒。
+    这条钉死该行为，防止将来有人为了支持 ``-c`` 而放宽。
+    """
+    with pytest.raises(GitNotAllowed) as excinfo:
+        _git(["-c", "core.hooksPath=/tmp/evil", "status"], cwd=user_repo)
+    assert "不在允许列表" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

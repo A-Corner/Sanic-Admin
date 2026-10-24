@@ -215,6 +215,67 @@ def test_propose_rejects_invalid_base_ref(repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 返回值字段的真实性
+# ---------------------------------------------------------------------------
+
+
+def test_audit_written_reflects_real_result(repo: Path, monkeypatch) -> None:
+    """
+    ``audit_written`` 必须反映真实写入结果，不能恒为 True。
+
+    审核指出：早期实现里它写死 True，而 stderr 被关掉时审计其实没写出去——
+    调用方会误以为审计成功。这条钉死「字段要如实」。
+    """
+    from tools.mcp_server import write_tools
+
+    # 正常情况：True
+    ok = write_tools.propose_spec_change(
+        "first", "resource: first\ntable: first\nlabel: d\nfields:\n  - name: a\n    type: string\n",
+        repo_root=repo,
+    )
+    assert ok["audit_written"] is True
+
+    # 让 _audit 写失败：stderr 换成一个会抛异常的对象
+    class _BrokenStderr:
+        def write(self, *_a, **_k):
+            raise OSError("stderr closed")
+
+        def flush(self):
+            raise OSError("stderr closed")
+
+    real_stderr = write_tools.sys.stderr
+    write_tools.sys.stderr = _BrokenStderr()
+    try:
+        broken = write_tools.propose_spec_change(
+            "second",
+            "resource: second\ntable: second\nlabel: d\nfields:\n  - name: b\n    type: string\n",
+            repo_root=repo,
+        )
+    finally:
+        write_tools.sys.stderr = real_stderr
+
+    assert broken["audit_written"] is False, (
+        "审计写入失败时 audit_written 仍是 True——字段没有如实反映结果"
+    )
+
+
+def test_result_carries_base_commit(repo: Path) -> None:
+    """返回值必须带 base_commit（完整 SHA），供人判断提案基于哪个提交。"""
+    from tools.mcp_server.write_tools import propose_spec_change
+
+    expected = _run(repo, "rev-parse", "master").strip()
+    out = propose_spec_change(
+        "third",
+        "resource: third\ntable: third\nlabel: d\nfields:\n  - name: c\n    type: string\n",
+        repo_root=repo,
+    )
+    assert out["base_commit"] == expected, (
+        f"base_commit 应为 master 的 SHA {expected[:7]}，实际 {out.get('base_commit', '缺失')[:7]}"
+    )
+    assert len(out["base_commit"]) == 40
+
+
+# ---------------------------------------------------------------------------
 # 三、审计写 stderr
 # ---------------------------------------------------------------------------
 
