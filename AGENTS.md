@@ -840,6 +840,30 @@ assert generated == expected
 写死现状的代价：每次正常演进都要改测试，而改的人往往会顺手把断言改松——
 **门禁就这样一点点失效**。
 
+### 修完一处，先 grep 找全同类再改
+
+**同一天这个错误出现了四次**，前两次修完就以为结束了，结果 CI 第三、四次又红：
+
+| 位置 | 写死了什么 |
+|---|---|
+| `scripts/check_dialect_ddl.py` | `not m.startswith("1_")` |
+| `test_permissions_and_menu_auto_registered` | `["customer", "order"]` |
+| `tests/test_migrations_aerich.py`（**两处**） | `not m.startswith("1_")` |
+| `test_positive_control_failure_reason_is_visible` | 删增量的方式会先触发别的检查 |
+
+关键教训：**我修完前两处、写完这一节文档，同一轮 CI 还是红在第三、四处上。**
+
+所以规矩是——修这类问题时，**先 grep 找全所有出现位置，再逐个改**，
+不要只改眼前报错的那一处：
+
+```bash
+grep -rn 'startswith("[0-9]_")\|== \["customer", "order"\]' tests/ scripts/ tools/
+```
+
+改完再跑一次同样的 grep 确认无残留（注释里提到旧写法是正常的）。
+
+**只改一处 = 下一次 CI 还会红。**
+
 ### 附：枚举取值要从类型定义读，不要手抄
 
 `FieldType` 这样的 `Literal` 用 `typing.get_args()` 取全部取值：
