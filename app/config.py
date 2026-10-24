@@ -157,7 +157,7 @@ class DefaultConfig:
     """
     ENV = "default"
     APP_NAME = "Sanic-Admin"
-    APP_VERSION = "0.3.3"
+    APP_VERSION = "0.3.4"
 
     DEBUG = False
     TESTING = False
@@ -414,6 +414,46 @@ def _generate_admin_password(env: str) -> str:
 
 MIN_ADMIN_PASSWORD_LENGTH = 8
 
+#: 初始口令至少需要的字符类别数（与 app/auth/authentication.MIN_PASSWORD_CLASSES 一致；
+#: 这里重复定义是为了避免 config 反向依赖 auth 模块造成循环导入）
+MIN_ADMIN_PASSWORD_CLASSES = 2
+
+
+#: 口令上限（与 app/auth/authentication.MAX_PASSWORD_LENGTH 一致）
+MAX_ADMIN_PASSWORD_LENGTH = 128
+
+
+def _check_admin_password_strength(password: str) -> Optional[str]:
+    """检查初始口令的长度与强度，返回问题描述；合规返回 None。
+
+    规则（v0.3.4 起）：
+    * 长度 >= ``MIN_ADMIN_PASSWORD_LENGTH`` 且 <= ``MAX_ADMIN_PASSWORD_LENGTH``；
+    * 至少包含 ``MIN_ADMIN_PASSWORD_CLASSES`` 类字符。
+    """
+    if len(password) < MIN_ADMIN_PASSWORD_LENGTH:
+        return f"至少需要 {MIN_ADMIN_PASSWORD_LENGTH} 位"
+    if len(password) > MAX_ADMIN_PASSWORD_LENGTH:
+        return f"不能超过 {MAX_ADMIN_PASSWORD_LENGTH} 位"
+    if _password_class_count(password) < MIN_ADMIN_PASSWORD_CLASSES:
+        return (f"强度不足：需要至少 {MIN_ADMIN_PASSWORD_CLASSES} 类字符"
+                "（大写/小写/数字/符号）")
+    return None
+
+
+def _password_class_count(password: str) -> int:
+    """口令包含的字符类别数（大写 / 小写 / 数字 / 其它符号）。"""
+    classes = 0
+    if any(ch.isupper() for ch in password):
+        classes += 1
+    if any(ch.islower() for ch in password):
+        classes += 1
+    if any(ch.isdigit() for ch in password):
+        classes += 1
+    if any(not ch.isalnum() for ch in password):
+        classes += 1
+    return classes
+
+
 
 def _initial_admin_password(env: str) -> str:
     """
@@ -421,8 +461,15 @@ def _initial_admin_password(env: str) -> str:
     缺失时 production 报错、development/testing 生成临时值。
     """
     explicit = os.getenv("INITIAL_ADMIN_PASSWORD")
-    if explicit and len(explicit) < MIN_ADMIN_PASSWORD_LENGTH:
-        raise ConfigError(f"INITIAL_ADMIN_PASSWORD 至少需要 {MIN_ADMIN_PASSWORD_LENGTH} 位")
+    if explicit:
+        problem = _check_admin_password_strength(explicit)
+        if problem:
+            # production 拒绝启动（fail-closed）；dev/testing 只告警，
+            # 否则本地开发会被一个弱口令彻底挡住。
+            if env == "production":
+                raise ConfigError(problem)
+            logger.warning("INITIAL_ADMIN_PASSWORD %s（development/testing 仅告警）",
+                           problem)
     return _env_secret(
         "INITIAL_ADMIN_PASSWORD", env,
         lambda: _generate_admin_password(env), "初始管理员口令",
