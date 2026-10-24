@@ -106,9 +106,18 @@ class OrderResource(HTTPMethodView):
             for name in SEARCH_FIELDS:
                 conds |= Q(**{name + "__contains": keyword})
             query = query.filter(conds)
+        ordering = (request.args.get('ordering') or '').strip()
+        SORT_ALLOWED = ()
+        if ordering:
+            field = ordering[1:] if ordering.startswith('-') else ordering
+            if field not in SORT_ALLOWED:
+                return _error(f"不支持的排序字段：{field}", APIError.VALIDATION_ERROR, 400)
+            order_clause = ordering
+        else:
+            order_clause = '-id'
         page, page_size = parse_pagination(request)
         total = await query.count()
-        rows = await query.order_by("-id").offset((page - 1) * page_size).limit(page_size)
+        rows = await query.order_by(order_clause).offset((page - 1) * page_size).limit(page_size)
         return APIResponse.list(
             items=[order_info(r) for r in rows], total=total, page=page, page_size=page_size,
             message=f"获取{LABEL}列表成功",

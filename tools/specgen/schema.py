@@ -25,7 +25,7 @@ RESERVED_FIELDS = frozenset({"id", "created_at", "updated_at", "deleted", "json"
 #: belongs_to 可指向的框架内置模型（资源名 -> 模型类名）
 CORE_TARGETS = {"account": "Account"}
 
-FieldType = Literal["string", "text", "int", "float", "bool"]
+FieldType = Literal["string", "text", "int", "float", "bool", "date", "datetime"]
 Action = Literal["read", "create", "update", "delete"]
 
 
@@ -171,6 +171,13 @@ class MenuSpec(_Strict):
     label: Optional[str] = None
 
 
+class SortingSpec(_Strict):
+    """列表排序：默认字段与允许排序的字段白名单（未列入的一律 400）。"""
+
+    default: Optional[str] = None
+    allowed: List[str] = []
+
+
 class ResourceSpec(_Strict):
     resource: str
     table: Optional[str] = None
@@ -181,6 +188,10 @@ class ResourceSpec(_Strict):
     belongs_to: List[BelongsToSpec] = []
     permissions: PermissionsSpec = PermissionsSpec()
     menu: MenuSpec = MenuSpec()
+    #: (c) 排序配置；`allowed` 为空表示不允许任何排序参数（?ordering= 一律 400）
+    sorting: SortingSpec = SortingSpec()
+    #: (d) 软删除：开启后 DELETE 只置 deleted，列表/详情默认过滤已删除行
+    soft_delete: bool = False
 
     #: 以下为加载时填充的非规格属性
     source: str = Field(default="", exclude=True)

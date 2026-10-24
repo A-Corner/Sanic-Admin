@@ -76,7 +76,7 @@ async def test_fk_requires_target_read_permission(client, normal_auth_headers):
     """外键防 ID 枚举：无 <target>:read 时引用必须 403，不能靠 400/201 差异侧探。"""
     from app.models import Role
 
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     FK_COLUMN = 'customer_id'
     await Role.filter(name='reader').update(permissions={'order': ['create']})
 
@@ -132,12 +132,25 @@ async def test_fk_requires_target_read_permission(client, normal_auth_headers):
 
 async def test_crud_roundtrip(client, auth_headers):
     """创建 -> 列表 -> 详情 -> 更新 -> 删除 -> 404。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     created = await client.post(URL, headers=auth_headers, json=payload)
     assert created.status_code == 201, created.text[:300]
     data = created.json()["data"]
     for key, value in payload.items():
+        # date/datetime 以 ISO 文本提交，回显可能带时区后缀（Tortoise 归一化），
+        # 比较时按解析后的时刻判断，而非字符串逐字相等
+        if isinstance(value, str) and ('T' in value or len(value) == 10):
+            from datetime import datetime as _dt
+            try:
+                _sent = _dt.fromisoformat(value)
+                _got = _dt.fromisoformat(str(data[key]))
+                if _sent.tzinfo is None and _got.tzinfo is not None:
+                    _got = _got.replace(tzinfo=None)
+                assert _sent == _got, key
+                continue
+            except ValueError:
+                pass
         assert data[key] == value, key
     obj_id = data["id"]
 
@@ -169,7 +182,7 @@ async def test_create_rejects_empty_payload(client, auth_headers):
 
 async def test_max_length_title(client, auth_headers):
     """title 超过 max_length=128 -> 400。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     payload['title'] = 'x' * 129
     response = await client.post(URL, headers=auth_headers, json=payload)
@@ -177,7 +190,7 @@ async def test_max_length_title(client, auth_headers):
 
 async def test_default_applied_quantity(client, auth_headers):
     """未传 quantity 时取规格默认值。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     response = await client.post(URL, headers=auth_headers, json=payload)
     assert response.status_code == 201, response.text[:300]
@@ -185,7 +198,7 @@ async def test_default_applied_quantity(client, auth_headers):
 
 async def test_invalid_choice_status_returns_400(client, auth_headers):
     """status 不在 choices 内 -> 400，且错误指向该字段。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     payload['status'] = '__invalid__'
     response = await client.post(URL, headers=auth_headers, json=payload)
@@ -194,7 +207,7 @@ async def test_invalid_choice_status_returns_400(client, auth_headers):
 
 async def test_default_applied_status(client, auth_headers):
     """未传 status 时取规格默认值。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     response = await client.post(URL, headers=auth_headers, json=payload)
     assert response.status_code == 201, response.text[:300]
@@ -202,7 +215,7 @@ async def test_default_applied_status(client, auth_headers):
 
 async def test_max_length_status(client, auth_headers):
     """status 超过 max_length=16 -> 400。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     payload['status'] = 'x' * 17
     response = await client.post(URL, headers=auth_headers, json=payload)
@@ -210,7 +223,7 @@ async def test_max_length_status(client, auth_headers):
 
 async def test_belongs_to_customer_must_exist(client, auth_headers):
     """customer_id 指向不存在的记录 -> 400。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     payload['customer_id'] = 999999
     response = await client.post(URL, headers=auth_headers, json=payload)
@@ -219,7 +232,7 @@ async def test_belongs_to_customer_must_exist(client, auth_headers):
 
 async def test_parent_customer_delete_blocked_by_child(client, auth_headers):
     """存在子记录时删除父记录 customer -> 409。"""
-    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
     payload = {'title': 'title-sample', 'amount': 1.5, 'customer_id': customer_1.id}
     assert (await client.post(URL, headers=auth_headers, json=payload)).status_code == 201
     blocked = await client.delete(f"/api/v1/customers/{customer_1.id}", headers=auth_headers)

@@ -19,6 +19,9 @@ def sample(f: FieldSpec, alt: bool = False):
         "int": 2 if alt else 1,
         "float": 2.5 if alt else 1.5,
         "bool": not alt,
+        # ISO 8601 文本：Date 规则接受，Tortoise DateField/DatetimeField 也接受
+        "date": "2025-03-15" if alt else "2024-01-10",
+        "datetime": "2025-03-15T09:30:00" if alt else "2024-01-10T08:00:00",
     }[f.type]
 
 
@@ -213,6 +216,19 @@ def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
         "    assert created.status_code == 201, created.text[:300]",
         '    data = created.json()["data"]',
         "    for key, value in payload.items():",
+        "        # date/datetime 以 ISO 文本提交，回显可能带时区后缀（Tortoise 归一化），",
+        "        # 比较时按解析后的时刻判断，而非字符串逐字相等",
+        "        if isinstance(value, str) and ('T' in value or len(value) == 10):",
+        "            from datetime import datetime as _dt",
+        "            try:",
+        "                _sent = _dt.fromisoformat(value)",
+        "                _got = _dt.fromisoformat(str(data[key]))",
+        "                if _sent.tzinfo is None and _got.tzinfo is not None:",
+        "                    _got = _got.replace(tzinfo=None)",
+        "                assert _sent == _got, key",
+        "                continue",
+        "            except ValueError:",
+        "                pass",
         "        assert data[key] == value, key",
         '    obj_id = data["id"]',
         "",

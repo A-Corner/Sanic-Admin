@@ -77,3 +77,39 @@ TODO：等 aerich 迁移链（feat/migrations-aerich-s2）合入后补充——�
   外键原值原样回传，也按"引用该目标"处理。若某类调用方不需要读目标表，
   应改为不传外键字段而不是依赖"值没变就跳过"。
 - 外键字段缺省（不传）时不触发该校验。
+
+## 字段类型
+
+`string` / `text` / `int` / `float` / `bool` / **`date`** / **`datetime`**。
+
+`date` 生成 `DateField`，`datetime` 生成 `DatetimeField`；API 校验用 `Date()` 规则
+（接受 `YYYY-MM-DD` 或 ISO 8601 文本），AMIS 表单用 `input-date` / `input-datetime`。
+注意 `datetime` 回显会带时区后缀（Tortoise 归一化为 UTC），客户端按解析后的时刻比较即可。
+
+## 列表排序（sorting）
+
+```yaml
+sorting:
+  default: -id              # 不带 ?ordering= 时的默认排序
+  allowed: [id, name, status]   # 白名单；未列入的字段传 ?ordering= 一律 400
+```
+
+`allowed` 留空表示**不接受任何** `?ordering=` 参数（传了就 400）——默认最小暴露面。
+
+## 软删除（soft_delete）
+
+```yaml
+soft_delete: true
+```
+
+开启后 `DELETE` 只把 `deleted` 置真（保留数据与审计痕迹），列表与详情默认过滤已删除行。
+关闭（默认）时 `DELETE` 走物理删除。
+
+## CI 集成
+
+```bash
+python -m tools.specgen check   # 生成物与 specs/ 不一致时退出码 1，CI 变红
+```
+
+CI 的 test job 已接入该步骤：改了规格却没重新生成、或手改了生成物，构建会直接失败。
+正向对照已实测（篡改一个生成文件 → 退出码 1；恢复 → 0）。

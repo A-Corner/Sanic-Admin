@@ -24,7 +24,14 @@ def _field_def(f: FieldSpec) -> str:
     if f.type == "string":
         cls, args = "CharField", [f"max_length={f.max_length}"]
     else:
-        cls = {"text": "TextField", "int": "IntField", "float": "FloatField", "bool": "BooleanField"}[f.type]
+        cls = {
+            "text": "TextField",
+            "int": "IntField",
+            "float": "FloatField",
+            "bool": "BooleanField",
+            "date": "DateField",
+            "datetime": "DatetimeField",
+        }[f.type]
     if f.unique:
         args.append("unique=True")
     if f.default is not None:
@@ -99,6 +106,9 @@ def _rules(f) -> List[str]:
         r.append(_INT_RULE)
     elif f.type == "float":
         r.append(_FLOAT_RULE)
+    elif f.type in ("date", "datetime"):
+        # 接受 YYYY-MM-DD 或 ISO 8601；空值放行（必填由 Required 负责）
+        r.append("Date()")
     else:
         r.append(f"Type({ {'string': 'str', 'text': 'str', 'bool': 'bool'}[f.type] })")
     if f.type == "string":
@@ -217,12 +227,14 @@ def render_resource(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
         f'    @requires_permission("{res}:read")',
         f"    async def get(self, request: Request, {res}_id: int = None):",
         f"        if {res}_id is not None:",
-        f"            obj = await {cls}.filter(id={res}_id).first()",
+        f"            obj = await {cls}.filter(id={res}_id{', deleted=False' if spec.soft_delete else ''}).first()",
         "            if obj is None:",
         '                return _error(f"{LABEL}不存在", NOT_FOUND, 404)',
         f'            return APIResponse.success(data={res}_info(obj), message=f"获取{{LABEL}}成功")',
         f"        query = {cls}.all()",
     ]
+    if spec.soft_delete:
+        L.append("        query = query.filter(deleted=False)")
     if search:
         L += [
             '        keyword = (request.args.get("keyword") or "").strip()',
@@ -232,10 +244,21 @@ def render_resource(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
             '                conds |= Q(**{name + "__contains": keyword})',
             "            query = query.filter(conds)",
         ]
+    sort_allowed = tuple(spec.sorting.allowed)
+    sort_default = spec.sorting.default or "-id"
     L += [
+        "        ordering = (request.args.get('ordering') or '').strip()",
+        f"        SORT_ALLOWED = {sort_allowed!r}",
+        "        if ordering:",
+        "            field = ordering[1:] if ordering.startswith('-') else ordering",
+        "            if field not in SORT_ALLOWED:",
+        '                return _error(f"不支持的排序字段：{field}", APIError.VALIDATION_ERROR, 400)',
+        "            order_clause = ordering",
+        "        else:",
+        f"            order_clause = {sort_default!r}",
         "        page, page_size = parse_pagination(request)",
         "        total = await query.count()",
-        '        rows = await query.order_by("-id").offset((page - 1) * page_size).limit(page_size)',
+        '        rows = await query.order_by(order_clause).offset((page - 1) * page_size).limit(page_size)',
         "        return APIResponse.list(",
         f"            items=[{res}_info(r) for r in rows], total=total, page=page, page_size=page_size,",
         '            message=f"获取{LABEL}列表成功",',
@@ -296,7 +319,14 @@ def render_resource(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
         "        for child, column, child_label in CHILDREN:",
         f"            if await child.filter(**{{column: {res}_id}}).exists():",
         '                return _error(f"存在关联的{child_label}，无法删除{LABEL}", APIError.CONFLICT, 409)',
-        "        await obj.delete()",
+        *(
+            [
+                "        obj.deleted = True",
+                '        await obj.save(update_fields=["deleted"])',
+            ]
+            if spec.soft_delete
+            else ["        await obj.delete()"]
+        ),
         '        return APIResponse.success(message=f"删除{LABEL}成功")',
         "",
         "",

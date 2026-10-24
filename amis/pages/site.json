@@ -80,7 +80,7 @@
             "label": "客户列表",
             "url": "/customer/list",
             "icon": "fa fa-list",
-            "schemaApi": "get:pages/customer-list.json?v=085d992052b9"
+            "schemaApi": "get:pages/customer-list.json?v=407c8d7c99dc"
           }
         ],
         "x-specgen": "customer"

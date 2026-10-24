@@ -30,6 +30,20 @@ fields:
   - name: notes
     type: text
     label: 备注
+  # (b) date / datetime 全链路示例
+  - name: birthday
+    type: date
+    label: 生日
+    list: true
+  - name: onboarded_at
+    type: datetime
+    label: 建档时间
+# (c) 列表排序白名单（未列入的字段传 ?ordering= 一律 400）
+sorting:
+  default: -id
+  allowed: [id, name, status, birthday]
+# (d) 软删除：DELETE 只置标记，列表/详情默认过滤已删除
+soft_delete: true
 menu:
   icon: fa-user-tie
   order: 60

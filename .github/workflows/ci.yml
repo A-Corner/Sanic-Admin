@@ -34,5 +34,10 @@ jobs:
     - name: Lint with ruff (hard fail on syntax errors / undefined names)
       run: ruff check . --select E9,F63,F7,F82
 
+    # 规格即代码：生成物必须与 specs/ 一致。改了规格却没重新生成（或手改
+    # 生成物）时这条会红，避免「规格说一套、代码跑另一套」的漂移。
+    - name: Verify generated artifacts match specs
+      run: python -m tools.specgen check
+
     - name: Test with pytest
       run: pytest --cov=app tests/ --cov-report=xml
