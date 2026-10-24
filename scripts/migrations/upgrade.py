@@ -27,8 +27,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
 
-MODELS_DIR = REPO / "migrations"
-MIGRATIONS_LOCATION = "migrations"
+#: aerich 的迁移根目录（location）与其下的 models 子目录是两个概念：
+#: location 传给 aerich，models 目录里才是基线文件
+MIGRATIONS_ROOT = REPO / "migrations"
+MODELS_DIR = MIGRATIONS_ROOT / "models"
 
 
 def _resolve_url(cli_url: str) -> str:
@@ -58,7 +60,7 @@ async def _upgrade(db_url: str) -> int:
     from app.aerich_config import build_tortoise_config
 
     command = Command(build_tortoise_config(db_url), app="models",
-                      location=MIGRATIONS_LOCATION)
+                      location=str(MIGRATIONS_ROOT))
     await command.init()
     # SQLite 上事务模式会死锁（aerich 官方的 --no-transaction 即为此场景）
     migrated = await command.upgrade(run_in_transaction=False)
