@@ -29,7 +29,7 @@ class Ticket(BaseModel):
             "title": self.title,
             "status": self.status,
             "priority": self.priority,
-            "due_date": self.due_date,
+            "due_date": self.due_date.isoformat() if self.due_date else None,
             "customer_id": self.customer_id,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),

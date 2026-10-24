@@ -121,6 +121,20 @@ def render_page(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
         col = {"type": "text", "label": f.title, "name": name, "placeholder": "-"}
         if isinstance(f, FieldSpec) and f.type == "bool":
             col = {"type": "status", "label": f.title, "name": name}
+        elif isinstance(f, FieldSpec) and f.type == "datetime":
+            # 列表里的 datetime 与表单控件保持同一套时区语义（v0.4.1）：
+            # 库里存 UTC，显示时换算成本地。不加 utc 的话 AMIS 会把
+            # `2026-12-01T02:00:00+00:00` 原样（或按 UTC）显示，用户看到的
+            # 就不是本地时间，与表单里的显示不一致。
+            # date 字段不动——它是纯日期，没有时区概念。
+            col = {
+                "type": "date",
+                "label": f.title,
+                "name": name,
+                "format": "YYYY-MM-DD HH:mm:ss",
+                "valueFormat": "YYYY-MM-DDTHH:mm:ssZ",
+                "utc": True,
+            }
         columns.append(col)
     columns.append({"type": "date", "label": "创建时间", "name": "created_at"})
     columns.append(

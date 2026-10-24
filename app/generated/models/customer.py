@@ -31,8 +31,8 @@ class Customer(BaseModel):
             "email": self.email,
             "status": self.status,
             "notes": self.notes,
-            "birthday": self.birthday,
-            "onboarded_at": self.onboarded_at,
+            "birthday": self.birthday.isoformat() if self.birthday else None,
+            "onboarded_at": self.onboarded_at.isoformat() if self.onboarded_at else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-在真实方言（MySQL 8 / PostgreSQL 16）上验证时区契约。
+在真实方言（MySQL 8 / PostgreSQL 16 / SQLite）上验证时区契约。
 
 对应 ``docs/timezone.md`` 的三条约定：
 
@@ -13,33 +13,40 @@
 
     python scripts/check_timezone_dialects.py mysql    "mysql://root:root@127.0.0.1:3306/tzcheck"
     python scripts/check_timezone_dialects.py postgres "postgres://postgres:root@127.0.0.1:5432/tzcheck"
-    python scripts/check_timezone_dialects.py sqlite   "sqlite://:memory:"   # 本地自查用
+    python scripts/check_timezone_dialects.py sqlite   "sqlite://:memory:"   # 本地自查
 
 退出码：
     0  全部通过
     1  契约不符
     2  用法/连接错误
 
-**为什么单独一个脚本**：SQLite 上 Tortoise 会自己把值归一成 UTC aware，所以本地
-测试跑绿不代表 MySQL 也对——MySQL 的 ``DATETIME`` **本身不带时区**，依赖 ORM
-在写入前转好。这里用**真实 Tortoise 连接**（不是裸 SQL）打到各方言上验证，
-因为要测的正是 ORM 的转换行为。
+## 为什么走 ORM 模型而不是裸 SQL
 
-实现方式：不定义 ORM 模型（``__main__`` 里的局部模型类 Tortoise 不认），
-而是用 ``conn.execute_script`` 建表 + ``conn.execute_query_dict`` 读写，
-再手工按 ORM 的语义把值送进 ``Tortoise`` 的字段转换路径。
+第一版用「脚本自己写的 `_to_aware_utc()` 解析 + 字面量拼 INSERT」——那是**自己证明
+自己**：断言的输入和实现都在这一个文件里，测不出应用的转换路径是否有问题。
+
+现在改为：把**原始文本**直接交给 Tortoise 的 `DatetimeField`，让 ORM 自己解析
+（这正是 `Customer.create(onboarded_at="2026-12-01T10:00:00+08:00")` 走的路径），
+写库、读回、再断言。这样测的是**应用真正依赖的那条链路**。
+
+## 为什么必须在真方言上跑
+
+SQLite 上 Tortoise 会自己把值归一成 UTC aware，本地绿不代表 MySQL 也对——
+MySQL 的 ``DATETIME`` **本身不带时区**，全靠 ORM 在写入前转好。
 """
 from __future__ import annotations
 
 import asyncio
 import datetime
 import sys
+from pathlib import Path
 
-#: 用于断言的样例值
-TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
-TZ_TOKYO = datetime.timezone(datetime.timedelta(hours=9))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "scripts"))
 
 #: (原始输入文本, 期望的 UTC 时刻, 说明)
+#: **输入保持为字符串**——由 ORM 解析，不由本脚本解析。
 CASES = [
     ("2026-12-01T10:00:00",
      datetime.datetime(2026, 12, 1, 10, 0, tzinfo=datetime.timezone.utc),
@@ -52,33 +59,31 @@ CASES = [
      "Z 后缀等同 +00:00"),
 ]
 
-
-def _to_aware_utc(text: str) -> datetime.datetime:
-    """按 API 契约把输入文本转成 UTC aware（naive 视为 UTC）。"""
-    dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=datetime.timezone.utc)
-    return dt.astimezone(datetime.timezone.utc)
+TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
+TZ_TOKYO = datetime.timezone(datetime.timedelta(hours=9))
 
 
 async def _run(dialect: str, url: str) -> int:
     from tortoise import Tortoise
-    from tortoise.backends.base.client import BaseDBAsyncClient
 
-    # 用连接字典 + 空 app 的形式：本脚本只要连接，不需要 ORM 模型
+    from tz_probe_model import TzProbe
+
     await Tortoise.init(
         config={
             "connections": {"default": url},
-            "apps": {"models": {"models": [], "default_connection": "default"}},
+            "apps": {"models": {
+                "models": ["tz_probe_model"],
+                "default_connection": "default",
+            }},
         },
         use_tz=True,
         timezone="UTC",
     )
-    conn: BaseDBAsyncClient = Tortoise.get_connection("default")
+    conn = Tortoise.get_connection("default")
     failures: list[str] = []
 
     # 表结构按方言区分：MySQL 的 DATETIME 不带时区（这正是要验证的点），
-    # PG 用 TIMESTAMPTZ，SQLite 用 TEXT。
+    # PG 用 TIMESTAMPTZ，SQLite 用 TEXT。**只在这里用 DDL**，数据读写全走 ORM。
     ddl_map = {
         "mysql": "CREATE TABLE tz_probe (id INT PRIMARY KEY AUTO_INCREMENT, "
                  "ts DATETIME(6) NULL)",
@@ -92,61 +97,44 @@ async def _run(dialect: str, url: str) -> int:
         await conn.execute_script(ddl_map[dialect])
 
         for raw, expected, label in CASES:
-            sent = _to_aware_utc(raw)
-            # 走 Tortoise 的字段转换（与 ORM 写入同一条路径）
-            from tortoise.fields import DatetimeField
-            field = DatetimeField(null=True)
-            to_db = field.to_db_value(sent, conn)
-            await conn.execute_script(
-                f"INSERT INTO tz_probe (ts) VALUES ('{to_db}')"
-            )
-            rows = await conn.execute_query_dict(
-                "SELECT ts FROM tz_probe ORDER BY id DESC LIMIT 1"
-            )
-            back = field.to_python_value(rows[0]["ts"])
-            if back is None:
+            # **关键**：把原始字符串交给 ORM，由 DatetimeField 自己解析与转换。
+            # 不做任何本脚本侧的预处理——那会变成自己证明自己。
+            obj = await TzProbe.create(ts=raw)
+            got = await TzProbe.get(id=obj.id)
+
+            if got.ts is None:
                 failures.append(f"{label}: 读回为 None")
                 continue
-            if back.tzinfo is None:
+            if got.ts.tzinfo is None:
                 failures.append(
-                    f"{label}: 读回是 naive（{back!r}）——{dialect} 上没有归一到 aware"
+                    f"{label}: 读回是 naive（{got.ts!r}）——{dialect} 上没有归一到 aware"
                 )
                 continue
-            if back != expected:
+            if got.ts != expected:
                 failures.append(
-                    f"{label}: 期望 {expected.isoformat()}，实际 {back.isoformat()}"
+                    f"{label}: 期望 {expected.isoformat()}，实际 {got.ts.isoformat()}"
                 )
                 continue
-            text = back.isoformat()
+            text = got.ts.isoformat()
             if "T" not in text:
                 failures.append(f"{label}: 输出 {text!r} 缺少 T 分隔符")
             elif not (text.endswith("+00:00") or text.endswith("Z")):
                 failures.append(f"{label}: 输出 {text!r} 缺少 UTC 偏移")
             else:
                 print(f"  OK  {dialect:9s} {label:28s} -> {text}")
-                print(f"              (写入库中的原始值: {to_db!r})")
 
         # 跨时区一致性：同一绝对时刻用不同偏移写入，读回必须相同
-        from tortoise.fields import DatetimeField
-        field = DatetimeField(null=True)
-        a_val = datetime.datetime(2026, 12, 1, 10, 0, tzinfo=TZ_SHANGHAI)
-        b_val = datetime.datetime(2026, 12, 1, 11, 0, tzinfo=TZ_TOKYO)
-        for v in (a_val, b_val):
-            await conn.execute_script(
-                f"INSERT INTO tz_probe (ts) VALUES ('{field.to_db_value(v, conn)}')"
-            )
-        rows = await conn.execute_query_dict(
-            "SELECT ts FROM tz_probe ORDER BY id DESC LIMIT 2"
-        )
-        ra = field.to_python_value(rows[1]["ts"])
-        rb = field.to_python_value(rows[0]["ts"])
-        if ra != rb:
+        a = await TzProbe.create(ts=datetime.datetime(2026, 12, 1, 10, 0, tzinfo=TZ_SHANGHAI))
+        b = await TzProbe.create(ts=datetime.datetime(2026, 12, 1, 11, 0, tzinfo=TZ_TOKYO))
+        ra = await TzProbe.get(id=a.id)
+        rb = await TzProbe.get(id=b.id)
+        if ra.ts != rb.ts:
             failures.append(
-                f"跨时区一致性失败：+08:00 的 10:00 读回 {ra.isoformat()}，"
-                f"+09:00 的 11:00 读回 {rb.isoformat()}——本应相同"
+                f"跨时区一致性失败：+08:00 的 10:00 读回 {ra.ts.isoformat()}，"
+                f"+09:00 的 11:00 读回 {rb.ts.isoformat()}——本应相同"
             )
         else:
-            print(f"  OK  {dialect:9s} 跨时区一致                    -> {ra.isoformat()}")
+            print(f"  OK  {dialect:9s} 跨时区一致                    -> {ra.ts.isoformat()}")
     finally:
         try:
             await conn.execute_script("DROP TABLE IF EXISTS tz_probe")

@@ -119,6 +119,28 @@ async def test_offset_input_converts_correctly(client, auth_headers):
     assert got == datetime.datetime(2026, 12, 1, 2, 0, tzinfo=datetime.timezone.utc)
 
 
+async def test_z_suffix_input_accepted(client, auth_headers):
+    """
+    `Z` 后缀的输入必须被接受，且等价于 `+00:00`。
+
+    Python 3.10 及更早的 `datetime.fromisoformat` **不接受** `Z`，
+    所以应用里凡是解析时间的路径都做了 `.replace("Z", "+00:00")` 处理
+    （`app/api/validators.py:269`、`app/api/resources/log.py:50`）。
+    这条用例保证该处理在真实请求里生效——CI 的 3.10 上必须通过。
+    """
+    payload = {
+        "name": "tz-z-suffix",
+        "email": "tz-z@example.com",
+        "onboarded_at": "2026-12-01T10:00:00Z",
+    }
+    resp = await client.post("/api/v1/customers", headers=auth_headers, json=payload)
+    assert resp.status_code == 201, (
+        f"Z 后缀输入被拒绝（HTTP {resp.status_code}）：{resp.text[:300]}"
+    )
+    got = _reparse(resp.json()["data"]["onboarded_at"])
+    assert got == datetime.datetime(2026, 12, 1, 10, 0, tzinfo=datetime.timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # 二、全仓守卫：所有 API 响应里的时间字段必须是 ISO 8601
 # ---------------------------------------------------------------------------
@@ -154,7 +176,11 @@ async def _seed_all(client, auth_headers) -> None:
         if payload is None:
             continue
         resp = await client.post(url, headers=auth_headers, json=payload)
-        if url == "/api/v1/customers" and resp.status_code in (200, 201):
+        # seed 失败必须报出来：否则后续「端点为空」的断言会写成误导性的原因
+        assert resp.status_code in (200, 201), (
+            f"造数据失败 {url}：HTTP {resp.status_code} {resp.text[:200]}"
+        )
+        if url == "/api/v1/customers":
             customer_id = (resp.json().get("data") or {}).get("id")
     if customer_id:
         await client.post("/api/v1/orders", headers=auth_headers, json={
@@ -213,20 +239,31 @@ async def test_all_api_datetime_fields_are_iso8601(client, auth_headers):
     # 序列化器（传 datetime 对象），**根本走不到 .json**——实测：把
     # Account.json 改回 str(datetime)，上面的扫描照样绿。
     # 认证响应里带 session.bearer.json，正好覆盖这条路径。
+    # 口令从 conftest 设置的环境变量取真实值（conftest.py:82 写入）。
     login_ok = await client.post("/auth/login", json={
-        "email": "SAdmin@Sanic.com",
-        "password": os.environ.get("INITIAL_ADMIN_PASSWORD", "test"),
+        "email": os.environ.get("INITIAL_ADMIN_EMAIL", "SAdmin@Sanic.com"),
+        "password": os.environ["INITIAL_ADMIN_PASSWORD"],
     })
-    if login_ok.status_code in (200, 403):
-        body = login_ok.json()
-        payload = body.get("data") or {}
-        for field in ("created_at", "updated_at"):
-            value = payload.get(field)
-            if isinstance(value, str) and value:
-                assert ISO_T_SEPARATOR in value, (
-                    f"认证响应 .json 路径的 {field}={value!r} 缺少 T 分隔符"
-                    "（模型 .json 属性可能又用回了 str()）"
-                )
+    # **不能写 `if status in (200, 403)`**：401 时会静默跳过，而这条断言是
+    # `.json` 路径唯一的覆盖——跳过就等于没测。复核指出过这一点。
+    assert login_ok.status_code == 200, (
+        f"登录失败（HTTP {login_ok.status_code}），无法验证 .json 路径："
+        f"{login_ok.text[:200]}"
+    )
+    body = login_ok.json()
+    payload = body.get("data") or {}
+    checked_json_path = 0
+    for field in ("created_at", "updated_at"):
+        value = payload.get(field)
+        assert isinstance(value, str) and value, (
+            f"认证响应的 {field} 缺失或不是字符串：{value!r}"
+        )
+        checked_json_path += 1
+        assert ISO_T_SEPARATOR in value, (
+            f"认证响应 .json 路径的 {field}={value!r} 缺少 T 分隔符"
+            "（模型 .json 属性可能又用回了 str()）"
+        )
+    assert checked_json_path == 2, f"只检查了 {checked_json_path} 个字段"
     # 正向对照：这条测试必须真的检查到东西，否则「0 个问题」毫无意义
     assert checked > 0, (
         f"没有检查到任何时间字段（端点 {_ENDPOINTS} 都为空或字段名不匹配）——"
@@ -251,14 +288,43 @@ def test_all_api_datetime_fields_are_iso8601_source_guard():
     import pathlib
     import re
 
-    bad = []
-    pattern = re.compile(
-        r"str\(\s*(self|setting|item|obj)\.(created_at|updated_at|date_created"
-        r"|date_updated|expires)\s*\)"
-    )
     root = pathlib.Path(__file__).resolve().parent.parent
-    for path in (root / "app").rglob("*.py"):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for m in pattern.finditer(text):
-            bad.append(f"{path.relative_to(root)}: {m.group(0)}")
-    assert not bad, "以下位置仍用 str() 序列化时间字段（应为 .isoformat()）：\n" + "\n".join(bad)
+    bad: list[str] = []
+
+    # 模式 1：`str(<任意表达式>.<时间字段>)` —— 从 `str(self.x)` 放宽到接收者任意，
+    # 因为实测漏掉的几处接收者不是 self/setting/item/obj 这几个固定名。
+    # 时间字段名清单（用于字符串匹配）
+    _DT_FIELDS = (
+        "created_at", "updated_at", "date_created", "date_updated",
+        "expires", "onboarded_at", "birthday",
+    )
+    # 匹配 `str(<接收者>.<时间字段>)`。接收者不限定为 self/setting/obj——
+    # 实测漏掉的那几处接收者各不相同。
+    p_str_dt = re.compile(
+        r"\bstr\(\s*[\w\.\[\]'\"]+\.(" + "|".join(_DT_FIELDS) + r")\s*\)"
+    )
+    # 匹配不带时区参数的 datetime.now()
+    p_naive_now = re.compile(r"datetime\.now\(\)")
+
+    #: 例外：`datetime.now()` 在这里的用途是拼**迁移文件名**（版本号形如
+    #: `20261024184457`），不是放进 API 响应。时区契约只管响应里的时间字段。
+    _NAIVE_NOW_ALLOWLIST = {
+        "tools/specgen/migrations.py",
+    }
+
+    for sub in ("app", "tools"):
+        for path in (root / sub).rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            rel = path.relative_to(root)
+            for m in p_str_dt.finditer(text):
+                bad.append(f"{rel}: {m.group(0)}")
+            if str(rel) in _NAIVE_NOW_ALLOWLIST:
+                continue
+            # datetime.now() 只在不带 timezone 参数时才违反契约
+            for m in p_naive_now.finditer(text):
+                bad.append(f"{rel}: {m.group(0)} —— 应为 datetime.now(datetime.timezone.utc)")
+
+    assert not bad, (
+        "以下位置的时间处理违反契约（str() 序列化 datetime，或无时区的 now()）：\n"
+        + "\n".join(bad)
+    )
