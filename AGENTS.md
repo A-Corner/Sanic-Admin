@@ -794,7 +794,66 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 
 ---
 
-## 12. 参考文件
+## 12. 测试与脚本里不要写死「当前有哪些」的名称或版本号
+
+**这是踩过两次的坑，两次都是「今天写的判据，明天会因为正常演进而假失败」。**
+
+### 实例一：`check_dialect_ddl.py` 写死增量版本号
+
+判据原为 `not m.startswith("1_")`（认为「不是 `1_*` 就是基线重跑」）。
+加第 2 条增量（M3 的 ticket 迁移，`2_*`）后立刻误报：
+
+```
+- 存量库不应重跑基线，实际应用了 ['2_20261024184457_specgen.py']
+```
+
+**正确做法**：按**基线文件名**判断，而不是版本号前缀：
+
+```python
+baseline_names = {p.name for p in models_dir.glob("0_*.py")}
+reran_baseline = [m for m in applied if m in baseline_names]
+```
+
+### 实例二：`test_permissions_and_menu_auto_registered` 写死资源名
+
+断言 `generated == ["customer", "order"]`。加 `ticket` 资源后假失败——
+而该用例的本意是「**所有**生成资源都注册了权限与菜单」，
+不是「恰好只有这两个」。
+
+**正确做法**：从权威来源动态取期望集合：
+
+```python
+expected = sorted(load_specs(ROOT / "specs", "specs"))
+assert generated == expected
+```
+
+### 判据
+
+写测试/校验时先问一句：
+
+> **这个断言里出现的名称、数量、版本号，是「规则」还是「今天的现状」？**
+
+- 是**现状**（当前有哪几个资源、当前最大版本号是几、当前有几个路由）→ 必须动态取，
+  从权威来源算（`specs/`、目录 glob、schema 定义）
+- 是**规则**（字段必须非空、类型必须匹配、权限必须四项）→ 可以写死
+
+写死现状的代价：每次正常演进都要改测试，而改的人往往会顺手把断言改松——
+**门禁就这样一点点失效**。
+
+### 附：枚举取值要从类型定义读，不要手抄
+
+`FieldType` 这样的 `Literal` 用 `typing.get_args()` 取全部取值：
+
+```python
+args = typing.get_args(FieldType)   # ('string', 'text', 'int', ...)
+```
+
+手抄的列表会在类型扩展时漏掉新值——M3 的 date/datetime 缺陷正是「类型加了、
+映射没加」，而手抄的测试列表也不会发现。
+
+---
+
+## 13. 参考文件
 
 | 文件 | 用途 |
 |---|---|
