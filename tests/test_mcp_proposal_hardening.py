@@ -342,15 +342,14 @@ def test_discard_rejects_malformed_branch_name(repo: Path) -> None:
 
 def test_marker_deletion_is_guarded_by_expected_sha(repo: Path) -> None:
     """
-    删标记时必须带期望值——`update-ref -d <ref> <expected>` 的 `expected` 不是摆设。
+    说明性测试：`git update-ref -d <ref> <expected>` 的语义（**不测我们的实现**）。
 
-    **为什么直接测 git 层**：在 `discard_proposal` 的流程里，标记 SHA 与分支
-    SHA 必须先一致才会走到删标记那一步；一致之后再去「并发改标记」需要精确
-    卡在两步之间，测试难以稳定复现。所以这里直接验证**被依赖的 git 语义**：
-    带期望值时实际 SHA 不匹配则拒绝删除。
+    **这条测试全程直接调用 `git`，一行实现代码都没走到。** 它证明的是
+    「git 在期望值不匹配时会拒绝删除」这个前提成立——不是「我们的实现用了它」。
+    把实现里删标记的期望值去掉，本测试**照样绿**（复核实测确认）。
 
-    这条与实现是契约级关系：实现依赖这个语义。若实现漏了 `expected`，
-    它会无条件删除——本测试演示了两者的差别。
+    真正测实现的是 `test_discard_passes_expected_sha_to_git`（下一条），
+    它 monkeypatch 记录实际 argv。两条要一起看：这条说明前提，那条验证实现遵守了前提。
     """
     ref = "refs/specgen/proposals/guard-check"
     a = _run(repo, "rev-parse", "master").strip()
@@ -381,6 +380,53 @@ def test_marker_deletion_is_guarded_by_expected_sha(repo: Path) -> None:
         cwd=str(repo), capture_output=True, text=True, env=_clean_env(),
     )
     assert ok.returncode == 0, f"期望值正确时应当能删：{ok.stderr[:200]}"
+
+
+def test_discard_passes_expected_sha_to_git(repo: Path, monkeypatch) -> None:
+    """
+    discard 必须把期望 SHA 传给 git——**直接记录实际 argv，不靠 git 自己证明**。
+
+    复核意见指出：上一条测试全程直调 `git`，把实现里的期望值去掉它照样绿。
+    这里 monkeypatch `_git_on_user_repo`，记录每次调用的 argv，再断言两次删除
+    调用的形态：
+
+    - 删分支：``["update-ref", "-d", "refs/heads/<b>", <marked_sha>]``
+    - 删标记：``["update-ref", "-d", "refs/specgen/proposals/<name>", <marked_sha>]``
+
+    **破坏实验**：把实现里删标记那次的 `marked` 去掉 → 本测试红（用 cp 备份恢复）。
+    """
+    import tools.mcp_server.git_isolation as gi
+
+    result = _propose(repo)
+    branch = result["branch"]
+    marked_sha = result["commit"]
+
+    recorded: list = []
+    real = gi._git_on_user_repo
+
+    def _spy(repo_root, args):
+        recorded.append(list(args))
+        return real(repo_root, args)
+
+    monkeypatch.setattr(gi, "_git_on_user_repo", _spy)
+    discard_proposal(repo, branch, force=True)
+
+    deletes = [a for a in recorded if a[0] == "update-ref" and "-d" in a]
+    assert len(deletes) == 2, f"应当有两次删除（分支 + 标记），实际 {deletes}"
+
+    ref_prefix = "refs/specgen/proposals/" + branch[len("proposal/"):]
+    branch_call = next((a for a in deletes if a[2] == f"refs/heads/{branch}"), None)
+    marker_call = next((a for a in deletes if a[2] == ref_prefix), None)
+
+    assert branch_call is not None, f"没找到删分支的调用：{deletes}"
+    assert marker_call is not None, f"没找到删标记的调用：{deletes}"
+
+    assert branch_call == ["update-ref", "-d", f"refs/heads/{branch}", marked_sha], (
+        f"删分支的调用形态不对（应带期望值 {marked_sha[:7]}）：{branch_call}"
+    )
+    assert marker_call == ["update-ref", "-d", ref_prefix, marked_sha], (
+        f"删标记的调用形态不对（应带期望值 {marked_sha[:7]}）：{marker_call}"
+    )
 
 
 # ---------------------------------------------------------------------------
