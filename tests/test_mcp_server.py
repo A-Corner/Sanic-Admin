@@ -697,30 +697,16 @@ def test_stdio_handshake_lists_tools():
     try:
         lines: "queue.Queue[str | None]" = queue.Queue()
 
-        def _pump():
-            """把 stdout 的每一行推进队列；EOF 时放一个 None 表示「服务端关闭」。"""
-            try:
-                for line in proc.stdout:
-                    lines.put(line)
-            finally:
-                lines.put(None)
-
-        reader = threading.Thread(target=_pump, daemon=True)
-        reader.start()
+        threading.Thread(target=_stdio_pump, args=(proc.stdout, lines),
+                         daemon=True).start()
 
         def send(payload):
             proc.stdin.write(json.dumps(payload) + "\n")
             proc.stdin.flush()
 
         def recv(timeout: float = STDIO_TIMEOUT_SECS):
-            try:
-                line = lines.get(timeout=timeout)
-            except queue.Empty:
-                raise AssertionError(
-                    f"服务端 {timeout}s 内没有响应（疑似挂起）；stderr={_drain_stderr(proc)[:2000]}"
-                ) from None
-            assert line is not None, f"服务端提前关闭了 stdout；stderr={_drain_stderr(proc)[:2000]}"
-            return json.loads(line)
+            # 与 test_stdio_reader_times_out_on_silent_server 共用同一实现
+            return _stdio_recv(lines, timeout, stderr_drain=lambda: _drain_stderr(proc))
 
         send({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -757,12 +743,44 @@ def test_stdio_handshake_lists_tools():
                 pass
 
 
+def _stdio_recv(lines, timeout, stderr_drain=None):
+    """
+    从 stdio 服务的输出队列里取一行 JSON-RPC 响应，带超时。
+
+    **抽成模块级 helper 是刻意的**：早先「超时正向对照」用例各自复制了一份 recv，
+    结果它测的是复制品、不是被测代码——把真正的 recv 改回会挂死的写法，那条
+    对照仍然绿。现在两个用例共用这一个实现，改坏它就一定两条都红。
+    """
+    try:
+        line = lines.get(timeout=timeout)
+    except queue.Empty:
+        detail = f"；stderr={stderr_drain()[:2000]}" if stderr_drain else ""
+        raise AssertionError(
+            f"服务端 {timeout}s 内没有响应（疑似挂起）{detail}") from None
+    assert line is not None, (
+        f"服务端提前关闭了 stdout"
+        + (f"；stderr={stderr_drain()[:2000]}" if stderr_drain else ""))
+    return json.loads(line)
+
+
+def _stdio_pump(stream, lines):
+    """把 stdout 的每一行推进队列；EOF 时放一个 None 表示「服务端关闭」。"""
+    try:
+        for line in stream:
+            lines.put(line)
+    finally:
+        lines.put(None)
+
+
 def test_stdio_reader_times_out_on_silent_server():
     """
-    正向对照：上面的超时机制本身要能转红。
+    正向对照：stdin 超时机制本身要能转红。
 
-    起一个「握手后什么都不回」的假服务端，`recv()` 必须在超时后判失败，而不是
-    一直阻塞——否则「改成线程+超时」只是看起来改了，实际上照样会挂死 CI。
+    起一个「握手后什么都不回」的假服务端，共用的 `_stdio_recv` 必须在超时后判失败，
+    而不是一直阻塞——否则「改成线程+超时」只是看起来改了，实际上照样会挂死 CI。
+
+    本用例用的是模块级 `_stdio_recv`，与 `test_stdio_handshake_lists_tools` 同一份
+    实现；把那个实现改回裸 `readline()`，两条用例都会红。
     """
     silent = subprocess.Popen(
         [sys.executable, "-c", "import sys; sys.stdin.read()"],
@@ -774,26 +792,12 @@ def test_stdio_reader_times_out_on_silent_server():
     )
     try:
         lines: "queue.Queue[str | None]" = queue.Queue()
-
-        def _pump():
-            try:
-                for line in silent.stdout:
-                    lines.put(line)
-            finally:
-                lines.put(None)
-
-        threading.Thread(target=_pump, daemon=True).start()
-
-        def recv(timeout):
-            try:
-                line = lines.get(timeout=timeout)
-            except queue.Empty:
-                raise AssertionError("服务端没有响应") from None
-            return line
+        threading.Thread(target=_stdio_pump, args=(silent.stdout, lines),
+                         daemon=True).start()
 
         started = time.monotonic()
         with pytest.raises(AssertionError):
-            recv(timeout=0.3)
+            _stdio_recv(lines, timeout=0.3)
         elapsed = time.monotonic() - started
         assert elapsed < 5, f"超时机制没生效，实际等了 {elapsed:.1f}s"
     finally:
