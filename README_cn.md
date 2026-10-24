@@ -1,16 +1,99 @@
 # Sanic-Admin（中文）
+**让 AI 改后台，但每一次改动都走 PR。**
 
-> **完整文档请看英文版 [README.md](README.md)。** 本文件是精简版：只保留最常用的信息，特性清单、证据表和限制说明以英文版为准。
->
+（英文版 [README.md](README.md) 是完整文档，本文件为精简中文版。）
+
+本框架基于 **Sanic**（异步 Python Web 框架）+ **Tortoise ORM**，内置 **RBAC** 权限与 **RS256 签名 JWT** 会话，管理界面采用 **AMIS**。你用一份 YAML 规格描述业务模块，确定性生成器产出模型、CRUD API、权限点、AMIS 页面、测试与三方言迁移——所有改动都以可评审的 diff 落地，而不是运行时直接改状态。
+
+## 三个核心点
+
+- **规格即代码**。一个模块一份 YAML；生成器确定性地产出模型、CRUD API、权限点、AMIS 页面、测试与 SQLite/MySQL/PostgreSQL 迁移。同样规格产出逐字节相同的结果——变更以 diff 评审，而不是对比两次数据库状态。证据：[v0.4.0 发布](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.0)与[十分钟演示](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/demo/ai-module-in-10-minutes.md)。
+- **AI 出提案，人来做合并**。MCP 服务提供五个只读工具，写入路径**默认关闭**：提案落在 `proposal/` 分支，四层独立机制保证 AI 不能 push、不能合并——合并永远是人的动作。见 [docs/mcp.md](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp.md) 与[四层机制论证](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp-write-path.md)。
+- **门禁真跑**。v0.4.0 发布树全量 **640 passed / 0 failed**；真实浏览器跑 **22 条 E2E 断言**；CI 起 MySQL 8 与 PostgreSQL 16 实跑迁移并对着 `information_schema` 断言列类型；Docker 验收真起容器——每道门禁都被设计成能够失败。证据：[v0.4.0 发布说明](https://github.com/A-Corner/Sanic-Admin/blob/v0.4.0/docs/release/v0.4.0-release-notes.md)。
+
+## 与 Directus / NocoBase 的对比
+
+| | Sanic-Admin | Directus | NocoBase |
+|---|---|---|---|
+| Schema 放在哪 | Git 里的 YAML 规格 | 数据库里（另有可导出的 schema snapshot） | 数据库里 |
+| AI 的改动怎么生效 | 改规格 → 生成器产出 diff → PR | 直接作用于运行实例；snapshot 可导出比对 | 直接作用于运行实例 |
+| 能否审查与回滚 | 每个改动都是 PR diff；回滚即 `git revert` | snapshot 可比对，但运行时改动不经代码评审 | 同 Directus |
+
+这些工具并不差——差别在事实源的位置：这里是一份可 diff 的文本住在 Git 里，AI 的产出在运行之前就能被逐行评审。
+
+## 五分钟上手
+
+```bash
+# 1) 起服务（compose 路径由 CI 的 Docker Acceptance 每次 push 实跑验证：
+#    https://github.com/A-Corner/Sanic-Admin/actions/workflows/docker.yml ）
+docker compose up -d        # 打开 http://127.0.0.1:22222
+
+# 2) 一份规格生成一个模块（输出为 2026-10-25 在 v0.4.1 基线上的实跑结果）
+cat > specs/asset.yaml <<'YAML'
+resource: asset
+table: assets
+plural: assets
+label: 资产
+description: 固定资产登记
+fields:
+  - name: name
+    type: string
+    max_length: 128
+    required: true
+    label: 名称
+    list: true
+    searchable: true
+  - name: serial_no
+    type: string
+    max_length: 64
+    required: true
+    label: 序列号
+    list: true
+  - name: purchased_at
+    type: date
+    label: 购入日期
+    list: true
+YAML
+python -m tools.specgen generate   # 完成：8 个文件更新，0 个陈旧文件清理
+python -m tools.specgen migrate    # migrations/dialects/{sqlite,mysql,postgres}/3_*_specgen.py 三方言各一份
+python -m tools.specgen check      # OK: 生成物与规格一致
+
+# 3) 接 MCP 只读层（完整配置见 docs/mcp.md）
+```
+
+```json
+{
+  "mcpServers": {
+    "sanic-admin-specgen": {
+      "command": "python",
+      "args": ["-m", "tools.mcp_server"],
+      "cwd": "/absolute/path/to/Sanic-Admin"
+    }
+  }
+}
+```
+
+五个只读工具：`list_resources`、`describe_resource`、`validate_spec`、`preview_generate`、`check`。
+
+## 演示：AI 加一个模块
+
+[ai-module-in-10-minutes.md](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/demo/ai-module-in-10-minutes.md) 记录了一次真实完整过程（含命令与输出）。顺利路径约 **8.5 分钟**；首次实跑用了 **1.5–2 小时**——浏览器 E2E 抓到了全绿 CI 漏掉的缺陷，这个差额正是门禁起作用的证据。
+
+## 已知限制
+
+- 生成器只处理**新增**：删列、改类型等破坏性迁移刻意要求手写。
+- MCP 写入路径是**原型**（默认关闭）；账户级 `spec:write` 权限正在 v0.4.2 落地。
+- 管理界面为 **AMIS 3.4.0**，6.x 升级评估在后。
+- **单一维护者**，尚无外部贡献者。
+- 尚不可用于生产环境——见下方项目状态。
+
+---
+
 > **项目状态**：最新版本为 **[v0.3.4](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.4)**（2026-10-24，鉴权加固），其前依次为 [v0.3.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.3)（控制台热修）与 v0.3.2；原始重构版本为 v0.2.0。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供；自 v0.3.4 起该值若强度不足，**生产环境拒绝启动**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
 >
 > **从 v0.3.1 及更早版本升级**需先运行 [v0.3.2 发布说明](docs/release/v0.3.2-release-notes.md) 中的迁移脚本（新增 `account.must_change_password`）；全新安装无需迁移。
 >
 > **许可证**：Apache-2.0，见 [LICENSE](LICENSE)。
-
-基于 **Sanic**（异步 Python Web 框架）+ **Tortoise ORM** 的后台管理框架，内置 **RBAC** 权限、**RS256 签名 JWT** 会话；管理界面采用 **AMIS** 低代码框架（由 JSON 页面定义驱动）。
-
----
 
 ## 特性
 
