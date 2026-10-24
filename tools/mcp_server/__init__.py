@@ -28,7 +28,9 @@ Sanic-Admin 规格即代码 MCP 服务（M2 第一段：只读与预演层）。
 from __future__ import annotations
 
 import difflib
+import functools
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -37,6 +39,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+from tools.specgen.schema import MAX_SPEC_TEXT_BYTES
+
 #: 资源名白名单：小写字母开头，仅小写字母/数字/下划线。
 #: 显式拒绝路径分隔符与 '..'，避免经资源名做路径穿越。
 RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -44,9 +48,8 @@ RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: 仓库根（可用 --root 覆盖，见 main()）
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-#: 对外输入上限：单次 spec 文本 64KB（超限直接拒绝，不进 YAML 解析器）。
-#: YAML 层的锚点/别名与嵌套深度上限由 tools.specgen.schema.SpecLoader 负责。
-MAX_SPEC_TEXT_BYTES = 64 * 1024
+# 输入上限 ``MAX_SPEC_TEXT_BYTES`` 只有一处定义：``tools.specgen.schema``
+# （解析器与 MCP 入口共用同一常量，避免两处各写一份后悄悄漂移）。
 
 
 class ToolError(Exception):
@@ -73,10 +76,81 @@ def _redact(text: str) -> str:
     # 长的先换，避免 /tmp 先把 /tmp/xxx 换掉一半
     for needle in sorted({r for r in replacements if r}, key=len, reverse=True):
         out = out.replace(needle, "<path>")
-    # 兜底：仍残留的绝对路径（POSIX 与 Windows 盘符）整段抹掉
-    out = re.sub(r"(?<![<\w.])/(?:[\w.\-]+/)*[\w.\-]+", "<path>", out)
-    out = re.sub(r"\b[A-Za-z]:\\(?:[\w.\-]+\\)*[\w.\-]+", "<path>", out)
+    # 兜底：仍残留的绝对路径（POSIX 与 Windows 盘符）整段抹掉。
+    # POSIX 规则收紧为「至少两段」，并排除前面紧挨 `:`、`/`、`.` 的情况：
+    # 既能抓住 `/Users/x/y`、`/etc/passwd` 这类真实泄露，又不会把正文里普通的
+    # 含斜杠文本（`string/int`、`a/b`、`foo (/bar)`、`http://host/x`）当成路径。
+    out = _ABS_POSIX_PATH_RE.sub("<path>", out)
+    out = _ABS_WINDOWS_PATH_RE.sub("<path>", out)
     return out
+
+
+#: 兜底用的绝对路径正则（见 :func:`_redact`）。
+#: POSIX 侧要求**至少两段**（`/a/b`），这既是真实路径的常态（`/etc/passwd`、
+#: `/Users/x/y.py`），也能避免把正文里普通的含斜杠文本（`a/b`、`foo (/bar)`）
+#: 误判成路径；单段绝对路径由 `_redact` 前面的「已知前缀替换」覆盖。
+_ABS_POSIX_PATH_RE = re.compile(r"(?<![\w.<:/>])/(?:[\w.\-]+/)+[\w.\-]+")
+_ABS_WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\(?:[\w.\-]+\\)*[\w.\-]+")
+
+#: 工具层统一出口日志（脱敏只会影响回给调用方的文本，服务端仍保留完整栈）
+_log = logging.getLogger(__name__)
+
+
+def _redact_errors(fn):
+    """
+    MCP 工具层统一出口：任何异常先脱敏，再回给调用方。
+
+    `docs/mcp.md` 承诺「错误信息里的本机绝对路径、HOME 与临时目录前缀统一脱敏」。
+    这条契约必须落在**所有**工具出口上，而不只是 `validate_spec` /
+    `preview_generate` 自己 catch 到的那几条：`list_resources`、`describe_resource`、
+    `check` 会让底层异常（读文件失败、YAML 解析、生成器）直接冒到 SDK，而
+    `FileNotFoundError` / `IsADirectoryError` 的消息里带着绝对路径。
+
+    做法：`ToolError` 也会过一遍 ``_redact``（历史上就有底层异常被包装成 ToolError
+    时夹带路径的情况），其余异常记一条服务端日志后转成脱敏过的 `ToolError`——
+    调用方拿到可读原因，本机路径不外泄。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ToolError as exc:
+            safe = _redact(exc)
+            if safe == str(exc):
+                raise
+            raise ToolError(safe) from None
+        except Exception as exc:  # noqa: BLE001  兜底：任何未预料的异常都要脱敏
+            _log.exception("工具 %s 执行失败", getattr(fn, "__name__", "?"))
+            raise ToolError(f"{getattr(fn, '__name__', '工具')} 执行失败：{_redact(exc)}") from None
+
+    return wrapper
+
+
+def _mcp_tool(fn):
+    """
+    MCP 注册层的出口包装：把「已脱敏的 ToolError」转成 SDK 的 `ToolError`。
+
+    不这么做的话，本模块自己的 `ToolError` 在 SDK 眼里是**未预料异常**，客户端只会
+    收到一句 ``Error executing tool <name>``，真实原因被丢掉。转换后，客户端拿到的
+    是脱敏后的可读原因，而 SDK 也不会把它当崩溃记 `logger.exception`。
+
+    `mcp` 只在真正起服务时才会 import，因此这里延迟导入，保证无 mcp 环境
+    （如只跑纯单元测试）仍可 import 本模块。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from mcp.server.mcpserver.exceptions import ToolError as MCPToolError
+
+        try:
+            return fn(*args, **kwargs)
+        except MCPToolError:
+            raise
+        except ToolError as exc:
+            raise MCPToolError(_redact(exc)) from None
+
+    return wrapper
 
 
 def _repo_root() -> Path:
@@ -144,6 +218,7 @@ def _generated_paths(name: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+@_redact_errors
 def list_resources() -> List[Dict[str, Any]]:
     """列出 specs/ 下全部资源规格及其字段摘要。只读。"""
     from tools.specgen.schema import load_specs
@@ -177,6 +252,7 @@ def list_resources() -> List[Dict[str, Any]]:
     return out
 
 
+@_redact_errors
 def describe_resource(name: str) -> Dict[str, Any]:
     """返回某资源的规格全文、生成物路径与权限点。只读。"""
     from tools.specgen.schema import load_spec
@@ -198,6 +274,7 @@ def describe_resource(name: str) -> Dict[str, Any]:
     }
 
 
+@_redact_errors
 def validate_spec(yaml_text: str) -> Dict[str, Any]:
     """用 pydantic 校验规格文本，返回带字段路径的错误。不落盘。"""
     from tools.specgen.schema import SpecError, parse_spec_text
@@ -254,6 +331,7 @@ def _repo_digest_snapshot() -> Dict[str, str]:
     return digests
 
 
+@_redact_errors
 def preview_generate(yaml_text: str) -> Dict[str, Any]:
     """
     在临时目录里生成，返回与当前仓库生成物的 unified diff。**不写仓库。**
@@ -344,6 +422,7 @@ def preview_generate(yaml_text: str) -> Dict[str, Any]:
     }
 
 
+@_redact_errors
 def check() -> Dict[str, Any]:
     """等价于 `python -m tools.specgen check`：生成物与规格是否一致。只读。"""
     from tools.specgen import generate
@@ -381,26 +460,33 @@ def build_server():
 
     # 显式给 name=：否则 SDK 以函数名注册，客户端看到的会是 list_resources_tool，
     # 与 docs/mcp.md 的工具契约不符。
+    # 每个 handler 都过一层 `_mcp_tool`：把本模块的 ToolError 转成 SDK 的
+    # ToolError，客户端才能收到脱敏后的**原因**而不是笼统的「执行失败」。
     @server.tool(name="list_resources", description="列出 specs/ 下的资源规格与字段摘要（只读）。")
+    @_mcp_tool
     def list_resources_tool() -> List[Dict[str, Any]]:
         return list_resources()
 
     @server.tool(name="describe_resource", description="返回指定资源的规格全文、生成物路径与权限点（只读）。")
+    @_mcp_tool
     def describe_resource_tool(name: str) -> Dict[str, Any]:
         """资源名仅允许小写字母、数字与下划线。"""
         return describe_resource(name)
 
     @server.tool(name="validate_spec", description="校验规格文本（pydantic），返回带字段路径的错误；不落盘。")
+    @_mcp_tool
     def validate_spec_tool(yaml_text: str) -> Dict[str, Any]:
         """yaml_text 为完整的规格 YAML 文本。"""
         return validate_spec(yaml_text)
 
     @server.tool(name="preview_generate", description="在临时目录生成并返回与仓库现状的 unified diff；不写仓库。")
+    @_mcp_tool
     def preview_generate_tool(yaml_text: str) -> Dict[str, Any]:
         """yaml_text 为完整的规格 YAML 文本。"""
         return preview_generate(yaml_text)
 
     @server.tool(name="check", description="检查生成物与规格是否一致（等价 specgen check）。")
+    @_mcp_tool
     def check_tool() -> Dict[str, Any]:
         return check()
 

@@ -14,10 +14,13 @@ preview 前后仓库文件快照一致（含「篡改必须被发现」的正向
 import json
 import os
 import pathlib
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -38,6 +41,28 @@ from tools.specgen.schema import SpecError, parse_spec_text, safe_load_spec
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CUSTOMER_SPEC = (ROOT / "specs" / "customer.yaml").read_text(encoding="utf-8")
+
+#: stdio 冒烟的单次读超时：服务端挂起时用它判失败，而不是把 CI 拖到 job 超时。
+STDIO_TIMEOUT_SECS = 30.0
+
+
+def _drain_stderr(proc, timeout: float = 1.0) -> str:
+    """尽力取一小段 stderr 供断言消息使用；拿不到就返回空串（不能让诊断本身挂住）。"""
+    try:
+        fd = proc.stderr.fileno()
+    except (AttributeError, ValueError, OSError):
+        return ""
+    try:
+        import select
+
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            return ""
+        chunk = os.read(fd, 4096)
+    except (OSError, ValueError):
+        return ""
+    return chunk.decode("utf-8", "replace")
+
 
 #: 典型「billion laughs」：约 300 字节，展开后是指数级节点。
 BILLION_LAUGHS = (
@@ -441,6 +466,164 @@ def test_preview_failure_message_is_redacted(monkeypatch):
     assert _redact("普通中文消息") == "普通中文消息"
 
 
+# ---------------------------------------------------------------------------
+# 统一脱敏：list_resources / describe_resource / check 三个出口也必须脱敏
+# ---------------------------------------------------------------------------
+
+
+def test_redact_leaves_ordinary_slashes_alone():
+    """
+    兜底正则收紧的正向对照：普通含斜杠文本不得被当成路径抹掉。
+
+    这些字符串在错误消息里很常见（类型对比、分隔符说明、URL），一旦误伤，
+    脱敏就会把原因改得看不懂——「不泄露」不能靠把文本清空来实现。
+    """
+    for text in (
+        "a/b",
+        "read/write",
+        "类型 string/int 不匹配",
+        "foo (/bar)",
+        "http://example.com/x",
+        "A/B 与 C/D 对照",
+        " 和/或 ",
+    ):
+        assert _redact(text) == text, f"普通文本被误当作路径：{text!r} -> {_redact(text)!r}"
+    # 反向对照：同样一段文本里真正的绝对路径仍必须被抹掉
+    assert _redact("/etc/passwd") == "<path>"
+    assert _redact("/Users/someone/secret/place/x.py") == "<path>"
+    assert _redact("见 /api/v1/x") == "见 <path>"
+    assert _redact("C:\\Users\\x\\y.py") == "<path>"
+
+
+def test_max_spec_text_bytes_has_single_definition():
+    """输入上限只允许一处定义：MCP 层必须导入 schema 的常量，而不是各写一份。"""
+    import tools.mcp_server as mcp_server
+    import tools.specgen.schema as schema_module
+
+    assert mcp_server.MAX_SPEC_TEXT_BYTES is schema_module.MAX_SPEC_TEXT_BYTES, (
+        "MCP 层又自己定义了一份 MAX_SPEC_TEXT_BYTES；两处各写一份会悄悄漂移"
+    )
+    source = pathlib.Path(mcp_server.__file__).read_text(encoding="utf-8")
+    assert "MAX_SPEC_TEXT_BYTES = " not in source, "MCP 层不应再出现常量的赋值定义"
+
+
+def test_list_resources_error_outlet_is_redacted(tmp_path, monkeypatch):
+    """
+    读坏规格：把 specs/order.yaml 改成非法 YAML，`load_specs` 会在读它时抛
+    `SpecError`。出口必须把它转成**脱敏后的** `ToolError`，而不是让底层异常
+    原样冒到 SDK。
+
+    再补一条「异常消息本身带绝对路径」的用例：仅靠「异常类型被包住」不能证明
+    脱敏生效，得确认路径真的被换成了占位符。
+    """
+    import tools.mcp_server as mcp_server
+    from tools.specgen import schema as schema_module
+
+    mini = _mini_repo(tmp_path)
+    (mini / "specs" / "order.yaml").write_text("resource: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "ROOT", mini)
+
+    with pytest.raises(ToolError) as exc:
+        list_resources()
+    assert_no_local_paths(str(exc.value), "list_resources 非法 YAML 错误：")
+
+    # 底层 OSError 的消息带绝对路径：出口必须抹掉
+    real_load_specs = schema_module.load_specs
+
+    def boom(spec_dir, rel_dir="specs"):
+        raise OSError(f"cannot list {mini}/specs: 输入/输出错误")
+
+    monkeypatch.setattr(schema_module, "load_specs", boom)
+    with pytest.raises(ToolError) as exc2:
+        list_resources()
+    message = str(exc2.value)
+    assert "<path>" in message, f"应把绝对路径换成占位符，实际：{message}"
+    assert str(mini) not in message, f"泄露了仓库绝对路径：{message}"
+    assert_no_local_paths(message, "list_resources OSError 错误：")
+    monkeypatch.setattr(schema_module, "load_specs", real_load_specs)
+
+
+def test_describe_resource_error_outlet_is_redacted(tmp_path, monkeypatch):
+    """describe_resource 出口同样脱敏：非法 YAML 与带路径的底层 OSError 各一条。"""
+    import tools.mcp_server as mcp_server
+    from tools.specgen import schema as schema_module
+
+    mini = _mini_repo(tmp_path)
+    (mini / "specs" / "customer.yaml").write_text("resource: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "ROOT", mini)
+
+    with pytest.raises(ToolError) as exc:
+        describe_resource("customer")
+    assert_no_local_paths(str(exc.value), "describe_resource 非法 YAML 错误：")
+
+    # 底层 OSError 的消息带绝对路径时，出口必须抹掉它（而不是原样回传）
+    real_load = schema_module.load_spec
+
+    def boom(path, rel):
+        raise OSError(f"cannot read {mini}/specs/customer.yaml: 输入/输出错误")
+
+    monkeypatch.setattr(schema_module, "load_spec", boom)
+    with pytest.raises(ToolError) as exc2:
+        describe_resource("customer")
+    message = str(exc2.value)
+    assert str(mini) not in message, f"泄露了仓库绝对路径：{message}"
+    assert "<path>" in message, f"应替换为占位符，实际：{message}"
+    assert_no_local_paths(message, "describe_resource OSError 错误：")
+    monkeypatch.setattr(schema_module, "load_spec", real_load)
+
+
+def test_check_error_outlet_is_redacted(tmp_path, monkeypatch):
+    """check 出口脱敏：缺接线文件时 `wiring_problems` 抛 FileNotFoundError（带绝对路径）。"""
+    import tools.mcp_server as mcp_server
+
+    mini = _mini_repo(tmp_path)
+    # 迷你仓库没有 app/models/__init__.py，wiring_problems 读它会带绝对路径抛错
+    (mini / "app" / "models").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mcp_server, "ROOT", mini)
+
+    with pytest.raises(ToolError) as exc:
+        check()
+    message = str(exc.value)
+    assert str(mini) not in message, f"泄露了仓库绝对路径：{message}"
+    assert "<path>" in message, f"应替换为占位符，实际：{message}"
+    assert_no_local_paths(message, "check 错误：")
+
+
+async def test_mcp_tool_layer_forwards_redacted_reason(tmp_path, monkeypatch):
+    """
+    MCP 工具层出口：客户端不该只看到笼统的「执行失败」。
+
+    本模块的 `ToolError` 在 SDK 眼里属于「未预料异常」，不转换的话客户端只会收到
+    ``Error executing tool <name>``，脱敏后的原因被丢掉。这里走**公开的**
+    `server.call_tool()`，断言 ①原因确实到达客户端、②路径已脱敏。
+    """
+    pytest.importorskip("mcp")
+    import tools.mcp_server as mcp_server
+
+    mini = _mini_repo(tmp_path)
+    monkeypatch.setattr(mcp_server, "ROOT", mini)
+
+    # 用底层读取失败（消息里带绝对路径）来触发「未预料异常」分支；
+    # 比 chmod 更确定——root 用户的 CI 上 chmod 000 照样能读。
+    from tools.specgen import schema as schema_module
+
+    def boom(path, rel):
+        raise OSError(f"cannot read {mini}/specs/customer.yaml")
+
+    monkeypatch.setattr(schema_module, "load_spec", boom)
+
+    server = mcp_server.build_server()
+    with pytest.raises(Exception) as exc:
+        await server.call_tool("describe_resource", {"name": "customer"})
+    message = str(exc.value)
+    assert "describe_resource" in message, f"应带上工具名，实际：{message}"
+    assert "cannot read" in message, f"应带上可读原因而不是只有「执行失败」，实际：{message}"
+    assert str(mini) not in message, f"客户端收到的错误里泄露了绝对路径：{message}"
+    assert_no_local_paths(message, "MCP 工具层错误：")
+
+
+
+
 def test_leak_detector_itself_is_effective():
     """
     正向对照：上面那条断言本身要能转红。
@@ -496,6 +679,10 @@ def test_stdio_handshake_lists_tools():
 
     覆盖「进程能起来、协议能握手、工具确实注册到线上」——单元测试用内存对象
     跑不出这一段。
+
+    读响应**必须带超时**：`proc.stdout.readline()` 在服务端挂起时不会返回，
+    整个测试会一直卡到 CI 的 job 超时（表现为「卡死」而不是「失败」）。这里用
+    读线程 + 队列超时，超时即判失败并带上 stderr 摘要。
     """
     pytest.importorskip("mcp")
     proc = subprocess.Popen(
@@ -508,13 +695,31 @@ def test_stdio_handshake_lists_tools():
         bufsize=1,
     )
     try:
+        lines: "queue.Queue[str | None]" = queue.Queue()
+
+        def _pump():
+            """把 stdout 的每一行推进队列；EOF 时放一个 None 表示「服务端关闭」。"""
+            try:
+                for line in proc.stdout:
+                    lines.put(line)
+            finally:
+                lines.put(None)
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+
         def send(payload):
             proc.stdin.write(json.dumps(payload) + "\n")
             proc.stdin.flush()
 
-        def recv():
-            line = proc.stdout.readline()
-            assert line, f"服务端没有响应；stderr={proc.stderr.read()[:2000]}"
+        def recv(timeout: float = STDIO_TIMEOUT_SECS):
+            try:
+                line = lines.get(timeout=timeout)
+            except queue.Empty:
+                raise AssertionError(
+                    f"服务端 {timeout}s 内没有响应（疑似挂起）；stderr={_drain_stderr(proc)[:2000]}"
+                ) from None
+            assert line is not None, f"服务端提前关闭了 stdout；stderr={_drain_stderr(proc)[:2000]}"
             return json.loads(line)
 
         send({
@@ -550,6 +755,60 @@ def test_stdio_handshake_lists_tools():
                 stream.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def test_stdio_reader_times_out_on_silent_server():
+    """
+    正向对照：上面的超时机制本身要能转红。
+
+    起一个「握手后什么都不回」的假服务端，`recv()` 必须在超时后判失败，而不是
+    一直阻塞——否则「改成线程+超时」只是看起来改了，实际上照样会挂死 CI。
+    """
+    silent = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        lines: "queue.Queue[str | None]" = queue.Queue()
+
+        def _pump():
+            try:
+                for line in silent.stdout:
+                    lines.put(line)
+            finally:
+                lines.put(None)
+
+        threading.Thread(target=_pump, daemon=True).start()
+
+        def recv(timeout):
+            try:
+                line = lines.get(timeout=timeout)
+            except queue.Empty:
+                raise AssertionError("服务端没有响应") from None
+            return line
+
+        started = time.monotonic()
+        with pytest.raises(AssertionError):
+            recv(timeout=0.3)
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, f"超时机制没生效，实际等了 {elapsed:.1f}s"
+    finally:
+        silent.terminate()
+        try:
+            silent.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover
+            silent.kill()
+            silent.wait()
+        for stream in (silent.stdin, silent.stdout, silent.stderr):
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+
 
 
 # ---------------------------------------------------------------------------
