@@ -127,9 +127,12 @@ async def on_login(request):
         two_step_session = await request_two_step_verification(
             request, authentication_session.bearer
         )
-        delivery = _delivery_code(request, two_step_session.code)
-        delivery["must_change_password"] = must_change_password
-        response = json("登录成功! 需要两步验证。", delivery)
+        # _delivery_code 返回 str（DEBUG）或 None，不是 dict：在此组装响应体
+        data = {
+            "code": _delivery_code(request, two_step_session.code),
+            "must_change_password": must_change_password,
+        }
+        response = json("登录成功! 需要两步验证。", data)
         two_step_session.encode(response)
     else:
         data = dict(authentication_session.bearer.json)

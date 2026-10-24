@@ -51,6 +51,10 @@ PASSWORD_CHANGE_EXEMPT_PREFIXES = (
     "/auth/login",
     "/auth/logout",
     "/auth/change-password",
+    # 2FA 流程：get_valid_session 不区分二次验证是否完成，标志为 True 的用户
+    # 必须能先完成 2FA（拿到已验证会话）才能调用 change-password
+    "/auth/validate-2fa",
+    "/two-step",
     "/amis",
     "/health",
     "/static",
