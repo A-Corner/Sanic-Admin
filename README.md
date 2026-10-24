@@ -2,9 +2,10 @@
 
 > **Project status — read this first**
 >
-> - Sanic-Admin was rebuilt for **v0.2.0** (released 2026-10-22) and carries maintenance fixes in **v0.2.1**. Every statement below was verified by running it on the release candidate (`release/v0.2.1`, base `944a9e2`); anything that could not be verified is listed under *Known limitations* in the [release notes](docs/release/v0.2.0-release-notes.md).
+> - The latest release is **[v0.3.4](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.4)** (2026-10-24), an authentication-hardening patch on top of [v0.3.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.3) (console hotfix) and v0.3.2. The original rebuild landed in **v0.2.0**. Everything below was verified by running it, and anything that could not be verified is listed under *Known limitations* in the per-release [release notes](docs/release/).
+> - **Upgrading from v0.3.1 or earlier** requires running the migration script described in the [v0.3.2 release notes](docs/release/v0.3.2-release-notes.md) — it adds `account.must_change_password`. Fresh installations need no migration.
 > - **Not production-ready yet.** Do not deploy this to a public environment.
-> - **No credentials are baked into the repository.** There is no default administrator password. The first-run administrator password is generated at startup (development only) or must be supplied via `INITIAL_ADMIN_PASSWORD`.
+> - **No credentials are baked into the repository.** There is no default administrator password. The first-run administrator password is generated at startup (development only) or must be supplied via `INITIAL_ADMIN_PASSWORD`. Since v0.3.4 that value is held to the password strength rule and **production refuses to start** if it is too weak.
 > - Secrets are **environment variables only** — the repository contains none. The JWT signing key and the initial administrator password are the two that production requires; a sample key that existed in the repository history must be treated as compromised and rotated.
 > - Report security issues privately — see [SECURITY.md](SECURITY.md).
 
@@ -27,6 +28,10 @@ Every entry below is traced to code in this repository and was verified by runni
 | Sessions delivered as an `HttpOnly` cookie **and** an `Authorization` header | `app/models/session.py` — `Session.encode` |
 | Rejects unauthenticated access to protected endpoints | `app/auth/authentication.py` — `requires_authentication`; verified: `POST /auth` without a session returns HTTP 401 |
 | No administrator password in source; generated at startup or supplied by env var | `app/config.py` — `_generate_admin_password`, `_env_secret` |
+| Forced password change on first login (v0.3.2) | `app/models/account.py` — `must_change_password`; an administrator created from `INITIAL_ADMIN_PASSWORD` must change it before the rest of the API answers |
+| Authentication events written to the operation log (v0.3.4) | `app/services/audit.py` — `record_auth_event`; login success/failure, logout, password change and 2FA outcomes recorded as `operation_type="auth"`. No passwords, tokens or codes are written |
+| Password-change rate limiting and strength rules (v0.3.4) | `app/auth/authentication.py` — `validate_password_strength`, `validate_not_banlisted`; enforced in `Account.set_password()`, so registration, admin-created accounts and admin resets are covered too. **Breaking:** 429 after repeated wrong current-password entries; after a successful change every session for the account is revoked and a fresh one is issued (`token_rotated: true`) |
+| Login rate limiting (v0.3.0) | `app/auth/rate_limit.py` — `LoginRateLimiter`, counted per account and per IP |
 
 ### RBAC authorization
 
@@ -325,6 +330,9 @@ The secrets are the two that gate startup — `JWT_PRIVATE_KEY` and `INITIAL_ADM
 | [docs/configuration.md](docs/configuration.md) | Every environment variable, its default and its per-environment behaviour |
 | [docs/architecture.md](docs/architecture.md) | Module layout, request flow and data model |
 | [docs/release/v0.2.0-release-notes.md](docs/release/v0.2.0-release-notes.md) | v0.2.0 release notes: scope, what was verified and the known limitations |
+| [docs/release/v0.3.2-release-notes.md](docs/release/v0.3.2-release-notes.md) | v0.3.2: forced password change on first login, 2FA fix, **migration required from v0.3.1 and earlier** |
+| [docs/release/v0.3.3-release-notes.md](docs/release/v0.3.3-release-notes.md) | v0.3.3: console role-dialog hotfix, E2E gate repair, `amis-e2e` CI job |
+| [docs/release/v0.3.4-release-notes.md](docs/release/v0.3.4-release-notes.md) | v0.3.4: authentication hardening — audit log, rate limiting, password strength, session rotation (two breaking changes) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, branch and PR workflow, code style |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability privately |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 |
