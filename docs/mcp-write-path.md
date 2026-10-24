@@ -319,17 +319,17 @@ exit 1
 | `propose_spec_change` / `list_proposals` / `discard_proposal` 注册 | `tools/mcp_server/write_tools.py` | **默认不注册**，需 `--allow-write` |
 | `--allow-write` 启动开关 | `tools/mcp_server/__init__.py` | 不加则 `tools/list` 里没有写入工具 |
 | 审计写 stderr（结构化 JSON） | `write_tools.py` `_audit()` | 不依赖数据库，不写规格全文 |
+| **提案归属标记**：`refs/specgen/proposals/<name>` → commit SHA | `proposal_registry.py` `proposal_ref()` | `discard_proposal` 必须同时满足：①`proposal/` 前缀 ②存在归属标记 ③标记 SHA == 分支当前 SHA。任一条不满足即拒绝 |
+| **临时目录残留清理** | `proposal_registry.py` `cleanup_stale_workspaces()` | 启动时（仅 `--allow-write`）清理：只扫 tempdir 一层、名字匹配 `sanic-specgen-*`、**必须**有标记文件 `.sanic-specgen-workspace`、mtime 超 24h、pid 非当前进程。绝不按通配删除 |
 | resource 名白名单 `^[a-z][a-z0-9_]{0,40}$` | `tools/mcp_server/__init__.py` | 长度上限 41 字符（首字符 + 最多 40） |
 
 ### 9.2 未实现（本原型刻意不做）
 
 | 项 | 原因 |
 |---|---|
-| **24h 临时目录残留清理** | **TODO**。当前靠 `finally: shutil.rmtree()` 清理；进程被 kill 时会残留。原型阶段不做自动回收——自动删可能删掉人正在看的东西。后续加一个「启动时清理超过 24h 且标记为本工具创建的目录」的步骤 |
 | 生成器与迁移的实际调用 | 最小原型只做「写规格 → 提交 → fetch」。生成与迁移在 `preview_generate` 的路径里已有，接线留到下一轮 |
 | `describe_proposal`（返回某提案的完整 diff 与元数据） | 设计初稿列为工具之一，**未实现**。当前用 `list_proposals` 看分支与 commit，完整 diff 需要人工 `git show` |
 | `apply_proposal`（把提案写回主工作区） | **刻意不做**。应用应当由人执行 `git merge` / `git cherry-pick`；加了它等于绕开「人来合并」 |
-| `discard_proposal` 只删本工具创建的分支 | 当前只校验 `proposal/` 前缀。分支上记 note 或维护注册表属于下一轮——当前前缀足够区分，但不够强 |
 | 提案分支过期清理 | 由 `list_proposals` + 人工 `discard_proposal` 处理，不自动回收 |
 
 ### 9.3 已定事项

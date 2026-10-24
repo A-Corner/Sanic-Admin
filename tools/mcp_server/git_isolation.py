@@ -22,6 +22,11 @@ import time
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from tools.mcp_server.proposal_registry import (
+    make_workspace,
+    proposal_ref,
+)
+
 _log = logging.getLogger(__name__)
 
 #: 允许的 git 子命令白名单。
@@ -92,7 +97,7 @@ _ALLOWED_ARGS: dict = {
     "rev-parse": (("--verify", "--abbrev-ref", "--short", "--show-toplevel"), 1),
     "ls-files": ((), 1),
     "checkout": (("-b", "-q", "--detach"), 2),
-    "update-ref": ((), 2),
+    "update-ref": (("-d",), 2),
     "show": (("--stat", "--format=", "--name-only"), 1),
 }
 
@@ -340,7 +345,8 @@ def make_proposal(
         raise GitNotAllowed(f"分支名必须以 {PROPOSAL_PREFIX!r} 开头，实际 {branch!r}")
 
     repo_root = repo_root.resolve()
-    tmp_root = Path(tempfile.mkdtemp(prefix="mcp-proposal-"))
+    # 用带标记文件的固定前缀目录：既是隔离工作区，也让残留清理能识别归属
+    tmp_root = make_workspace()
     clone_dir = tmp_root / "repo"
     try:
         # 1) 隔离 clone：--no-hardlinks 强制真实复制，避免与用户仓库共享 inode
@@ -377,6 +383,9 @@ def make_proposal(
             )
         # 7) fetch 回用户仓库（在用户仓库这一侧执行）
         fetch_from_local_clone(repo_root, clone_dir, branch)
+        # 8) 写归属标记 ref：discard 靠它判断「是不是本工具建的」。
+        #    放在 fetch 之后——分支确实落地了才登记，否则会留下指向空气的标记。
+        _git(["update-ref", proposal_ref(branch), commit], cwd=repo_root)
         return {
             "branch": branch,
             "commit": commit,
@@ -436,11 +445,46 @@ def list_proposal_branches(repo_root: Path) -> List[dict]:
 
 
 def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> None:
-    """删除提案分支。只允许 ``proposal/`` 前缀。"""
+    """
+    删除提案分支。**必须同时满足三条**才允许删：
+
+    1. 分支名是 ``proposal/`` 前缀
+    2. 存在归属标记 ``refs/specgen/proposals/<name>``（证明是本工具创建的）
+    3. 标记指向的 SHA 等于分支当前 SHA（证明分支没被人改过）
+
+    只按前缀删是危险的：任何人手工建一个 ``proposal/xxx`` 就能被本工具删掉，
+    而删除不可逆。归属标记把「命名约定」换成了「可验证的证据」。
+    """
     if not branch.startswith(PROPOSAL_PREFIX):
         raise GitNotAllowed(f"只能删除 {PROPOSAL_PREFIX!r} 前缀的分支，实际 {branch!r}")
+
+    if not branch_exists(repo_root, branch):
+        raise GitNotAllowed(f"分支不存在：{branch!r}")
+
+    ref = proposal_ref(branch)
+    try:
+        marked = _git(["rev-parse", "--verify", f"{ref}^{{commit}}"],
+                      cwd=repo_root).strip()
+    except subprocess.CalledProcessError:
+        raise GitNotAllowed(
+            f"拒绝删除 {branch!r}：没有归属标记（{ref}）。"
+            "本工具只删除自己创建的提案分支——手工建立的同名分支不会被删。"
+        ) from None
+
+    current = _git(["rev-parse", f"{branch}^{{commit}}"], cwd=repo_root).strip()
+    if marked != current:
+        raise GitNotAllowed(
+            f"拒绝删除 {branch!r}：分支已被改动（标记指向 {marked[:7]}，"
+            f"分支现在 {current[:7]}）。请人工确认后再处理。"
+        )
+
     flag = "-D" if force else "-d"   # -d 对未合并分支会失败，形成二次确认
     _git(["branch", flag, branch], cwd=repo_root)
+    # 分支删掉后归属标记也要清掉，否则下次同名分支会撞上一个陈旧标记
+    try:
+        _git(["update-ref", "-d", ref], cwd=repo_root)
+    except subprocess.CalledProcessError:
+        pass
 
 
 def branch_exists(repo_root: Path, branch: str) -> bool:
