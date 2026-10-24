@@ -44,6 +44,10 @@ def _setup_request_logging(app: Sanic) -> None:
             logger.debug(f"请求完成: {request.method} {request.path} - {response.status} - {elapsed:.4f}s")
 
 
+#: 应用级认证/强制改密中间件的优先级（高于蓝图中间件默认的 0）。
+AUTH_MIDDLEWARE_PRIORITY = 100
+
+
 def register_all_middlewares(app: Sanic) -> None:
     """
     注册所有中间件
@@ -54,7 +58,10 @@ def register_all_middlewares(app: Sanic) -> None:
     setup_error_handlers(app)
     setup_security_middleware(app)
     _setup_request_logging(app)
-    app.middleware('request')(AuthMiddleware())
+    # 显式 priority：Sanic 中数值大者先执行。强制改密检查必须先于 /api 蓝图组
+    # 中间件（默认 priority=0，见 app/api/__init__.py），避免执行顺序随 app 实例
+    # 注册先后而变（2FA 未完成的强制改密会话在 /api 上稳定得到 403）。
+    app.middleware('request', priority=AUTH_MIDDLEWARE_PRIORITY)(AuthMiddleware())
 
     # 上传目录不再静态托管，文件下载走 /api/v1/files/<id>/download（自带鉴权），
     # 下载计数由该资源内部维护，不再需要全局下载计数中间件。
