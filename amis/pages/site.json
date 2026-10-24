@@ -99,6 +99,21 @@
           }
         ],
         "x-specgen": "order"
+      },
+      {
+        "label": "工单管理",
+        "url": "/ticket",
+        "redirect": "/ticket/list",
+        "icon": "fa fa-headset",
+        "children": [
+          {
+            "label": "工单列表",
+            "url": "/ticket/list",
+            "icon": "fa fa-list",
+            "schemaApi": "get:pages/ticket-list.json?v=28e4a7f93677"
+          }
+        ],
+        "x-specgen": "ticket"
       }
     ]
   }

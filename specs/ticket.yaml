@@ -1,0 +1,48 @@
+# 工单：M3 演示用规格（文档见 docs/demo/ai-module-in-10-minutes.md）。
+# 演示要点：只改这一个文件，其余全部由生成器产出，人不需要写代码。
+resource: ticket
+table: tickets
+plural: tickets
+label: 工单
+description: 客户工单
+fields:
+  - name: title
+    type: string
+    max_length: 128
+    required: true
+    label: 标题
+    list: true
+    searchable: true
+  - name: status
+    type: string
+    max_length: 16
+    default: open
+    choices: [open, in_progress, resolved, closed]
+    label: 状态
+    list: true
+  - name: priority
+    type: string
+    max_length: 8
+    default: normal
+    choices: [low, normal, high, urgent]
+    label: 优先级
+    list: true
+  - name: due_date
+    type: date
+    label: 期望完成日
+    list: true
+belongs_to:
+  - name: customer
+    target: customer
+    required: true
+    label: 客户
+    list: true
+# 列表排序白名单：未列入的字段传 ?ordering= 一律 400
+sorting:
+  default: -id
+  allowed: [id, title, status, priority, due_date]
+# 软删除：DELETE 只置标记，列表/详情默认过滤已删除
+soft_delete: true
+menu:
+  icon: fa-headset
+  order: 80

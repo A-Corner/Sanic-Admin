@@ -8,7 +8,8 @@ from app.generated.permissions import register_permissions
 
 from app.generated.resources.customer import CustomerResource
 from app.generated.resources.order import OrderResource
+from app.generated.resources.ticket import TicketResource
 
 register_permissions()
 
-GENERATED_RESOURCE_CLASSES = [CustomerResource, OrderResource]
+GENERATED_RESOURCE_CLASSES = [CustomerResource, OrderResource, TicketResource]

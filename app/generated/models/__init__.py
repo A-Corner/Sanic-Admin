@@ -6,5 +6,6 @@
 
 from app.generated.models.customer import Customer
 from app.generated.models.order import Order
+from app.generated.models.ticket import Ticket
 
-__all__ = ['Customer', 'Order']
+__all__ = ['Customer', 'Order', 'Ticket']
