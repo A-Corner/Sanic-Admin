@@ -24,7 +24,7 @@ from app.auth.verification import (
     request_captcha,
 )
 from app.middleware.security_middleware import issue_csrf_token
-from app.services.exceptions import CredentialsError, ValidationError
+from app.services.exceptions import CredentialsError, RateLimitExceededError, ValidationError
 
 
 # 创建认证相关蓝图
@@ -33,6 +33,26 @@ capt_bp = Blueprint("capt", url_prefix="/capt")
 two_step_bp = Blueprint("two-step", url_prefix="/two-step")
 role_bp = Blueprint("roles", url_prefix="/roles")
 account_bp = Blueprint("account", url_prefix="/account")
+
+
+def _mask_identity(identity: str) -> str:
+    """把登录标识脱敏后写进审计：只保留域名或首尾字符。
+
+    审计需要「是谁在尝试」以便事后归因，但不能留下完整邮箱或用户名——
+    日志往往比口令库更容易被读到。
+    """
+    text = str(identity or "").strip()
+    if not text:
+        return "-"
+    if "@" in text:
+        _, _, domain = text.partition("@")
+        return f"***@{domain}"
+    # 非邮箱标识：短标识（≤4）只留长度，避免把整个用户名暴露在日志里；
+    # 较长的才保留前 2 位便于人工归因。
+    if len(text) <= 4:
+        return f"***({len(text)})"
+    return f"{text[:2]}***({len(text)})"
+
 
 
 def _delivery_code(request, code: str):
@@ -92,21 +112,42 @@ async def on_login(request):
     limiter = LoginRateLimiter.from_request(request)
     identity = limiter.submitted_identity(request)
     if identity:
-        await limiter.raise_if_blocked(identity, request)
+        try:
+            await limiter.raise_if_blocked(identity, request)
+        except RateLimitExceededError:
+            # 被限流拦下的尝试也要留痕，否则事后查不到「有人在这个窗口内被拒」
+            from app.services.audit import record_auth_event
+
+            await record_auth_event(request, "login_failure", status="failure",
+                                    detail=f"限流拦截 identity={_mask_identity(identity)}")
+            raise
 
     # 是否启用二次验证只由服务端配置决定，忽略客户端参数
     two_factor_authentication = bool(getattr(settings, "REQUIRE_TWO_FACTOR", False))
+    from app.services.audit import record_auth_event
+
     try:
         authentication_session = await login(request, require_second_factor=two_factor_authentication)
     except CredentialsError:
         # 仅凭据错误计入失败次数（未验证/禁用等账户状态问题不属于口令猜测）
         if identity:
             await limiter.record_failure(identity, request)
+        await record_auth_event(
+            request, "login_failure", status="failure",
+            detail=f"凭据错误 identity={_mask_identity(identity) if identity else '-'}")
+        raise
+    except Exception:
+        # 其它登录失败（未验证/禁用/已删除等）：同样留痕后原样抛出
+        await record_auth_event(
+            request, "login_failure", status="failure",
+            detail=f"账户状态不可用 identity={_mask_identity(identity) if identity else '-'}")
         raise
 
-    # 成功登录清零该维度的失败计数
+    # 成功登录清零该维度的失败计数（登录成功时两个维度都清，属正常语义）
     if identity:
         await limiter.clear(identity, request)
+    await record_auth_event(request, "login_success",
+                            account=authentication_session.bearer)
 
     # 首次登录强制改密标志随登录响应透出（AMIS 登录页据此弹改密对话框）
     must_change_password = bool(getattr(authentication_session.bearer, "must_change_password", False))
@@ -143,18 +184,48 @@ async def on_change_password(request):
     必须携带有效会话（认证中间件已附加 authentication_session）；
     强制改密拦截（见 security_middleware）放行本端点与 logout，
     其余 /api/ 请求在标志清除前一律 403。
+
+    SA-v034-L1 加固：
+    * 当前口令试错按账户维度限速（复用登录限流器，窗口内失败 N 次返回 429）；
+    * 新口令除长度外还要求至少两类字符，且不得为系统已知弱口令或与邮箱相同；
+    * 改密成功后轮换当前会话 token（旧会话立即作废，新会话下发给客户端）。
     """
-    from app.auth.authentication import MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH, _text_field
+    from app.auth.authentication import (
+        MAX_PASSWORD_LENGTH,
+        MIN_PASSWORD_LENGTH,
+        _text_field,
+        validate_not_banlisted,
+        validate_password_strength,
+    )
+    from app.services.audit import record_auth_event
     from app.services.exceptions import SessionValidationError
 
     session = getattr(request.ctx, "authentication_session", None)
     if session is None or session.bearer is None:
         raise SessionValidationError("未登录或会话已失效")
+
     # 账户启用 2FA 时，二次验证未完成的会话不得改密（否则仅凭口令即可绕过 2FA）
     if session.second_factor_pending:
         from app.services.exceptions import TwoFactorRequiredError
 
+        await record_auth_event(request, "change_password_2fa_pending",
+                                account=session.bearer, status="failure",
+                                detail="2FA 未完成")
         raise TwoFactorRequiredError()
+
+    account = session.bearer
+
+    # 当前口令试错限速：复用登录限流器（账户维度独立计数）。
+    limiter = LoginRateLimiter.from_request(request)
+    identity = account.email or account.username or str(account.id)
+    try:
+        await limiter.raise_if_blocked(identity, request)
+    except RateLimitExceededError:
+        # 被限流拦下的改密尝试也要留痕，与登录侧保持一致
+        await record_auth_event(
+            request, "change_password_failure", account=account, status="failure",
+            detail=f"限流拦截 identity={_mask_identity(identity)}")
+        raise
 
     current_password = _text_field(get_request_value(request, "current_password"), "当前口令", 128)
     new_password = _text_field(
@@ -169,21 +240,62 @@ async def on_change_password(request):
     if new_password == current_password:
         raise ValidationError("新口令不能与当前口令相同")
 
-    account = session.bearer
+    # 强度：至少两类字符（大写/小写/数字/符号）
+    strength_error = validate_password_strength(new_password)
+    if strength_error:
+        await record_auth_event(request, "change_password_failure", account=account,
+                                status="failure", detail="新口令强度不足")
+        raise ValidationError(strength_error)
+
+    # 禁止使用系统已知弱口令，或与自己的邮箱相同
+    banned_error = validate_not_banlisted(new_password, account)
+    if banned_error:
+        await record_auth_event(request, "change_password_failure", account=account,
+                                status="failure", detail="新口令为已知弱口令")
+        raise ValidationError(banned_error)
+
     if not account.verify_password(current_password):
+        await limiter.record_failure(identity, request)
+        await record_auth_event(request, "change_password_failure", account=account,
+                                status="failure", detail="当前口令错误")
         raise CredentialsError("当前口令错误")
 
-    account.set_password(new_password)
-    account.must_change_password = False
-    await account.save(update_fields=["password", "must_change_password"])
+    # 只清该账户的计数：IP 键是同一出口下多个账户共享的，改密成功就把它清零，
+    # 会让一个账户的正常操作替别人解封。
+    await limiter.clear_account_only(identity)
 
-    # 安全惯例：改密后作废该账户的全部其它会话（本会话保留，避免把正在
-    # 改密的用户立即登出；其余会话可能是旧口令泄露期间建立的）。
-    await (
-        AuthenticationSession.filter(bearer=account, deleted=False, disabled=False).exclude(id=session.id).update(deleted=True)
+    # 改密 + 轮换必须是一个原子动作：
+    # 若先 save 口令、再建会话而建会话失败，密码已经变了、旧会话却还有效，
+    # 用户处于「口令已改但拿不到新凭据」的不一致状态。整段放进同一个事务，
+    # 任一步失败都回滚，口令与旧会话都保持原样。
+    from tortoise.transactions import in_transaction
+
+    async with in_transaction():
+        account.set_password(new_password)
+        account.must_change_password = False
+        await account.save(update_fields=["password", "must_change_password"])
+
+        # 先建新会话，再作废旧会话——顺序在事务内也有意义：
+        # 新会话创建失败会直接抛出并回滚，不会留下「用户被登出且无凭据」的状态。
+        new_session = await AuthenticationSession.create_from_request(
+            request, bearer=account)
+
+        # 作废该账户除新会话以外的全部会话（含发起改密的那个）。
+        await AuthenticationSession.filter(
+            bearer=account, deleted=False, disabled=False
+        ).exclude(id=new_session.id).update(deleted=True)
+    response = json("密码修改成功", {
+        "must_change_password": False,
+        "token_rotated": True,
+    })
+    new_session.encode(response)
+    issue_csrf_token(
+        response,
+        secure=bool(request.app.config.get("SESSION_COOKIE_SECURE", True)),
     )
 
-    return json("密码修改成功", {"must_change_password": False})
+    await record_auth_event(request, "change_password_success", account=account)
+    return response
 
 
 # 完成两步验证路由
@@ -192,7 +304,16 @@ async def on_two_factor_authentication(request):
     """
     完成客户端认证会话的二次验证
     """
-    authentication_session = await fulfill_second_factor(request)
+    from app.services.audit import record_auth_event
+
+    try:
+        authentication_session = await fulfill_second_factor(request)
+    except Exception:
+        await record_auth_event(request, "two_step_failure", status="failure",
+                                detail="2FA 验证失败")
+        raise
+    await record_auth_event(request, "two_step_success",
+                            account=authentication_session.bearer)
     data = dict(authentication_session.bearer.json)
     data["must_change_password"] = bool(getattr(authentication_session.bearer, "must_change_password", False))
     response = json(
@@ -210,6 +331,10 @@ async def on_logout(request):
     注销当前登录的账户
     """
     authentication_session = await logout(request)
+
+    from app.services.audit import record_auth_event
+
+    await record_auth_event(request, "logout", account=authentication_session.bearer)
     return json("注销成功!", authentication_session.bearer.json)
 
 

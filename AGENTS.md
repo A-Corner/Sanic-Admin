@@ -372,6 +372,34 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 
 ---
 
+## 4b. 改密（`POST /auth/change-password`）的对外语义
+
+**v0.3.4 起行为有变化，集成方需注意：**
+
+| | v0.3.2 及以前 | v0.3.4 起 |
+|---|---|---|
+| 改密成功后当前会话 | **保留**（只有其它会话被作废） | **一并作废**，随即签发新会话并在响应中下发（`Set-Cookie` + `Authorization` 头 + 新 `csrf_token`） |
+| 响应体 | `{"must_change_password": false}` | 增加 `"token_rotated": true` |
+
+影响面：用 cookie 的浏览器客户端**无需改动**——`fetch(..., {credentials: 'same-origin'})`
+会自动接收新的 `Set-Cookie`（AMIS `login.html` 即此模式，已实测能接住）。
+**自己管理 token 的客户端必须改用响应里新下发的 `Authorization`**，否则下一次请求会 401。
+
+**已知行为**：两个会话并发改密时，后完成的那次会把先完成的新会话也作废（互踢）——
+这是「改密作废全部会话」的直接后果，不做特殊处理；客户端遇到 401 重新登录即可。
+
+**升级注意（breaking）**：`INITIAL_ADMIN_PASSWORD` 现在也要求强度——若不足两类字符，
+production 启动即报 `ConfigError` 并提示原因。升级到 v0.3.4 前请先确认该值足够强
+（例如 `MyDeploy#2026`），否则容器/服务会起不来。
+
+加固项（同一版本引入）：
+
+- 当前口令试错按账户维度限速，窗口内达阈值返回 **429**；
+- 新口令除长度外要求**至少两类字符**，且不得为 `SAdmin@123`、
+  `INITIAL_ADMIN_PASSWORD` 的值，或与本人邮箱相同；
+- 登录/登出/改密/2FA 的成败都会写入 `OperationLog`（`operation_type="auth"`），
+  审计中不含口令、token 与验证码。
+
 ## 5. 安全底线
 
 以下每一条都对应代码里真实存在的强制点，不是"建议"。
