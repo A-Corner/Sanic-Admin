@@ -7,6 +7,49 @@
 
 <!-- 下一版变更写在这里。 -->
 
+## [0.3.3] — 2026-10-24
+
+v0.3.2 的热修版本。修复控制台角色弹窗无法渲染的回归，并修复从未真正生效的浏览器 E2E 门禁脚本。无 API、配置或部署变更。
+
+### Fixed
+
+- **AMIS 角色表单的校验写法导致弹窗打不开（v0.3.2 回归）。** v0.3.2 把两处
+  `permissions` 文本域的 `validations.isJson` 改成了字符串形式的 `validate`，
+  而 AMIS 3.4.0 对 `$schema.validate` 直接执行 `validate.bind(...)`，字符串没有
+  `bind` 方法 —— 新增/编辑对话框在 `componentDidMount` 抛
+  `TypeError: i.bind is not a function`，弹窗根本不渲染。已改回
+  `validations.isJson` + `validationErrors.isJson`（3.4.0 与 6.13.0 均支持）。
+  该缺陷会让「控制台建/改角色」完全不可用，pytest 覆盖不到（AMIS 页面不在
+  API 测试范围）。
+- **AMIS E2E 门禁脚本（`scripts/amis_e2e_check.py`）从未真正跑绿。** 修正四处
+  脚本缺陷：密码字段选择器 `password` → `pass`；弹窗选择器 `.amis-dialog` →
+  `.amis-dialog-widget`；清理断言 `_cleanup_role(...) is None or True` 恒真
+  （改为 cookie 会话清理 + 删除后重新查询核验）；编辑用例提交的
+  `{"account": ["write"]}` 中 `write` 不是注册表里的合法动作（应为 `update`）。
+  另修正三处会静默放宽门禁的写法：`--admin-password` 为 `must_change_password=True`
+  的账户时脚本会停住（新增 `--new-password` 走完强制改密）；amis 空表仍渲染占位行
+  使 `tbody tr > 0` 恒真（改为排除空态行并核对探针数据）；断言总数被钉在 19，
+  少一条即报错。
+
+### Added
+
+- **AMIS E2E 正向对照。** `--negative-control {dialog,login_password}` 故意把选择器
+  改错，要求对应断言**必须**失败；断言仍通过说明它是恒真的，脚本以退出码 1 报警。
+- **CI 新增 `amis-e2e` 门禁**：`amis-e2e-probe` 先探测浏览器可用性并输出 `available`，
+  `amis-e2e` job 用 `if` 依赖该输出。浏览器可用时：起服务（固定端口 22222、临时
+  SQLite、一次性口令）→ 跑 19 项 E2E → 跑正向对照；**不可用时整个 job 显示为
+  `skipped`**，不会被记成绿色通过。
+- **CI 触发白名单加入 `release/**`**：补丁版从 `release/` 分支拉 hotfix 分支，原先
+  `push` / `pull_request` 只列了 `main, master, develop, vj-mp3`，发补丁版的 PR 根本
+  不会触发 CI。`ci.yml` 与 `docker.yml` 两份 workflow 都已加入（前者跑测试与 E2E，
+  后者跑容器验收）——`docker.yml` 原本只盯 `master` 与 `v*` tag，不加这条时 docker
+  验收要等到打 tag 才跑，那时再发现失败回滚成本更高。仅改 workflow 配置，不动运行时。
+- **仪表盘断言改为比对真实数值**：原先只要求「有标题的卡片存在」，现在读取卡片实际
+  渲染的数字，与 `/api/v1/dashboard/summary` 返回的 `data.accounts.total` 比对
+  （同一会话、同源，两个数才真正可比）。已做双向验证：破坏 `.cxd-Card-fieldValue`
+  选择器会让它失败；把页面模板改成 `${accounts.totalTYPO}` 后页面回落到 0、API 仍
+  返回 1，该断言失败而其余 18 条通过。
+
 ## [0.3.2] — 2026-10-24
 
 鉴权收尾版本。新增首登强制改密，修复 2FA 登录 500 与 AMIS 角色表单校验；**存量库需手工跑一次迁移脚本**（见下）。
