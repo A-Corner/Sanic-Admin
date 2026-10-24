@@ -25,6 +25,7 @@ pytest 全局配置与夹具。
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -303,7 +304,8 @@ def _concrete_path(path: str) -> str:
     out = path
     for pattern, value in replacements.items():
         out = out.replace(pattern, value)
-    return out
+    # specgen 生成资源的动态段（<xxx_id:int>）统一替换，新增资源无需改这里
+    return re.sub(r"<[a-z_0-9]+:int>", "1", out)
 
 
 @pytest.fixture(scope="session")
