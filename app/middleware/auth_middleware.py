@@ -67,8 +67,20 @@ PASSWORD_CHANGE_EXEMPT_PREFIXES = (
 
 async def enforce_password_change(request: Request) -> None:
     """
-    首次登录强制改密：must_change_password=True 的会话访问 /api/ 下非白名单
-    路径时返回 403 PASSWORD_CHANGE_REQUIRED，直至完成改密。
+    首次登录强制改密：``must_change_password=True`` 的会话访问非豁免路径时返回
+    403 ``PASSWORD_CHANGE_REQUIRED``，直至完成改密。
+
+    **豁免机制的真实形态**（此前的注释写成「白名单放行 login/logout/...」，
+    容易被读成有一份覆盖全部认证端点的显式清单，实际是靠
+    :data:`PASSWORD_CHANGE_EXEMPT_PREFIXES` 做的前缀匹配）：
+
+    * 命中豁免前缀之一 → 放行；
+    * 其余**一律拦截**（fail-closed），不区分路径是否在 ``/api/`` 下。
+
+    因此有一条部署约定必须守住：**数据面端点必须全部挂在 ``/api/`` 前缀下**。
+    前缀豁免只覆盖认证流程与静态页，若将来有新数据端点挂到其它前缀，它不会被
+    「数据面白名单」拦下——本函数仍是 fail-closed 的，但审计与限流这类按
+    ``/api/`` 前置判断的逻辑会漏掉它。
     """
     session = getattr(request.ctx, "authentication_session", None)
     if session is None:

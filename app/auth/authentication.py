@@ -5,6 +5,11 @@
 身份验证模块，提供用户登录、注册和会话管理功能
 """
 import functools
+import hashlib
+import hmac
+import os
+from typing import Optional
+
 from sanic.log import logger
 from sanic.request import Request
 from tortoise.exceptions import DoesNotExist
@@ -34,6 +39,66 @@ def get_session_token(request: Request, cookie_name: str = "session", header=Non
 
 
 MIN_PASSWORD_LENGTH = 8
+
+#: 新口令必须至少包含的字符类别数（大写 / 小写 / 数字 / 符号 四类中至少两类）
+MIN_PASSWORD_CLASSES = 2
+
+#: 系统已知的弱口令——改密时一律拒绝。`SAdmin@123` 是历史文档/测试夹具里出现过的
+#: 默认口令；`INITIAL_ADMIN_PASSWORD` 在运行时从环境变量读取（未设置则跳过）。
+BANNED_PASSWORDS = ("SAdmin@123",)
+
+
+def _password_classes(password: str) -> int:
+    """口令包含的字符类别数（大写 / 小写 / 数字 / 其它符号）。"""
+    classes = 0
+    if any(ch.isupper() for ch in password):
+        classes += 1
+    if any(ch.islower() for ch in password):
+        classes += 1
+    if any(ch.isdigit() for ch in password):
+        classes += 1
+    if any(not ch.isalnum() for ch in password):
+        classes += 1
+    return classes
+
+
+def validate_password_strength(password: str) -> Optional[str]:
+    """校验新口令强度，不合规时返回错误说明，合规返回 None。
+
+    规则（在 ``MIN_PASSWORD_LENGTH`` 之外）：
+    * 至少包含 :data:`MIN_PASSWORD_CLASSES` 类字符。
+    """
+    if _password_classes(password) < MIN_PASSWORD_CLASSES:
+        return f"新口令至少需要包含 {MIN_PASSWORD_CLASSES} 类字符（大写/小写/数字/符号）"
+    return None
+
+
+def _banned_password_list() -> list:
+    """当前生效的弱口令拒绝清单（环境变量 + 硬编码常量）。"""
+    banned = list(BANNED_PASSWORDS)
+    env_password = os.environ.get("INITIAL_ADMIN_PASSWORD")
+    if env_password:
+        banned.append(env_password)
+    return [item for item in banned if item]
+
+
+def validate_not_banlisted(password: str, account=None) -> Optional[str]:
+    """拒绝系统已知弱口令，以及与自己邮箱相同的口令。
+
+    比较使用 :func:`hmac.compare_digest`（常量时间），避免通过响应时间判断
+    候选值与拒绝清单的匹配长度。口令与清单值**都不会**被写进日志或错误信息。
+    """
+    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    for banned in _banned_password_list():
+        if hmac.compare_digest(digest, hashlib.sha256(banned.encode("utf-8")).digest()):
+            return "新口令不能使用系统已知的弱口令"
+    email = getattr(account, "email", None) if account is not None else None
+    if email and hmac.compare_digest(
+        digest, hashlib.sha256(str(email).encode("utf-8")).digest()
+    ):
+        return "新口令不能与邮箱相同"
+    return None
+
 MAX_PASSWORD_LENGTH = 128
 
 
