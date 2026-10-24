@@ -238,6 +238,20 @@ pytest
 
 > **Current test status:** `pytest` reports **`171 passed`, 0 failed, 0 errors** (collection: 171 tests, ~65 s; about 80 s with `--cov=app`). Coverage over `app/` is **52 %** — the suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
 
+**Browser E2E gate (console changes).** The API suite cannot see AMIS page behaviour. If you change
+anything under `amis/`, run the console gate before merging:
+
+```bash
+python scripts/amis_e2e_check.py --base http://127.0.0.1:22222 \
+    --admin-password '<one-shot password>' --new-password '<new password>'
+# prove the gate can actually fail:
+python scripts/amis_e2e_check.py ... --negative-control dialog
+```
+
+A green run is **19/19 assertions**. CI runs the same gate as the `amis-e2e` job; when no browser is
+available the job reports **skipped**, never a pass. This gate was itself broken until v0.3.3 —
+its assertions could not fail, which is how a console-breaking change reached v0.3.2.
+
 ---
 
 ## Configuration
