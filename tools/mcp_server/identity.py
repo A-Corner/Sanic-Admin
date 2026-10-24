@@ -21,6 +21,7 @@ MCP 写入路径的身份校验（SA-v042-SPECWRITE）。
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import urllib.error
@@ -105,6 +106,13 @@ def _guard_api_url(url: str) -> str:
             f"{API_URL_ENV} 不允许携带 userinfo（user:pass@host 形态）",
             reason="identity_not_configured",
         )
+    # query / fragment 不属于服务地址本身，一律拒绝——防止经 `?next=` 一类
+    # 参数把语义带偏，也让 URL 校验面保持最小
+    if parts.query or parts.fragment:
+        raise IdentityError(
+            f"{API_URL_ENV} 不允许携带 query 或 fragment",
+            reason="identity_not_configured",
+        )
     host = parts.hostname.lower()
     if host in LOOPBACK_HOSTS:
         return url
@@ -177,9 +185,15 @@ def fetch_whoami(token: str, api_url: str) -> Dict[str, Any]:
             f"无法校验权限：whoami 返回 HTTP {exc.code}",
             reason="identity_unavailable",
         ) from None
-    except (urllib.error.URLError, ValueError, OSError) as exc:
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,
+        ValueError,
+        OSError,
+    ) as exc:
         # URLError：连接拒绝/DNS 失败；socket.timeout 是 OSError 子类；
-        # ValueError：JSON 解析失败。三者都按「服务不可达」fail-closed。
+        # http.client.HTTPException：协议层异常（IncompleteRead/BadStatusLine 等）；
+        # ValueError：JSON 解析失败与头编码错误。都按「服务不可达」fail-closed。
         _ = exc  # 异常消息可能含 URL，不进入错误文案
         raise IdentityError(
             "无法校验权限（服务不可达）——按 fail-closed 拒绝",

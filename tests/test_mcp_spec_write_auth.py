@@ -129,10 +129,18 @@ def _mock_whoami(monkeypatch, *, account_id=7, permissions=None, http_error=None
 
 
 def _tmp_proposal_dirs() -> set:
-    """系统临时区里本工具的 clone 目录（``mcp-proposal-*`` 前缀，git_isolation.mkdtemp）。"""
+    """
+    系统临时区里本工具的临时工作区目录集合。
+
+    前缀从 :data:`proposal_registry.TMP_PREFIX` 取（#24 起为 ``sanic-specgen-``，
+    旧前缀 ``mcp-proposal-`` 已废弃）——引用常量而非硬编码，前缀再漂移时这里
+    会跟着走，不会空转。
+    """
     import tempfile
 
-    return {p.name for p in Path(tempfile.gettempdir()).glob("mcp-proposal-*")}
+    from tools.mcp_server.proposal_registry import TMP_PREFIX
+
+    return {p.name for p in Path(tempfile.gettempdir()).glob(TMP_PREFIX + "*")}
 
 
 def _assert_zero_side_effect(repo: Path, baseline: list, tmp_baseline: set | None = None):
@@ -638,3 +646,28 @@ def test_discard_rejection_keeps_existing_proposal(repo, token_env, monkeypatch)
         discard_proposal_tool(result["branch"], repo_root=repo)
     _assert_zero_side_effect(repo, baseline, tmp_baseline)
     assert result["branch"] in _branch_list(repo), "被拒绝的 discard 不得删除既有提案分支"
+
+
+def test_fetch_whoami_treats_http_protocol_errors_as_unavailable(monkeypatch, token_env):
+    """低修 a：http.client.HTTPException（如 IncompleteRead）也归 identity_unavailable，
+    不再以未捕获异常冒出。"""
+    import http.client
+
+    from tools.mcp_server import identity
+
+    class _BoomOpener:
+        def open(self, req, timeout=None):
+            raise http.client.IncompleteRead(b"partial-body")
+
+    monkeypatch.setattr(identity, "_OPENER", _BoomOpener())
+    with pytest.raises(IdentityError) as exc_info:
+        fetch_whoami(SECRET_TOKEN, "http://127.0.0.1:22222")
+    assert exc_info.value.reason == "identity_unavailable"
+
+
+def test_guard_rejects_query_and_fragment():
+    """低修 b：回调 URL 不允许携带 query 或 fragment。"""
+    with pytest.raises(IdentityError):
+        _guard_api_url("http://127.0.0.1:22222/?from=elsewhere")
+    with pytest.raises(IdentityError):
+        _guard_api_url("http://127.0.0.1:22222/#anchor")
