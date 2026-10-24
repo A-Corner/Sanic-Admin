@@ -119,7 +119,7 @@ SELECTORS = {
 EMPTY_ROW_MARKERS = ("暂无数据", "No data", "没有数据")
 
 #: 验收断言总数（与 amis-upgrade.md 的 19 项口径一致）。
-EXPECTED_CHECKS = 19
+EXPECTED_CHECKS = 22
 
 #: 负向对照里被破坏后的选择器
 BROKEN_SELECTORS = {
@@ -564,6 +564,52 @@ def main() -> int:
                 "操作日志页渲染（表头含 操作/IP）",
                 "操作" in headers and "IP" in headers,
                 f"headers={headers.strip()[:60]} data_rows={len(log_rows)} raw={log_raw}",
+            )
+
+            # 10. 工单（ticket）：specgen 生成的模块，列表可打开、能新增并出现在列表里
+            #
+            # 这条守的是「生成器产出的 AMIS 页面真的能用」——model / API / 页面由同一份
+            # 规格产出，字段名或表单类型对不上时页面会打不开或提交后列表不刷新。
+            # 只测 API 覆盖不到这一类（AMIS 页面不在 pytest 范围）。
+            ticket_title = "e2e-ticket-%d" % int(time.time() * 1000)
+            page.goto(base + PAGES["console"] + "#/ticket/list", wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
+            ticket_rows, ticket_raw = _data_rows(page)
+            ticket_body = page.locator("body").inner_text()
+            ticket_opened = (
+                "工单" in ticket_body
+                and "VALIDATION_ERROR" not in ticket_body
+            )
+            check(
+                "工单列表页可打开（生成模块）",
+                ticket_opened,
+                f"data_rows={len(ticket_rows)} raw={ticket_raw}",
+            )
+            added_ticket = False
+            ticket_detail = ""
+            try:
+                page.click("text=新增", timeout=10000)
+                page.wait_for_timeout(1200)
+                dlg = page.locator(".amis-dialog")
+                dlg.locator('input[name="title"]').fill(ticket_title, timeout=8000)
+                # priority / status 有默认值；customer 是必填外键，从下拉选第一项
+                cust = dlg.locator('select[name="customer_id"]')
+                if cust.count() > 0:
+                    cust.select_option(index=1)
+                dlg.locator('button:has-text("确认")').click(timeout=8000)
+                page.wait_for_timeout(2500)
+                after = page.locator("body").inner_text()
+                added_ticket = "VALIDATION_ERROR" not in after
+                page.wait_for_timeout(1000)
+                ticket_detail = ("seen" if ticket_title in page.locator("body").inner_text()
+                                 else "not-seen")
+            except Exception as exc:  # noqa: BLE001
+                ticket_detail = str(exc).splitlines()[0][:160]
+            check("新增工单成功（无 VALIDATION_ERROR）", added_ticket, ticket_detail)
+            check(
+                "新增的工单出现在列表里",
+                ticket_detail == "seen",
+                f"title={ticket_title} detail={ticket_detail}",
             )
 
             browser.close()
