@@ -41,7 +41,9 @@ v0.3.2 的热修版本。修复控制台角色弹窗无法渲染的回归，并�
   `skipped`**，不会被记成绿色通过。
 - **CI 触发白名单加入 `release/**`**：补丁版从 `release/` 分支拉 hotfix 分支，原先
   `push` / `pull_request` 只列了 `main, master, develop, vj-mp3`，发补丁版的 PR 根本
-  不会触发 CI。仅改 workflow 配置，不动运行时。
+  不会触发 CI。`ci.yml` 与 `docker.yml` 两份 workflow 都已加入（前者跑测试与 E2E，
+  后者跑容器验收）——`docker.yml` 原本只盯 `master` 与 `v*` tag，不加这条时 docker
+  验收要等到打 tag 才跑，那时再发现失败回滚成本更高。仅改 workflow 配置，不动运行时。
 - **仪表盘断言改为比对真实数值**：原先只要求「有标题的卡片存在」，现在读取卡片实际
   渲染的数字，与 `/api/v1/dashboard/summary` 返回的 `data.accounts.total` 比对
   （同一会话、同源，两个数才真正可比）。已做双向验证：破坏 `.cxd-Card-fieldValue`

@@ -45,10 +45,12 @@ name: Sanic-Admin Docker Acceptance
 
 on:
   push:
-    branches: [ master ]
+    # release/**：补丁版的 PR 目标通常是 release 分支本身。不加这条，发补丁版
+    # 时 docker 验收要等到打 tag 才跑，那时再发现失败回滚成本更高。
+    branches: [ master, 'release/**' ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, 'release/**' ]
   workflow_dispatch:
 
 jobs:
