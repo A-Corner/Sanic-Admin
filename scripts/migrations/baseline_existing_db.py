@@ -186,12 +186,14 @@ def verify_schema_matches_models(db_url: str) -> list:
 
 def main(db_path: str, migrations_dir: str, app: str = "models", fresh: bool = False,
          db_url: str = None) -> int:
-    db = Path(db_path)
-    if not db.is_file():
-        if not fresh:
-            print(f"!! 数据库文件不存在: {db}（全新部署请加 --fresh）")
-            return 1
-        print("  全新库：将创建空文件与账本表")
+    db = Path(db_path) if db_path else None
+    if db_url is None:
+        # 仅 SQLite 走文件路径；其它方言由 --url 传入 DSN，不检查文件
+        if db is None or not db.is_file():
+            if not fresh:
+                print(f"!! 数据库文件不存在: {db}（全新部署请加 --fresh）")
+                return 1
+            print("  全新库：将创建空文件与账本表")
     mig_dir = Path(migrations_dir)
     baselines = sorted(mig_dir.glob("0_*_init.py"))
     if not baselines:
@@ -209,6 +211,9 @@ def main(db_path: str, migrations_dir: str, app: str = "models", fresh: bool = F
         return 2
 
     if dialect == "sqlite":
+        if db is None:
+            print("!! SQLite 需要提供库文件路径或 sqlite:/// 形式的 --url", file=sys.stderr)
+            return 2
         return _run_sqlite(db, db_url, baseline_file, app, fresh)
 
     # 非 SQLite：走 Tortoise（asyncpg / aiomysql），不依赖本地 sqlite3
