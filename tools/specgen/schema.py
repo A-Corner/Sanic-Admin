@@ -290,6 +290,32 @@ def load_spec(path: Path, rel: str) -> ResourceSpec:
     return spec
 
 
+def parse_spec_text(text: str, rel: str = "inline") -> ResourceSpec:
+    """
+    校验一段规格 YAML 文本（不写盘、不做文件名一致性检查）。
+
+    供 MCP 的 ``validate_spec`` / ``preview_generate`` 与测试使用：调用方手上
+    只有文本，没有文件。校验口径与 :func:`load_spec` 相同，失败同样抛
+    ``SpecError``（带字段路径）。
+    """
+    import hashlib
+
+    raw = text.encode("utf-8")
+    try:
+        data = yaml.safe_load(text)
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        raise SpecError(rel, [("<yaml>", str(exc).replace("\n", " "))])
+    if not isinstance(data, dict):
+        raise SpecError(rel, [("<root>", "规格顶层必须是映射")])
+    try:
+        spec = ResourceSpec.model_validate(data)
+    except ValidationError as exc:
+        raise SpecError(rel, _fmt_errors(exc))
+    spec.source = rel
+    spec.digest = hashlib.sha256(raw).hexdigest()[:12]
+    return spec
+
+
 def load_specs(spec_dir: Path, rel_dir: str = "specs") -> Dict[str, ResourceSpec]:
     """加载目录下全部规格并做跨规格校验（resource/table/plural 唯一、belongs_to 目标存在、无环）。"""
     specs: Dict[str, ResourceSpec] = {}

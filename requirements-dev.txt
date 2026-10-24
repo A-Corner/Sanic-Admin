@@ -13,3 +13,7 @@ requests>=2.31
 
 # specgen（规格即代码生成器）读取规格 YAML
 pyyaml>=6,<7
+
+# MCP 服务（tools/mcp_server）：官方 Python SDK，2.x 已把 FastMCP 更名为 MCPServer。
+# 仅开发期/AI 协作需要，不属运行时依赖；锁定精确版本以免 2.x→3.x 的 API 变动打断工具。
+mcp==2.3.0

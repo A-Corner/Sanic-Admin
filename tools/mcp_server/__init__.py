@@ -1,0 +1,355 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Sanic-Admin 规格即代码 MCP 服务（M2 第一段：只读与预演层）。
+
+设计原则（见 docs/release/v0.4.0-iteration-plan.md §5 与 v04-s0.md）：
+
+- **AI 只改规格、只出 diff**：本层所有工具都不写仓库文件。把改动交给人看，
+  走 PR + 独立审核，而不是让 AI 直接改运行时。
+- **只读**：`list_resources` / `describe_resource` / `validate_spec` /
+  `preview_generate` / `check` 全部不落盘（`preview_generate` 只在临时目录生成，
+  用完即删，并复核仓库文件哈希未变）。
+- **白名单**：资源名必须匹配 `^[a-z][a-z0-9_]*$`，不接受路径分隔符、`..`、
+  绝对路径——防止经资源名做路径穿越。
+- **不暴露**环境变量、数据库连接与密钥：工具只回规格与生成物本身。
+
+传输：stdio（Claude Code / Codex 以子进程方式拉起）。
+
+用法：
+    python -m tools.mcp_server                 # 在当前仓库上运行
+    python -m tools.mcp_server --root /path    # 指定仓库根
+"""
+
+from __future__ import annotations
+
+import difflib
+import hashlib
+import os
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List
+
+#: 资源名白名单：小写字母开头，仅小写字母/数字/下划线。
+#: 显式拒绝路径分隔符与 '..'，避免经资源名做路径穿越。
+RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+#: 仓库根（可用 --root 覆盖，见 main()）
+ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+class ToolError(Exception):
+    """工具层可安全展示给调用方的错误（不含路径/环境/密钥细节）。"""
+
+
+def _repo_root() -> Path:
+    return ROOT
+
+
+def _specs_dir() -> Path:
+    return _repo_root() / "specs"
+
+
+def _guard_resource_name(name: str) -> str:
+    """资源名白名单校验（防路径穿越）。"""
+    if not isinstance(name, str) or not name:
+        raise ToolError("资源名不能为空")
+    if ".." in name or "/" in name or "\\" in name or os.path.isabs(name):
+        raise ToolError(f"资源名不合法：{name!r}（不允许路径分隔符、'..' 或绝对路径）")
+    if not RESOURCE_NAME_RE.match(name):
+        raise ToolError(
+            f"资源名不合法：{name!r}（必须匹配 {RESOURCE_NAME_RE.pattern}）"
+        )
+    return name
+
+
+def _spec_path(name: str) -> Path:
+    """拼出规格文件路径，并复核它确实落在 specs/ 之内。"""
+    _guard_resource_name(name)
+    specs = _specs_dir().resolve()
+    candidate = (specs / f"{name}.yaml").resolve()
+    try:
+        candidate.relative_to(specs)
+    except ValueError:
+        raise ToolError(f"资源名不合法：{name!r}（解析后越出 specs/ 目录）") from None
+    return candidate
+
+
+def _generated_paths(name: str) -> Dict[str, str]:
+    """返回该资源对应生成物的仓库相对路径（只列存在与否，不读内容）。"""
+    root = _repo_root()
+    candidates = {
+        "model": f"app/generated/models/{name}.py",
+        "resource": f"app/generated/resources/{name}.py",
+        "amis_page": f"amis/pages/{name}-list.json",
+        "test": f"tests/generated/test_gen_{name}.py",
+    }
+    return {kind: rel for kind, rel in candidates.items() if (root / rel).exists()}
+
+
+# ---------------------------------------------------------------------------
+# 工具实现（每个都只读）
+# ---------------------------------------------------------------------------
+
+
+def list_resources() -> List[Dict[str, Any]]:
+    """列出 specs/ 下全部资源规格及其字段摘要。只读。"""
+    from tools.specgen.schema import load_specs
+
+    specs_dir = _specs_dir()
+    if not specs_dir.is_dir():
+        raise ToolError("仓库里没有 specs/ 目录")
+
+    specs = load_specs(specs_dir, "specs")
+    out: List[Dict[str, Any]] = []
+    for name in sorted(specs):
+        spec = specs[name]
+        out.append({
+            "resource": spec.resource,
+            "label": spec.label,
+            "plural": spec.plural,
+            "field_count": len(spec.fields),
+            "fields": [
+                {
+                    "name": f.name,
+                    "type": f.type,
+                    "required": f.required,
+                    "unique": f.unique,
+                }
+                for f in spec.fields
+            ],
+            "belongs_to": [{"target": b.target, "column": b.column} for b in spec.belongs_to],
+            "soft_delete": spec.soft_delete,
+            "sorting_allowed": list(spec.sorting.allowed),
+        })
+    return out
+
+
+def describe_resource(name: str) -> Dict[str, Any]:
+    """返回某资源的规格全文、生成物路径与权限点。只读。"""
+    from tools.specgen.schema import load_spec
+
+    path = _spec_path(name)
+    if not path.is_file():
+        raise ToolError(f"规格不存在：{name}")
+
+    spec = load_spec(path, "specs")
+    yaml_text = path.read_text(encoding="utf-8")
+    return {
+        "resource": spec.resource,
+        "label": spec.label,
+        "plural": spec.plural,
+        "spec_path": f"specs/{name}.yaml",
+        "spec_yaml": yaml_text,
+        "generated": _generated_paths(name),
+        "permissions": [f"{spec.resource}:{a}" for a in spec.permissions.actions],
+    }
+
+
+def validate_spec(yaml_text: str) -> Dict[str, Any]:
+    """用 pydantic 校验规格文本，返回带字段路径的错误。不落盘。"""
+    from tools.specgen.schema import SpecError, parse_spec_text
+
+    try:
+        spec = parse_spec_text(yaml_text, "inline")
+    except SpecError as exc:
+        return {
+            "ok": False,
+            "errors": [{"path": path, "reason": reason} for path, reason in exc.errors],
+        }
+    except Exception as exc:  # noqa: BLE001  解析期异常也按校验失败回，不暴露堆栈
+        return {"ok": False, "errors": [{"path": "", "reason": str(exc)}]}
+    return {"ok": True, "resource": spec.resource, "field_count": len(spec.fields)}
+
+
+def _file_digest(path: Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _repo_generated_digests() -> Dict[str, str]:
+    """当前仓库里全部生成物的 sha256 快照（用于 preview 前后对照）。"""
+    root = _repo_root()
+    digests: Dict[str, str] = {}
+    for pattern in (
+        "app/generated/models/*.py",
+        "app/generated/resources/*.py",
+        "tests/generated/*.py",
+        "amis/pages/*-list.json",
+    ):
+        for p in sorted(root.glob(pattern)):
+            digests[str(p.relative_to(root))] = _file_digest(p)
+    return digests
+
+
+def preview_generate(yaml_text: str) -> Dict[str, Any]:
+    """
+    在临时目录里生成，返回与当前仓库生成物的 unified diff。**不写仓库。**
+
+    安全措施：临时目录位于系统临时区、用后删除；返回前复核仓库生成物哈希未变
+    （正向对照：若实现误写仓库，这里会抛错而不是静默通过）。
+    """
+    from tools.specgen import generate
+    from tools.specgen.schema import SpecError, parse_spec_text
+
+    try:
+        parsed = parse_spec_text(yaml_text, "inline")
+    except SpecError as exc:
+        return {
+            "ok": False,
+            "errors": [{"path": path, "reason": reason} for path, reason in exc.errors],
+        }
+
+    before = _repo_generated_digests()
+    tmp_root = Path(tempfile.mkdtemp(prefix="specgen-preview-"))
+    try:
+        # 在临时根下铺一份最小骨架：specs/ + 生成器需要读取的现有生成物目录
+        (tmp_root / "specs").mkdir(parents=True, exist_ok=True)
+        for sub in ("app/generated/models", "app/generated/resources",
+                    "tests/generated", "amis/pages"):
+            (tmp_root / sub).mkdir(parents=True, exist_ok=True)
+        # 生成器渲染菜单时会读 amis/pages/site.json：把仓库现有版本作为基线复制过去，
+        # 让 diff 只反映本次规格带来的变化（临时目录内操作，不碰仓库）
+        # 同理复制当前生成物作为基线：diff 只体现本次规格的增量，
+        # 而不是「从零开始」的全量内容（那些文件本次并未改变）
+        for rel in (
+            "amis/pages/site.json",
+            "app/generated/__init__.py",
+            "app/generated/permissions.py",
+            "app/generated/models/__init__.py",
+            "app/generated/resources/__init__.py",
+        ):
+            src = _repo_root() / rel
+            if src.is_file():
+                dst = tmp_root / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+        # 先复制仓库现有全部规格，再用待预览的文本覆盖对应资源：
+        # 否则生成器会以为其它资源不存在，产出「删除其它资源」的误导性 diff。
+        specs_src = _specs_dir()
+        for src in sorted(specs_src.glob("*.yaml")):
+            shutil.copy2(src, tmp_root / "specs" / src.name)
+        spec_file = f"{parsed.resource}.yaml"
+        (tmp_root / "specs" / spec_file).write_text(yaml_text, encoding="utf-8")
+        try:
+            changed, _stale = generate.run(tmp_root, tmp_root / "specs", check=False)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"预览生成失败：{exc}") from None
+
+        diffs: List[str] = []
+        for rel in changed:
+            new_text = (tmp_root / rel).read_text(encoding="utf-8")
+            repo_file = _repo_root() / rel
+            old_text = repo_file.read_text(encoding="utf-8") if repo_file.is_file() else ""
+            diff = difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=f"a/{rel}" if old_text else "/dev/null",
+                tofile=f"b/{rel}",
+            )
+            diffs.append("".join(diff))
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    after = _repo_generated_digests()
+    if before != after:
+        # 正向对照：preview 绝不允许写仓库；一旦写入立即报错而非静默通过
+        raise ToolError("内部错误：preview 修改了仓库文件，已中止")
+
+    return {
+        "ok": True,
+        "changed_files": list(changed),
+        "diff": "\n".join(d for d in diffs if d),
+        "repo_unchanged": True,
+    }
+
+
+def check() -> Dict[str, Any]:
+    """等价于 `python -m tools.specgen check`：生成物与规格是否一致。只读。"""
+    from tools.specgen import generate
+
+    root = _repo_root()
+    problems = generate.wiring_problems(root)
+    if problems:
+        return {"ok": False, "problems": problems}
+    changed, stale = generate.run(root, _specs_dir(), check=True)
+    return {
+        "ok": not (changed or stale),
+        "drift": list(changed),
+        "stale": list(stale),
+    }
+
+
+# ---------------------------------------------------------------------------
+# MCP 服务装配
+# ---------------------------------------------------------------------------
+
+
+def build_server():
+    """构建 MCP 服务（stdio）。工具全部只读。"""
+    from mcp.server.mcpserver import MCPServer
+
+    server = MCPServer(
+        name="sanic-admin-specgen",
+        title="Sanic-Admin 规格生成器（只读）",
+        description="读取/校验/预演资源规格，输出 diff 供人工确认；不写仓库。",
+        instructions=(
+            "本服务只读：不会修改仓库任何文件。"
+            "改动请通过 validate_spec / preview_generate 取得 diff，再走 PR 与独立审核。"
+        ),
+    )
+
+    # 显式给 name=：否则 SDK 以函数名注册，客户端看到的会是 list_resources_tool，
+    # 与 docs/mcp.md 的工具契约不符。
+    @server.tool(name="list_resources", description="列出 specs/ 下的资源规格与字段摘要（只读）。")
+    def list_resources_tool() -> List[Dict[str, Any]]:
+        return list_resources()
+
+    @server.tool(name="describe_resource", description="返回指定资源的规格全文、生成物路径与权限点（只读）。")
+    def describe_resource_tool(name: str) -> Dict[str, Any]:
+        """资源名仅允许小写字母、数字与下划线。"""
+        return describe_resource(name)
+
+    @server.tool(name="validate_spec", description="校验规格文本（pydantic），返回带字段路径的错误；不落盘。")
+    def validate_spec_tool(yaml_text: str) -> Dict[str, Any]:
+        """yaml_text 为完整的规格 YAML 文本。"""
+        return validate_spec(yaml_text)
+
+    @server.tool(name="preview_generate", description="在临时目录生成并返回与仓库现状的 unified diff；不写仓库。")
+    def preview_generate_tool(yaml_text: str) -> Dict[str, Any]:
+        """yaml_text 为完整的规格 YAML 文本。"""
+        return preview_generate(yaml_text)
+
+    @server.tool(name="check", description="检查生成物与规格是否一致（等价 specgen check）。")
+    def check_tool() -> Dict[str, Any]:
+        return check()
+
+    return server
+
+
+def main(argv: List[str] | None = None) -> int:
+    global ROOT
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--root" in args:
+        i = args.index("--root")
+        if i + 1 >= len(args):
+            print("--root 需要一个路径参数", file=sys.stderr)
+            return 2
+        ROOT = Path(args[i + 1]).resolve()
+        del args[i:i + 2]
+    if not (_specs_dir()).is_dir():
+        print(f"未找到 specs/ 目录：{_specs_dir()}", file=sys.stderr)
+        return 2
+
+    server = build_server()
+    server.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
