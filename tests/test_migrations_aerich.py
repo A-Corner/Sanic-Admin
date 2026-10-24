@@ -415,32 +415,74 @@ def test_check_dialect_baselines_passes_on_real_repo():
 
 
 def test_dialect_mismatch_is_rejected(tmp_path):
-    """正向对照（F2）：装的基线与目标方言不符时，基线化必须拒绝（rc=4）。
+    """方言一致性校验（F2）：装错方言必须报错，正例必须严格返回 None。
 
-    构造：SQLite 形态的存量库 + 把 mysql 方言基线装进 migrations/models/，
-    然后按 sqlite 的 DATABASE_URL 跑基线化 —— md5 校验必须拦下。
+    覆盖 main() 的 rc=4 路径（sqlite 与 mysql 两种冒充），以及
+    verify_installed_baseline_matches_dialect 的直接调用。
     """
     import importlib.util
+    import shutil
+    import subprocess
 
     spec = importlib.util.spec_from_file_location(
         "baseline_existing_db", BASELINE_SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    # 正例：真实仓库里 sqlite 方言的基线应与自身 md5 一致
+    baseline_name = mod.BASELINE_FILENAME
     models_dir = REPO / "migrations" / "models"
-    err = mod.verify_installed_baseline_matches_dialect(
-        f"sqlite:///{tmp_path/'x.db'}", models_dir)
-    # 若当前装的是 sqlite 基线则应为 None；否则会提示需 select_dialect_baseline
-    assert err is None or "select_dialect_baseline" in err
+    dialects_dir = REPO / "migrations" / "dialects"
 
-    # 反例：拿 mysql 的基线冒充 sqlite
-    wrong_dir = tmp_path / "wrong"
-    wrong_dir.mkdir()
-    import shutil
-    shutil.copyfile(REPO / "migrations" / "dialects" / "mysql" / "0_20261024125437_init.py",
-                    wrong_dir / "0_20261024125437_init.py")
+    # --- 正例：装的是 sqlite 基线，按 sqlite URL 校验应严格为 None ---
+    sqlite_src = dialects_dir / "sqlite" / baseline_name
+    if sqlite_src.is_file() and (models_dir / baseline_name).is_file():
+        if sqlite_src.read_bytes() == (models_dir / baseline_name).read_bytes():
+            assert mod.verify_installed_baseline_matches_dialect(
+                f"sqlite:///{tmp_path/'x.db'}", models_dir) is None, \
+                "装的正是 sqlite 基线时，校验必须返回 None"
+
+    # --- 反例 1：mysql 基线冒充 sqlite ---
+    wrong = tmp_path / "wrong-sqlite"
+    wrong.mkdir()
+    shutil.copyfile(dialects_dir / "mysql" / baseline_name, wrong / baseline_name)
+    err = mod.verify_installed_baseline_matches_dialect(
+        f"sqlite:///{tmp_path/'y.db'}", wrong)
+    assert err is not None and "select_dialect_baseline" in err
+
+    # --- 反例 2：sqlite 基线冒充 mysql ---
+    wrong2 = tmp_path / "wrong-mysql"
+    wrong2.mkdir()
+    shutil.copyfile(dialects_dir / "sqlite" / baseline_name, wrong2 / baseline_name)
     err2 = mod.verify_installed_baseline_matches_dialect(
-        f"sqlite:///{tmp_path/'x.db'}", wrong_dir)
-    assert err2 is not None, "装错方言必须报错"
-    assert "select_dialect_baseline" in err2, f"错误信息应给出修复命令: {err2}"
+        "mysql://u:p@127.0.0.1:3306/db", wrong2)
+    assert err2 is not None and "select_dialect_baseline" in err2
+
+    # --- main() 的 rc=4 路径：用 sqlite 库 + 装 mysql 基线 ---
+    db = tmp_path / "rc4.sqlite3"
+    _run_ok(["-c", GENERATE_CODE, str(db)], db)
+    # 在临时克隆的仓库里跑 main()，避免改动真实 migrations/models
+    fake_repo = tmp_path / "fakerepo"
+    (fake_repo / "scripts" / "migrations").mkdir(parents=True)
+    (fake_repo / "migrations" / "models").mkdir(parents=True)
+    for d in ("sqlite", "mysql", "postgres"):
+        (fake_repo / "migrations" / "dialects" / d).mkdir(parents=True)
+        shutil.copyfile(dialects_dir / d / baseline_name,
+                        fake_repo / "migrations" / "dialects" / d / baseline_name)
+    # 故意装成 mysql 的那份
+    shutil.copyfile(dialects_dir / "mysql" / baseline_name,
+                    fake_repo / "migrations" / "models" / baseline_name)
+    shutil.copyfile(BASELINE_SCRIPT,
+                    fake_repo / "scripts" / "migrations" / "baseline_existing_db.py")
+    (fake_repo / "app").mkdir()
+    (fake_repo / "app" / "__init__.py").write_text("")
+
+    result = subprocess.run(
+        [PYTHON, str(fake_repo / "scripts" / "migrations" / "baseline_existing_db.py"),
+         str(db), str(fake_repo / "migrations" / "models")],
+        capture_output=True, text=True, timeout=120, cwd=str(fake_repo),
+    )
+    assert result.returncode == 4, (
+        f"装错方言时 main() 必须 rc=4，实际 rc={result.returncode}\n"
+        f"stdout={result.stdout[-300:]}\nstderr={result.stderr[-300:]}"
+    )
+    assert "select_dialect_baseline" in result.stderr

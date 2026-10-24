@@ -261,15 +261,21 @@ def main(db_path: str, migrations_dir: str, app: str = "models", fresh: bool = F
         if db is None:
             print("!! SQLite 需要提供库文件路径或 sqlite:/// 形式的 --url", file=sys.stderr)
             return 2
-        return _run_sqlite(db, db_url, baseline_file, app, fresh)
-
-    # 非 SQLite：走 Tortoise（asyncpg / aiomysql），不依赖本地 sqlite3
-    if not fresh:
+        # 方言一致性：fresh 分支也要校验（装错方言时 --fresh 同样会把错的基线装进去）
         dialect_err = verify_installed_baseline_matches_dialect(
             db_url, Path(migrations_dir))
         if dialect_err:
             print(f"!! {dialect_err}", file=sys.stderr)
             return 4
+        return _run_sqlite(db, db_url, baseline_file, app, fresh)
+
+    # 非 SQLite：走 Tortoise（asyncpg / aiomysql），不依赖本地 sqlite3
+    # fresh 同样要校验方言：装错的基线会让 upgrade 在目标库上直接失败
+    dialect_err = verify_installed_baseline_matches_dialect(
+        db_url, Path(migrations_dir))
+    if dialect_err:
+        print(f"!! {dialect_err}", file=sys.stderr)
+        return 4
     problems = [] if fresh else verify_schema_matches_models(db_url)
     if problems:
         print("!! 库结构与模型不一致，拒绝写入基线：", file=sys.stderr)

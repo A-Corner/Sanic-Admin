@@ -10,7 +10,7 @@
 
 ```bash
 python scripts/migrations/baseline_existing_db.py <库文件> migrations/models --fresh   # SQLite：只建 aerich 账本表
-aerich upgrade                                                                          # 应用基线迁移，建全部业务表
+python scripts/migrations/upgrade.py                                                    # 应用基线迁移，建全部业务表
 ```
 
 **按方言选基线（必读）**：aerich 0.7.2 的基线是**单一方言**的——`init-db` 生成的是当前连接
@@ -40,7 +40,7 @@ python scripts/migrate_v0_3_2_must_change_password.py
 # 2) 基线化：创建 aerich 账本表，把「当前模型快照」写成基线版本（SQLite）
 python scripts/migrations/baseline_existing_db.py <库文件> migrations/models
 # 3) 此后 upgrade 为 no-op，只会应用以后新增的迁移
-aerich upgrade
+python scripts/migrations/upgrade.py
 ```
 
 为什么手写脚本在前、基线化在后：基线迁移代表的是“当前模型对应的完整结构”（含 `must_change_password`）。基线化只写账本，不检查也不修改表结构。如果先基线化，库里仍缺这一列，账本却宣称已对齐，之后 `aerich upgrade` 永远不会补列，运行时才会因缺列报错。手写脚本还负责置位管理员（这是数据修正，aerich 的 DDL 迁移做不了）。先补列再基线化，账本才和真实结构一致。测试 `test_c_without_handwritten_script_schema_diff_is_detected` 复现了颠倒顺序的后果。
@@ -53,6 +53,12 @@ MySQL / PostgreSQL 存量库：`baseline_existing_db.py --url <dsn>` 已支持�
 
 ## 2b. v0.3.2 生产库 → v0.4 的升级路径（必读）
 
+> **统一用 `scripts/migrations/upgrade.py` 而不是裸 `aerich upgrade`**：它在升级前先做方言
+> 一致性校验（md5 比对 `migrations/models/` 与 `migrations/dialects/<方言>/`）。
+> 退出码 **4** 表示「装的基线不是目标方言那份」——先执行
+> `python scripts/migrations/select_dialect_baseline.py <方言>` 再重试；
+> 其它方言基线在 MySQL/PG 上会直接语法报错，在 SQLite 上会静默建出错误类型。
+
 v0.4 起 production 环境**不再跑 `generate_schemas`**，改为检查 aerich 账本表存在与否，
 缺失即拒绝启动。因此 v0.3.2 的存量生产库必须先完成迁移链接入，顺序固定为四步：
 
@@ -64,7 +70,7 @@ DATABASE_URL="<生产库 DSN>" python scripts/migrate_v0_3_2_must_change_passwor
 python scripts/migrations/select_dialect_baseline.py --auto     # 或显式 sqlite/mysql/postgres
 DATABASE_URL="<生产库 DSN>" python scripts/migrations/baseline_existing_db.py --url "<生产库 DSN>" migrations/models
 # 3) 应用迁移（此时应为 no-op，只校验账本对齐）
-DATABASE_URL="<生产库 DSN>" aerich upgrade
+DATABASE_URL="<生产库 DSN>" python scripts/migrations/upgrade.py
 # 4) 启动应用（production 会检查账本表已存在）
 ```
 
