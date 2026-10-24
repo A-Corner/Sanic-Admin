@@ -2,7 +2,9 @@
 
 > **完整文档请看英文版 [README.md](README.md)。** 本文件是精简版：只保留最常用的信息，特性清单、证据表和限制说明以英文版为准。
 >
-> **项目状态**：**v0.2.0** 已于 2026-10-22 发布，**v0.2.1** 是其维护补丁版本。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+> **项目状态**：最新版本为 **[v0.3.4](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.4)**（2026-10-24，鉴权加固），其前依次为 [v0.3.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.3)（控制台热修）与 v0.3.2；原始重构版本为 v0.2.0。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供；自 v0.3.4 起该值若强度不足，**生产环境拒绝启动**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+>
+> **从 v0.3.1 及更早版本升级**需先运行 [v0.3.2 发布说明](docs/release/v0.3.2-release-notes.md) 中的迁移脚本（新增 `account.must_change_password`）；全新安装无需迁移。
 >
 > **许可证**：Apache-2.0，见 [LICENSE](LICENSE)。
 
@@ -13,6 +15,8 @@
 ## 特性
 
 - **认证与会话**：注册 / 验证 / 登录 / 登出 / 会话关联、图形验证码、两步验证流程；RS256 签名的 JWT 会话，同时通过 `HttpOnly` Cookie 和 `Authorization` 响应头下发。真实路由前缀为 `/auth`、`/capt`、`/roles`、`/account`（`app/auth/routes.py:27-31`）。
+- **鉴权加固（v0.3.4）**：认证路径写入操作日志（登录成功/失败、登出、改密、2FA，不含口令与 token）；改密需校验当前口令并限速（达阈值 429）；新口令强度与拒绝清单校验，**收敛到 `Account.set_password()`，注册与管理员建账户同样受约束**；改密成功后**当前会话一并作废并轮换**（`token_rotated: true`，breaking）。
+- **强制改密（v0.3.2）**：由 `INITIAL_ADMIN_PASSWORD` 创建的管理员首次登录必须改密，未完成前其余 API 返回 `403 PASSWORD_CHANGE_REQUIRED`。
 - **RBAC 权限**：角色模型携带 `{资源: [操作]}` 权限表；提供权限检查、角色检查、角色分配与回收；`is_admin` 账户拥有全部权限。
 - **管理 API**：账户、角色、个人资料、系统设置、操作日志、文件上传、仪表盘、缓存、只读 SQL 分析。这些是**类式 CRUD 资源**（继承 `app/api/base.py` 的 `CRUDResource`），不是独立的 `@bp.route` 蓝图装饰器。
 - **缓存**：内存 / Redis 双后端，共用一套接口；Redis 不可达时开发环境降级为内存，**生产环境拒绝降级启动**。
@@ -222,6 +226,9 @@ python main.py
 | [docs/configuration.md](docs/configuration.md) | 全部环境变量说明 |
 | [docs/architecture.md](docs/architecture.md) | 架构与模块划分 |
 | [docs/release/v0.2.0-release-notes.md](docs/release/v0.2.0-release-notes.md) | v0.2.0 Release Notes（草稿）：版本范围、逐项验证方式与已知限制 |
+| [docs/release/v0.3.2-release-notes.md](docs/release/v0.3.2-release-notes.md) | v0.3.2：首登强制改密、2FA 修复；**从 v0.3.1 及更早升级需跑迁移** |
+| [docs/release/v0.3.3-release-notes.md](docs/release/v0.3.3-release-notes.md) | v0.3.3：控制台角色弹窗热修、E2E 门禁修复、新增 `amis-e2e` CI |
+| [docs/release/v0.3.4-release-notes.md](docs/release/v0.3.4-release-notes.md) | v0.3.4：鉴权加固——审计日志、改密限速、口令强度、会话轮换（含两处 breaking） |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南与 PR 流程 |
 | [SECURITY.md](SECURITY.md) | 安全漏洞私下报告渠道 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
