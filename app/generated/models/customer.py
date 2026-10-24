@@ -33,8 +33,8 @@ class Customer(BaseModel):
             "notes": self.notes,
             "birthday": self.birthday,
             "onboarded_at": self.onboarded_at,
-            "created_at": str(self.created_at),
-            "updated_at": str(self.updated_at),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
         }
 
     def validate(self) -> None:

@@ -44,8 +44,8 @@ class Profile(BaseModel):
             "work_start_date": self.work_start_date.isoformat() if self.work_start_date else None,
             "introduction": self.introduction,
             "homepage": self.homepage,
-            "created_at": str(self.created_at),
-            "updated_at": str(self.updated_at),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
         }
 
     def validate(self) -> None:

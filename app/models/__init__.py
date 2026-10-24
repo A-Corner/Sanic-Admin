@@ -101,7 +101,18 @@ async def init_db(app: Sanic = None):
 
     await Tortoise.init(
         db_url=db_url,
-        modules={'models': ['app.models']}
+        modules={'models': ['app.models']},
+        # **显式声明时区契约**（v0.4.1）：
+        # - use_tz=True：所有 DatetimeField 的读写都按 aware datetime 处理；
+        # - timezone="UTC"：内部统一以 UTC 表示。
+        #
+        # 这两个参数此前依赖 Tortoise 的默认值。实测（Tortoise 0.20 + SQLite）
+        # 默认行为恰好也是 UTC aware，所以**运行时行为不变**——这里是把隐含
+        # 依赖变成显式契约，避免将来升级 Tortoise 时默认值变化导致行为漂移。
+        #
+        # 仅设 use_tz 时 Tortoise 的默认 timezone 是 "UTC"，但显式写出更好读。
+        use_tz=True,
+        timezone="UTC",
     )
 
     env = str(getattr(config, "ENV", "") or "").lower()

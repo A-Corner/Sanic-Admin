@@ -48,7 +48,7 @@ class OperationLog(BaseModel):
             "status": self.status,
             "ip_address": self.ip_address,
             "user_agent": self.user_agent,
-            "created_at": str(self.created_at),
+            "created_at": self.created_at.isoformat(),
         }
 
     def validate(self) -> None:
