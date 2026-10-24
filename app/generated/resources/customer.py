@@ -54,7 +54,7 @@ def _error(message, code, status, details=None):
     return APIResponse.error(message=message, error_code=code, status_code=status, details=details)
 
 
-async def _ref_errors(payload: dict, account) -> dict:
+async def _ref_errors(payload: dict) -> dict:
     errors = {}
     for col, (model, _res) in FK_TARGETS.items():
         value = payload.get(col)
@@ -120,7 +120,7 @@ class CustomerResource(HTTPMethodView):
             return _error("无权引用该关联资源", APIError.FORBIDDEN, 403)
         errors = validate_fields(payload, FIELD_RULES)
         if not errors:
-            errors = await _ref_errors(payload, request.ctx.authentication_session.bearer)
+            errors = await _ref_errors(payload)
         if errors:
             return _error("参数验证失败", APIError.VALIDATION_ERROR, 400, errors)
         conflicts = await _unique_conflicts(payload)
@@ -146,7 +146,7 @@ class CustomerResource(HTTPMethodView):
             return _error("没有可更新的字段", APIError.MISSING_PARAMETER, 400)
         errors = validate_fields(payload, {k: v for k, v in FIELD_RULES.items() if k in payload})
         if not errors:
-            errors = await _ref_errors(payload, request.ctx.authentication_session.bearer)
+            errors = await _ref_errors(payload)
         if errors:
             return _error("参数验证失败", APIError.VALIDATION_ERROR, 400, errors)
         conflicts = await _unique_conflicts(payload, exclude_id=customer_id)

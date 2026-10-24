@@ -63,10 +63,14 @@ def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
     fk = setup.fk_exprs(spec)
     pre = list(setup.lines)
     imports = sorted(setup.imports)
-    first_parent = next((b for b in spec.belongs_to if b.target not in CORE_TARGETS), None)
-    fk_target = first_parent.target if first_parent else None
-    # 引用目标需要 read 权限才能引用（防 ID 枚举）
-    parent_var = fk[first_parent.column].split(".")[0] if first_parent else None
+    # 外键目标：优先非 core（自带资源），否则取 core 目标（其资源名与 CORE_TARGETS
+    # 的键同名，如 account）；两者都没有时该用例不生成，避免出现 {None: ['read']}。
+    non_core_parent = next((b for b in spec.belongs_to if b.target not in CORE_TARGETS), None)
+    core_parent = next((b for b in spec.belongs_to if b.target in CORE_TARGETS), None)
+    fk_parent = non_core_parent or core_parent
+    fk_target = fk_parent.target if fk_parent else None
+    parent_var = fk[fk_parent.column].split(".")[0] if fk_parent else None
+    fk_column = fk_parent.column if fk_parent else None
 
     L = [py_header(spec), f'"""{spec.label} 生成资源的契约测试（由规格生成）。"""', ""]
     if imports:
@@ -142,6 +146,7 @@ def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
                 "    from app.models import Role",
                 "",
                 *pre,
+                f"    FK_COLUMN = {fk_column!r}",
                 f"    await Role.filter(name='reader').update(permissions={{{res!r}: ['create']}})",
                 "",
                 "    # 对引用目标无 read 权限：无论 id 是否存在，都必须 403（不泄露存在性）",
@@ -158,9 +163,35 @@ def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
                 "        f'授了 read 后不应再 403，实际 {allowed.status_code}'",
                 "    )",
                 "",
+                "    # PUT 同样门控：撤掉 read 后更新外键必须 403",
+                f"    await Role.filter(name='reader').update(permissions={{{res!r}: ['create', 'update']}})",
+                "    if allowed.status_code in (200, 201):",
+                "        obj_id = allowed.json()['data']['id']",
+                "        put_denied = await client.put(",
+                "            f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload",
+                "        )",
+                "        assert put_denied.status_code == 403, (",
+                "            f'PUT 无 {fk_target}:read 时应 403，实际 {put_denied.status_code}'",
+                "        )",
+                "        # 正向对照：授回 read 后同一 PUT 不再 403",
+                f"        await Role.filter(name='reader').update(permissions={{{res!r}: ['create', 'update'], {fk_target!r}: ['read']}})",
+                "        put_allowed = await client.put(",
+                "            f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload",
+                "        )",
+                "        assert put_allowed.status_code != 403, (",
+                "            f'PUT 授了 read 后不应再 403，实际 {put_allowed.status_code}'",
+                "        )",
+                "",
+                "    # 外键为空时不触发该项权限判定（不应因缺少目标 read 而 403）",
+                "    no_fk = {k: v for k, v in payload.items() if k != FK_COLUMN}",
+                "    empty_fk = await client.post(URL, headers=normal_auth_headers, json=no_fk)",
+                "    assert empty_fk.status_code != 403 or empty_fk.json().get('error') != 'FORBIDDEN', (",
+                "        '外键缺省时不应因引用权限被 403'",
+                "    )",
+                "",
                 "",
             ]
-            if spec.belongs_to
+            if fk_target
             else []
         ),
         "async def test_crud_roundtrip(client, auth_headers):",
@@ -270,8 +301,8 @@ def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
             "    assert response.status_code == 400, response.text[:300]",
             f'    assert {b.column!r} in response.json()["details"]',
         ]
-    if first_parent:
-        pt = specs[first_parent.target]
+    if non_core_parent:
+        pt = specs[non_core_parent.target]
         L += [
             "",
             f"async def test_parent_{pt.resource}_delete_blocked_by_child(client, auth_headers):",

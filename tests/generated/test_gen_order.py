@@ -77,6 +77,7 @@ async def test_fk_requires_target_read_permission(client, normal_auth_headers):
     from app.models import Role
 
     customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text'})
+    FK_COLUMN = 'customer_id'
     await Role.filter(name='reader').update(permissions={'order': ['create']})
 
     # 对引用目标无 read 权限：无论 id 是否存在，都必须 403（不泄露存在性）
@@ -91,6 +92,32 @@ async def test_fk_requires_target_read_permission(client, normal_auth_headers):
     allowed = await client.post(URL, headers=normal_auth_headers, json=payload)
     assert allowed.status_code != 403, (
         f'授了 read 后不应再 403，实际 {allowed.status_code}'
+    )
+
+    # PUT 同样门控：撤掉 read 后更新外键必须 403
+    await Role.filter(name='reader').update(permissions={'order': ['create', 'update']})
+    if allowed.status_code in (200, 201):
+        obj_id = allowed.json()['data']['id']
+        put_denied = await client.put(
+            f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload
+        )
+        assert put_denied.status_code == 403, (
+            f'PUT 无 {fk_target}:read 时应 403，实际 {put_denied.status_code}'
+        )
+        # 正向对照：授回 read 后同一 PUT 不再 403
+        await Role.filter(name='reader').update(permissions={'order': ['create', 'update'], 'customer': ['read']})
+        put_allowed = await client.put(
+            f'{URL}/{obj_id}', headers=normal_auth_headers, json=payload
+        )
+        assert put_allowed.status_code != 403, (
+            f'PUT 授了 read 后不应再 403，实际 {put_allowed.status_code}'
+        )
+
+    # 外键为空时不触发该项权限判定（不应因缺少目标 read 而 403）
+    no_fk = {k: v for k, v in payload.items() if k != FK_COLUMN}
+    empty_fk = await client.post(URL, headers=normal_auth_headers, json=no_fk)
+    assert empty_fk.status_code != 403 or empty_fk.json().get('error') != 'FORBIDDEN', (
+        '外键缺省时不应因引用权限被 403'
     )
 
 
