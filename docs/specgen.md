@@ -64,7 +64,73 @@ menu: {icon: fa-receipt, order: 70}
 
 ## 迁移
 
-TODO：等 aerich 迁移链（feat/migrations-aerich-s2）合入后补充——规格变更涉及加列/改类型/加索引时，如何生成并校验迁移脚本。当前仅 `generate_schemas(safe=True)` 建新表，不会修改已存在的表。
+改规格后的固定流程：
+
+```bash
+python -m tools.specgen generate    # 重写生成物（模型/API/页面/测试）
+python -m tools.specgen migrate     # 为结构变化产出三方言迁移
+python scripts/check_migrations.py  # 守门：迁移链与模型必须一致
+```
+
+`specgen migrate` 一次产出三方言**同名**迁移：
+
+```
+migrations/models/1_<ts>_specgen.py            # 当前部署方言（默认 SQLite）
+migrations/dialects/{sqlite,mysql,postgres}/1_<ts>_specgen.py
+```
+
+三份必须同名：aerich 以文件名作账本版本键，切方言后账本里记的名字要能在目录里
+找到同名文件，否则会被当成「没跑过」而重复建表。
+
+### 能自动迁移的
+
+| 变更 | 行为 |
+|---|---|
+| 新表 | `CREATE TABLE` |
+| 新列（可空，或 NOT NULL 带 DEFAULT） | `ALTER TABLE ... ADD` |
+
+### 不能自动迁移的（会报错，要求手写）
+
+生成器对下列变更**拒绝生成**并退出码 1。理由都是「数据迁移语义无法从模型推断」，
+猜错会在生产丢数据或让迁移中途失败：
+
+| 变更 | 为什么拒绝 |
+|---|---|
+| 删列 / 删表 | 数据会永久丢失，需人确认 |
+| 改类型 | 隐式转换可能截断（`VARCHAR(16)` → `VARCHAR(8)`）或失败 |
+| 改默认值 | 影响新行语义，旧行是否回填需人决定 |
+| 给已有列加 UNIQUE | 现有数据可能已有重复，要先清洗 |
+| 新列带 UNIQUE / 外键 | `ALTER TABLE ADD COLUMN` 的行内 `UNIQUE` 在 PG/SQLite 不受支持，外键同理，需单独 `ADD CONSTRAINT` |
+| 新列 NOT NULL 且无 DEFAULT | 已有行无值可填，ALTER 会因非空约束失败 |
+
+### 三方言渲染不需要数据库驱动
+
+`migrate` 直接读模型元数据渲染三方言 DDL，**不连库、不需要装 aiomysql / asyncpg**。
+渲染与连接是解耦的：只有真正 `upgrade` 时才需要驱动。
+
+（实现上要绕过 tortoise 的包级 import——`tortoise.backends.mysql.__init__` 会
+`import aiomysql`，所以按文件路径直接加载 `schema_generator.py`。见
+`tools/specgen/migrations.py` 的 `_load_generator_class`。）
+
+### 局限
+
+- **只处理新增**。上表列出的变更一律拒绝，需人工编写迁移。
+- **多方言文件名可能分叉**：如果某次变更只在一种方言下被判定为「需要迁移」
+  （例如不同方言对同一列的规范化结果不同），三份文件名可能对不上。发生时会由
+  `check_migrations.check_dialect_baselines` 报出来——部署前务必跑它。
+- **`IF NOT EXISTS` 的静默跳过**：增量用 `CREATE TABLE IF NOT EXISTS`，若目标库
+  已有同名但结构不同的表，会被跳过而不报错。部署前请跑 `check_migrations` 自查。
+
+### 切方言部署
+
+```bash
+python scripts/migrations/select_dialect_baseline.py mysql   # 装基线 + 全部增量
+DATABASE_URL="..." python scripts/migrations/upgrade.py      # 应用（含方言校验）
+```
+
+`select_dialect_baseline.py` 会连同**增量**一起装（只换基线不够——增量里的类型也
+分方言：MySQL `DATETIME(6)` vs PG `TIMESTAMPTZ`）。`upgrade.py` 在升级前对**每个**
+迁移文件做 md5 比对，装错方言返回退出码 4。
 
 ## 外键（belongs_to）与权限
 

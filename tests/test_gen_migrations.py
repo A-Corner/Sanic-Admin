@@ -232,3 +232,255 @@ def test_check_fails_when_increment_removed(sandbox):
     assert removed, "没有增量可供移除，前提不成立"
 
     assert _check_exit(sandbox) == 1, "缺增量迁移时 check_migrations 必须返回 1"
+
+
+# ---------------------------------------------------------------------------
+# 硬化：不该静默放过的变更必须报错
+# ---------------------------------------------------------------------------
+
+
+def _col(name, ty, extra=""):
+    return f'    "{name}" {ty}{extra}'
+
+
+def test_type_change_is_rejected_not_silently_ignored():
+    """
+    F1：同一列改类型必须进 unsupported，而不是「列名一样就放过」。
+
+    早先 plan() 只对列名做集合差，`VARCHAR(16)` 改成 `VARCHAR(32)`、
+    `INT` 改成 `BIGINT` 全被静默放过，生成「无需迁移」的假结论。
+    """
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("id", "INTEGER") + ",\n"
+                     + _col("name", "VARCHAR(32)") + "\n);"}
+    existing = {"t": ["id", "name"]}
+    existing_defs = {"t": {"id": '    "id" INTEGER', "name": '    "name" VARCHAR(16)'}}
+    _nt, _nc, unsupported = mig.plan(rendered, existing, existing_defs)
+    assert unsupported, "改类型必须报错，实际静默放过"
+    assert "name" in " ".join(unsupported)
+
+
+def test_default_value_change_is_rejected():
+    """F1：改默认值同样必须报错。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("status", "VARCHAR(16)", " DEFAULT 'closed'") + "\n);"}
+    existing = {"t": ["status"]}
+    existing_defs = {"t": {"status": '    "status" VARCHAR(16) DEFAULT \'open\''}}
+    _nt, _nc, unsupported = mig.plan(rendered, existing, existing_defs)
+    assert unsupported, "改默认值必须报错"
+
+
+def test_adding_unique_to_existing_column_is_rejected():
+    """F1：给已有列加 UNIQUE 必须报错（要单独 ADD CONSTRAINT）。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("email", "VARCHAR(255)", " NOT NULL UNIQUE") + "\n);"}
+    existing = {"t": ["email"]}
+    existing_defs = {"t": {"email": '    "email" VARCHAR(255) NOT NULL'}}
+    _nt, _nc, unsupported = mig.plan(rendered, existing, existing_defs)
+    assert unsupported, "加 UNIQUE 必须报错"
+
+
+def test_unchanged_definition_is_not_flagged():
+    """正向对照：定义完全一致时不得误报（否则上面几条可能是恒红）。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("name", "VARCHAR(16)") + "\n);"}
+    existing = {"t": ["name"]}
+    existing_defs = {"t": {"name": '    "name" VARCHAR(16)'}}
+    nt, nc, unsupported = mig.plan(rendered, existing, existing_defs)
+    assert unsupported == [], f"定义未变时不该报错：{unsupported}"
+    assert nt == [] and nc == []
+
+
+def test_new_unique_column_is_rejected():
+    """
+    F2：新增列带 UNIQUE 必须拒绝。
+
+    `ALTER TABLE ... ADD COLUMN ... UNIQUE` 在 PG/SQLite 上行内唯一约束不被支持
+    （SQLite 直接报错），需要单独的 ADD CONSTRAINT。
+    """
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("id", "INTEGER") + ",\n"
+                     + _col("code", "VARCHAR(32)", " UNIQUE") + "\n);"}
+    _nt, nc, unsupported = mig.plan(rendered, {"t": ["id"]}, {"t": {"id": '    "id" INTEGER'}})
+    assert not nc, "带 UNIQUE 的新列不该进自动迁移"
+    assert unsupported and "code" in " ".join(unsupported)
+
+
+def test_new_fk_column_is_rejected():
+    """F2：新增列带外键同样必须拒绝。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("id", "INTEGER") + ",\n"
+                     + _col("other_id", "INT", ' REFERENCES "other" ("id")') + "\n);"}
+    _nt, nc, unsupported = mig.plan(rendered, {"t": ["id"]}, {"t": {"id": '    "id" INTEGER'}})
+    assert not nc
+    assert unsupported and "other_id" in " ".join(unsupported)
+
+
+def test_new_not_null_column_without_default_is_rejected():
+    """
+    F3：新增 NOT NULL 且无 DEFAULT 的列必须拒绝。
+
+    已有行无值可填，ALTER 会因非空约束失败。
+    """
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("id", "INTEGER") + ",\n"
+                     + _col("mandatory", "VARCHAR(16)", " NOT NULL") + "\n);"}
+    _nt, nc, unsupported = mig.plan(rendered, {"t": ["id"]}, {"t": {"id": '    "id" INTEGER'}})
+    assert not nc, "NOT NULL 无 DEFAULT 的新列不该自动迁移"
+    assert unsupported and "DEFAULT" in " ".join(unsupported)
+
+
+def test_new_nullable_column_is_allowed():
+    """正向对照：可空新列（或 NOT NULL 带 DEFAULT）必须放行。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("id", "INTEGER") + ",\n"
+                     + _col("nick", "VARCHAR(16)") + ",\n"
+                     + _col("level", "INT", " NOT NULL DEFAULT 1") + "\n);"}
+    _nt, nc, unsupported = mig.plan(rendered, {"t": ["id"]}, {"t": {"id": '    "id" INTEGER'}})
+    assert unsupported == [], f"不该报错：{unsupported}"
+    # plan() 按列名字母序输出
+    assert [mig._column_name(d) for _t, d in nc] == ["level", "nick"]
+
+
+# ---------------------------------------------------------------------------
+# F4：MySQL 引号替换不误伤字符串；PG 新增列带 COMMENT ON
+# ---------------------------------------------------------------------------
+
+
+def test_mysql_quotes_does_not_touch_string_literals():
+    """
+    F4：`_mysql_quotes` 只该换标识符，不能改注释里的双引号。
+
+    早先用一把梭正则，`COMMENT '如 "foo" 这类'` 里的 "foo" 会被换成反引号。
+    """
+    sql = 'ALTER TABLE "t" ADD "col" VARCHAR(32) COMMENT \'如 "foo" 与 "bar"\''
+    out = mig._mysql_quotes(sql)
+    assert '`t`' in out and '`col`' in out, "标识符应换成反引号"
+    assert '"foo"' in out and '"bar"' in out, f"字符串里的双引号被误改：{out}"
+
+
+def test_mysql_quotes_handles_escaped_single_quote():
+    """注释里同时含 ' 与 " 时也要正确（CPL 要求的两组用例之一）。"""
+    sql = (r'ALTER TABLE "t" ADD "col" VARCHAR(32) '
+           r"COMMENT '含 \' 单引号与 \" 双引号的注释'")
+    out = mig._mysql_quotes(sql)
+    assert '`col`' in out
+    assert r"\'" in out, "转义单引号被破坏"
+    assert '"' in out, "字符串里的双引号不该被替换"
+
+
+def test_postgres_new_column_gets_comment_on():
+    """
+    F4：PG 新增列要补 `COMMENT ON COLUMN`。
+
+    PG 的列注释是独立语句，不在列定义里；不补会丢注释，与 PG 基线（每列都有
+    COMMENT ON）不一致。
+    """
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("id", "INTEGER") + ",\n"
+                     + _col("nick", "VARCHAR(16)", " /* 昵称 */") + "\n);"}
+    content = mig.render_migration("postgres", [], [("t", '    "nick" VARCHAR(16)  /* 昵称 */')],
+                                   rendered)
+    assert "COMMENT ON COLUMN" in content, "PG 新增列缺少 COMMENT ON COLUMN"
+    assert "昵称" in content
+
+
+def test_postgres_comment_escapes_single_quote():
+    """F4：PG 注释里的单引号要用 '' 双写（CPL 要求的两组用例之二）。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + _col("id", "INTEGER") + "\n);"}
+    col = '    "col" VARCHAR(32) /* 含 \' 单引号与 " 双引号 */'
+    content = mig.render_migration("postgres", [], [("t", col)], rendered)
+    assert "COMMENT ON COLUMN" in content
+    assert "''" in content, "PG 注释里的单引号必须双写转义"
+
+
+def test_mysql_increment_has_content_and_downgrade():
+    """测试补强：MySQL 增量要有实际 SQL 内容，且 downgrade 非空。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS `t` (\n'
+                     + "    `a` VARCHAR(16) NOT NULL /* 甲 */\n);"}
+    content = mig.render_migration("mysql", ["t"], [], rendered)
+    assert "CREATE TABLE" in content
+    assert "DROP TABLE IF EXISTS" in content, "downgrade 不能为空"
+    assert "`t`" in content, "MySQL 版应用反引号"
+
+
+def test_postgres_increment_has_content_and_downgrade():
+    """测试补强：PG 增量要有实际 SQL 内容，且 downgrade 非空。"""
+    rendered = {"t": 'CREATE TABLE IF NOT EXISTS "t" (\n'
+                     + '    "a" VARCHAR(16) NOT NULL\n);'}
+    content = mig.render_migration("postgres", ["t"], [], rendered)
+    assert "CREATE TABLE" in content
+    assert "DROP TABLE IF EXISTS" in content
+
+
+def test_positive_control_failure_reason_is_visible(sandbox):
+    """
+    测试补强：正向对照要断言**红灯的原因**，不只断言退出码非 0。
+
+    只看退出码的话，「因别的原因恰好返回 1」也会让对照通过。
+    """
+    for d in mig.DIALECTS:
+        files = sorted(
+            (p for p in (sandbox / "migrations" / "dialects" / d).glob("*.py")
+             if not p.name.startswith("0_")),
+            key=lambda p: mig._version_num(p.name))
+        if files:
+            files[-1].unlink()
+    for p in (sandbox / "migrations" / "models").glob("[1-9]_*.py"):
+        p.unlink()
+
+    script = sandbox / "scripts" / "check_migrations.py"
+    result = _run([str(script), str(sandbox / "migrations")], sandbox)
+    assert result.returncode == 1, result.stdout[-400:]
+    # 必须是「模型有、迁移链没有」这一类原因，而不是脚本自身报错
+    assert "模型有、迁移链没有" in result.stdout, (
+        f"退出码 1 但原因不是缺迁移，对照不干净：{result.stdout[-400:]}")
+
+
+# ---------------------------------------------------------------------------
+# 无驱动可渲染：生成迁移不该要求装 MySQL/PG 驱动
+# ---------------------------------------------------------------------------
+
+
+def test_render_works_without_db_drivers():
+    """
+    在**屏蔽全部数据库驱动**的环境里，三方言仍必须能渲染出 DDL。
+
+    这是 CI 上真实踩到的失败：`import tortoise.backends.mysql.schema_generator`
+    会先执行包 `__init__.py`，而它 `from .client import MySQLClient` →
+    `import aiomysql`；`Tortoise.init(db_url="mysql://…")` 也会实例化真实 client。
+    CI 只装 `requirements.txt`（不含 aiomysql/asyncmy/asyncpg），于是
+    `specgen migrate` 直接以 ModuleNotFoundError 失败——而本地 venv 恰好装过
+    驱动，测试全绿。
+
+    渲染只用模型的元数据，与连接无关。这条用例把「不需要驱动」变成硬约束：
+    谁再把驱动 import 引回渲染路径，这里就红。
+    """
+    code = """
+import sys
+# 屏蔽所有 MySQL / PG 驱动：再 import 会抛 ModuleNotFoundError
+for _m in ("aiomysql", "asyncmy", "asyncpg", "psycopg", "psycopg2"):
+    sys.modules[_m] = None
+sys.path.insert(0, {root!r})
+from tools.specgen import migrations as m
+
+for _d in m.DIALECTS:
+    rendered = m.render_ddl_for(_d)
+    assert rendered, f"{{_d}} 渲染结果为空"
+    # 方言特征必须正确（用 id 列的主键写法区分三方言）
+    head = rendered["customer"]
+    if _d == "sqlite":
+        assert "AUTOINCREMENT" in head, head[:200]
+    elif _d == "mysql":
+        assert "AUTO_INCREMENT" in head and "`" in head, head[:200]
+    else:
+        assert "SERIAL" in head, head[:200]
+print("OK_WITHOUT_DRIVERS")
+""".format(root=str(REPO))
+    result = subprocess.run([PYTHON, "-c", code], capture_output=True, text=True,
+                            timeout=300, cwd=str(REPO), env=_env())
+    assert result.returncode == 0, (
+        "无驱动环境下渲染失败——渲染路径又引入了数据库驱动依赖：\n"
+        + result.stderr[-1500:])
+    assert "OK_WITHOUT_DRIVERS" in result.stdout
