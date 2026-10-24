@@ -145,7 +145,10 @@
                 {
                   "name": "due_date",
                   "label": "期望完成日",
-                  "required": false
+                  "required": false,
+                  "type": "input-date",
+                  "format": "YYYY-MM-DD",
+                  "valueFormat": "YYYY-MM-DD"
                 },
                 {
                   "type": "select",
@@ -271,7 +274,10 @@
             {
               "name": "due_date",
               "label": "期望完成日",
-              "required": false
+              "required": false,
+              "type": "input-date",
+              "format": "YYYY-MM-DD",
+              "valueFormat": "YYYY-MM-DD"
             },
             {
               "type": "select",

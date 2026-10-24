@@ -571,6 +571,24 @@ def main() -> int:
             # 这条守的是「生成器产出的 AMIS 页面真的能用」——model / API / 页面由同一份
             # 规格产出，字段名或表单类型对不上时页面会打不开或提交后列表不刷新。
             # 只测 API 覆盖不到这一类（AMIS 页面不在 pytest 范围）。
+            # 前置：ticket.customer_id 是必填外键，下拉的数据源是
+            # GET /api/v1/customers。空库里没有客户 -> 下拉无选项 -> 表单永远
+            # 提交不了（报「依赖的部分字段没有通过验证」）。先用 API 造一条。
+            try:
+                _tk_api = _ApiClient(base)
+                _tk_api.login(args.admin_email, effective_password)
+                try:
+                    _tk_api.request("POST", "/api/v1/customers", {
+                        "name": "E2E 工单客户",
+                        "email": "e2e-ticket-customer@example.com",
+                        "status": "active",
+                    })
+                except urllib.error.HTTPError as _exc:
+                    if _exc.code != 409:   # 409 = 已存在（重复跑时正常）
+                        raise
+            except Exception as exc:  # noqa: BLE001 - 造数据失败要让下面的断言暴露
+                print(f"  ⚠️  准备工单客户失败：{str(exc).splitlines()[0]}", file=sys.stderr)
+
             ticket_title = "e2e-ticket-%d" % int(time.time() * 1000)
             page.goto(base + PAGES["console"] + "#/ticket/list", wait_until="domcontentloaded")
             page.wait_for_timeout(2500)
@@ -588,15 +606,28 @@ def main() -> int:
             added_ticket = False
             ticket_detail = ""
             try:
-                page.click("text=新增", timeout=10000)
-                page.wait_for_timeout(1200)
-                dlg = page.locator(".amis-dialog")
-                dlg.locator('input[name="title"]').fill(ticket_title, timeout=8000)
-                # priority / status 有默认值；customer 是必填外键，从下拉选第一项
-                cust = dlg.locator('select[name="customer_id"]')
-                if cust.count() > 0:
-                    cust.select_option(index=1)
-                dlg.locator('button:has-text("确认")').click(timeout=8000)
+                # 生成页面的新增入口文案是「新增工单」（不是通用「新增」）。
+                # AMIS 弹窗**不保证**带 `.amis-dialog` 类（实测 count=0），所以直接
+                # 定位表单里的可见控件，不依赖容器选择器。
+                page.click('button:has-text("新增工单")', timeout=10000)
+                page.wait_for_timeout(1500)
+                title_input = page.locator('input[name="title"]:visible').last
+                title_input.wait_for(state="visible", timeout=10000)
+                title_input.fill(ticket_title, timeout=10000)
+
+                # customer 是必填外键。AMIS 的 select **不是原生 <select>**
+                # （实测 select[name=customer_id] 计数为 0），而是 role=combobox
+                # 的自定义组件 + role=option 浮层。表单里 3 个 combobox 依次是
+                # status / priority / customer，只有最后一个必填且无默认值。
+                combos = page.locator("[role=combobox]:visible")
+                if combos.count() > 0:
+                    combos.last.click()
+                    page.wait_for_timeout(1200)
+                    opts = page.locator("[role=option]:visible")
+                    if opts.count() > 0:
+                        opts.first.click()
+                        page.wait_for_timeout(800)
+                page.locator('button:has-text("确认"):visible').last.click(timeout=8000)
                 page.wait_for_timeout(2500)
                 after = page.locator("body").inner_text()
                 added_ticket = "VALIDATION_ERROR" not in after
@@ -605,6 +636,23 @@ def main() -> int:
                                  else "not-seen")
             except Exception as exc:  # noqa: BLE001
                 ticket_detail = str(exc).splitlines()[0][:160]
+
+            # 二次核验：弹窗关闭 ≠ 写库成功。用 API 直接查一次，避免
+            # 「表单没报错但请求根本没发出」被当成通过（本轮实测踩到过）。
+            if added_ticket:
+                try:
+                    _chk = _ApiClient(base)
+                    _chk.login(args.admin_email, effective_password)
+                    # _ApiClient.request 返回 (status, body) 元组
+                    _st, _rows = _chk.request(
+                        "GET", "/api/v1/tickets?page=1&page_size=100")
+                    _titems = (((_rows or {}).get("data") or {}).get("items")) or []
+                    if not any(str(t.get("title")) == ticket_title for t in _titems):
+                        added_ticket = False
+                        ticket_detail = f"{ticket_detail} (API 未查到，未写库)"
+                except Exception:  # noqa: BLE001
+                    added_ticket = False
+                    ticket_detail = f"{ticket_detail} (API 核验失败)"
             check("新增工单成功（无 VALIDATION_ERROR）", added_ticket, ticket_detail)
             check(
                 "新增的工单出现在列表里",

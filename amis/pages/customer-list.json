@@ -122,12 +122,18 @@
                 {
                   "name": "birthday",
                   "label": "生日",
-                  "required": false
+                  "required": false,
+                  "type": "input-date",
+                  "format": "YYYY-MM-DD",
+                  "valueFormat": "YYYY-MM-DD"
                 },
                 {
                   "name": "onboarded_at",
                   "label": "建档时间",
-                  "required": false
+                  "required": false,
+                  "type": "input-datetime",
+                  "format": "YYYY-MM-DD HH:mm:ss",
+                  "valueFormat": "YYYY-MM-DD HH:mm:ss"
                 }
               ]
             }
@@ -224,12 +230,18 @@
             {
               "name": "birthday",
               "label": "生日",
-              "required": false
+              "required": false,
+              "type": "input-date",
+              "format": "YYYY-MM-DD",
+              "valueFormat": "YYYY-MM-DD"
             },
             {
               "name": "onboarded_at",
               "label": "建档时间",
-              "required": false
+              "required": false,
+              "type": "input-datetime",
+              "format": "YYYY-MM-DD HH:mm:ss",
+              "valueFormat": "YYYY-MM-DD HH:mm:ss"
             }
           ]
         }

@@ -67,6 +67,17 @@ def _control(f, specs: Dict[str, ResourceSpec]) -> dict:
         c["type"] = "input-number"
     elif f.type == "bool":
         c["type"] = "switch"
+    elif f.type == "date":
+        # AMIS 没有通用「日期」渲染器，必须显式给 input-date。
+        # 早先漏了这两个分支，字段落空 -> 表单里出现没有 type 的控件，
+        # AMIS 报「找不到对应的渲染器」，整个新增/编辑弹窗无法提交。
+        c["type"] = "input-date"
+        c["format"] = "YYYY-MM-DD"
+        c["valueFormat"] = "YYYY-MM-DD"
+    elif f.type == "datetime":
+        c["type"] = "input-datetime"
+        c["format"] = "YYYY-MM-DD HH:mm:ss"
+        c["valueFormat"] = "YYYY-MM-DD HH:mm:ss"
     if f.default is not None:
         c["value"] = f.default
     return c
