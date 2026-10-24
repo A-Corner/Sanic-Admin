@@ -1,5 +1,110 @@
 # Sanic-Admin
 
+**Spec-as-code admin backend where AI proposes changes as PRs, never edits production directly.**
+
+Sanic-Admin is a backend administration framework built on **Sanic** (async Python web framework) and **Tortoise ORM**, with **RBAC** authorization and **RS256-signed JWT** sessions; the admin console is **AMIS**. You describe a business module in one YAML spec, a deterministic generator turns it into models, CRUD APIs, permission points, AMIS pages, tests and three-dialect migrations — and every change lands as a reviewable diff instead of a runtime mutation.
+
+## Why Sanic-Admin
+
+- **Spec as code.** One YAML file per module; the generator deterministically produces models, CRUD APIs, permission points, AMIS pages, tests and SQLite/MySQL/PostgreSQL migrations. Same spec in, byte-identical result out — so a change is reviewed as a diff, not by comparing two databases. See the [v0.4.0 release](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.0) and the [10-minute demo](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/demo/ai-module-in-10-minutes.md).
+- **AI proposes, humans merge.** An MCP server exposes five read-only tools plus a write path that is **off by default**: proposals land in `proposal/` branches, and four independent layers make it impossible for the AI to push or merge — merging is a human act by design. See [docs/mcp.md](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp.md) and the [four-layer guarantee](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp-write-path.md).
+- **Gates actually run.** The v0.4.0 release tree passed **640 tests / 0 failed**; a real browser executes **22 E2E assertions**; CI boots MySQL 8 and PostgreSQL 16 to run migrations and assert column types against `information_schema`; Docker acceptance starts the real container — and every gate is built so that it can fail. Evidence: [v0.4.0 release notes](https://github.com/A-Corner/Sanic-Admin/blob/v0.4.0/docs/release/v0.4.0-release-notes.md).
+
+## How it compares
+
+| | Sanic-Admin | Directus | NocoBase |
+|---|---|---|---|
+| Where the schema lives | YAML specs in Git | In the database (plus exportable schema snapshots) | In the database |
+| How an AI change takes effect | Edit the spec → generator emits a diff → PR | Applies to the running instance; snapshots can be exported for comparison | Applies to the running instance |
+| Review & rollback | Every change is a PR diff; rollback is `git revert` | Snapshots can be diffed, but runtime changes do not pass through code review | Same as Directus |
+
+These tools are not bad — the difference is where the source of truth lives. Here it is diff-able text in Git, so an AI's output can be reviewed line by line before it ever runs.
+
+## Try it in 5 minutes
+
+### 1) Start the stack
+
+```bash
+docker compose up -d
+# then open http://127.0.0.1:22222 — the compose path is exercised on every
+# push by the Docker Acceptance workflow:
+# https://github.com/A-Corner/Sanic-Admin/actions/workflows/docker.yml
+```
+
+### 2) Generate a module from one spec
+
+```bash
+cat > specs/asset.yaml <<'YAML'
+resource: asset
+table: assets
+plural: assets
+label: 资产
+description: 固定资产登记
+fields:
+  - name: name
+    type: string
+    max_length: 128
+    required: true
+    label: 名称
+    list: true
+    searchable: true
+  - name: serial_no
+    type: string
+    max_length: 64
+    required: true
+    label: 序列号
+    list: true
+  - name: purchased_at
+    type: date
+    label: 购入日期
+    list: true
+YAML
+
+python -m tools.specgen generate
+# 写入 app/generated/models/asset.py
+# 写入 app/generated/resources/asset.py
+# 写入 amis/pages/asset-list.json
+# 完成：8 个文件更新，0 个陈旧文件清理
+
+python -m tools.specgen migrate
+# migrations/dialects/{sqlite,mysql,postgres}/3_20261025060909_specgen.py — 三方言各一份
+
+python -m tools.specgen check
+# OK: 生成物与规格一致
+```
+
+（输出为 2026-10-25 在 v0.4.1 基线上的实跑结果。）
+
+### 3) Hook up the MCP read-only layer
+
+```json
+{
+  "mcpServers": {
+    "sanic-admin-specgen": {
+      "command": "python",
+      "args": ["-m", "tools.mcp_server"],
+      "cwd": "/absolute/path/to/Sanic-Admin"
+    }
+  }
+}
+```
+
+The five tools are read-only: `list_resources`, `describe_resource`, `validate_spec`, `preview_generate`, `check`. Full setup and the optional write path (off by default): [docs/mcp.md](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp.md).
+
+## Demo: adding a module with AI
+
+[ai-module-in-10-minutes.md](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/demo/ai-module-in-10-minutes.md) walks through one real run, commands and outputs included. The smooth path takes about **8.5 minutes**; the first real run took **1.5–2 hours** because browser E2E caught defects that a green CI had missed — that gap is the point of the gates.
+
+## Limitations
+
+- The generator only **adds**: column drops, type changes and other destructive migrations are handwritten on purpose.
+- The MCP write path is a **prototype** (off by default); account-level `spec:write` permission is landing in v0.4.2.
+- The admin console is **AMIS 3.4.0**; the 6.x upgrade is evaluated for a later release.
+- **Single maintainer**, no external contributors yet.
+- Not production-ready yet — see the status notes below.
+
+---
+
 > **Project status — read this first**
 >
 > - The latest release is **[v0.3.4](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.4)** (2026-10-24), an authentication-hardening patch on top of [v0.3.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.3) (console hotfix) and v0.3.2. The original rebuild landed in **v0.2.0**. Everything below was verified by running it, and anything that could not be verified is listed under *Known limitations* in the per-release [release notes](docs/release/).
@@ -8,10 +113,6 @@
 > - **No credentials are baked into the repository.** There is no default administrator password. The first-run administrator password is generated at startup (development only) or must be supplied via `INITIAL_ADMIN_PASSWORD`. Since v0.3.4 that value is held to the password strength rule and **production refuses to start** if it is too weak.
 > - Secrets are **environment variables only** — the repository contains none. The JWT signing key and the initial administrator password are the two that production requires; a sample key that existed in the repository history must be treated as compromised and rotated.
 > - Report security issues privately — see [SECURITY.md](SECURITY.md).
-
-Sanic-Admin is a backend administration framework built on **Sanic** (async Python web framework) and **Tortoise ORM**, with **RBAC** authorization and **RS256-signed JWT** sessions. The admin console is built with **AMIS**, a low-code framework driven by JSON page definitions.
-
----
 
 ## Features
 
