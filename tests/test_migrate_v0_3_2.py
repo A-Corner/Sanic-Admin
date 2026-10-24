@@ -23,6 +23,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "migrate_v0_3_2_must_change_password.py"
 
+
+def _legacy_hash(raw_password: str) -> str:
+    """按旧版本的方式生成口令哈希，**有意绕过**新版的口令策略校验。
+
+    这些测试构造的是「v0.3.1 已经写进库里」的行——历史默认口令 SAdmin@123
+    正是被迁移脚本要识别出来的目标。若这里改走 ``Account.set_password()``，
+    L1 新增的弱口令拒绝清单会在**造数据阶段**就把 SAdmin@123 拦下，测试
+    测的就不再是迁移脚本，而是口令策略本身。
+    """
+    from app.models.account import password_hasher
+
+    return password_hasher.hash(raw_password)
+
 #: 历史默认管理员口令（v0.3.1 及更早版本硬编码）
 LEGACY_DEFAULT_PASSWORD = "SAdmin@123"
 
@@ -71,7 +84,7 @@ def _make_legacy_db(db_path: Path, *, email: str, password: str,
     conn.execute(LEGACY_SCHEMA)
     account = Account(username="legacy", email=email, verified=True,
                       disabled=disabled, is_admin=is_admin)
-    account.set_password(password)
+    account.password = _legacy_hash(password)
     conn.execute(
         "INSERT INTO account (username, email, password, verified, disabled, is_admin) "
         "VALUES (?,?,?,?,?,?)",
@@ -192,7 +205,7 @@ def test_disabled_and_non_admin_not_flagged(tmp_path):
     for username, email, is_admin, disabled in rows:
         account = Account(username=username, email=email, verified=True,
                           disabled=disabled, is_admin=is_admin)
-        account.set_password(LEGACY_DEFAULT_PASSWORD)
+        account.password = _legacy_hash(LEGACY_DEFAULT_PASSWORD)
         conn.execute(
             "INSERT INTO account (username, email, password, verified, disabled, is_admin) "
             "VALUES (?,?,?,?,?,?)",
