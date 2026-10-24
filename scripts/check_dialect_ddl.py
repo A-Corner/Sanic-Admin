@@ -332,9 +332,13 @@ async def run(dialect: str, url: str, existing: bool) -> int:
     print(f"  [{dialect}{' 存量库' if existing else ' 新库'}] 应用迁移: {applied}")
     if existing:
         # 存量库：基线已被 baseline_existing_db 标记为已应用，upgrade 只该跑增量
-        non_increment = [m for m in applied if not m.startswith("1_")]
-        if non_increment:
-            problems.append(f"存量库不应重跑基线，实际应用了 {non_increment}")
+        # 『不该重跑基线』要按**基线文件名**判断，不能写死版本号。
+        # 早先写死 `startswith("1_")`，一加第 2 条增量（M3 的 ticket 迁移）就误报
+        # 「存量库重跑了基线」——实际跑的是正常增量。
+        baseline_names = {p.name for p in models_dir.glob("0_*.py")}
+        reran_baseline = [m for m in applied if m in baseline_names]
+        if reran_baseline:
+            problems.append(f"存量库不应重跑基线，实际重跑了 {reran_baseline}")
         if not applied:
             problems.append("存量库没有应用任何增量迁移（增量缺失？）")
 

@@ -594,8 +594,11 @@ def main() -> int:
             page.wait_for_timeout(2500)
             ticket_rows, ticket_raw = _data_rows(page)
             ticket_body = page.locator("body").inner_text()
+            # 不能只判 `"工单" in body`——左侧菜单里也有「工单」两个字，
+            # 那样即使 crud 完全没渲染也永远为真。改为要求**页面自身**渲染出
+            # 表头（「期望完成日」只出现在 crud 列定义里）或「新增工单」按钮。
             ticket_opened = (
-                "工单" in ticket_body
+                ("期望完成日" in ticket_body or page.locator('button:has-text("新增工单")').count() > 0)
                 and "VALIDATION_ERROR" not in ticket_body
             )
             check(

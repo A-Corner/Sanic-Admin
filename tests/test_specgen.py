@@ -247,14 +247,21 @@ def test_permissions_and_menu_auto_registered():
     import app.api.resources  # noqa: F401  导入即触发生成资源的权限注册
     from app.auth.permissions import ALL_PERMISSIONS, admin_all_permissions
 
-    for res in ("customer", "order"):
-        assert ALL_PERMISSIONS[res] == ["read", "create", "update", "delete"]
-        assert admin_all_permissions()[res] == ["all"]
+    # 从 specs/ 动态取资源名——写死 ("customer", "order") 会在每加一个资源时
+    # 假失败（M3 加 ticket 就撞上了），而这条测试的本意是「**所有**生成资源
+    # 都自动注册了权限与菜单」，不是「恰好只有这两个」。
+    from tools.specgen.schema import load_specs
+
+    expected = sorted(load_specs(ROOT / "specs", "specs"))
+    assert expected, "specs/ 下没有资源，用例前提不成立"
+    for res in expected:
+        assert ALL_PERMISSIONS[res] == ["read", "create", "update", "delete"], res
+        assert admin_all_permissions()[res] == ["all"], res
     import json
 
     pages = json.loads((ROOT / "amis/pages/site.json").read_text(encoding="utf-8"))["data"]["pages"]
-    generated = [p["x-specgen"] for p in pages if "x-specgen" in p]
-    assert generated == ["customer", "order"]
+    generated = sorted(p["x-specgen"] for p in pages if "x-specgen" in p)
+    assert generated == expected, f"菜单里缺资源：{set(expected) - set(generated)}"
 
 
 def test_full_permission_role_still_protected_after_generated_resources():
@@ -365,3 +372,83 @@ def test_customer_spec_has_m1_features():
     assert "birthday" in customer.sorting.allowed
     assert any(f.type == "date" for f in customer.fields)
     assert any(f.type == "datetime" for f in customer.fields)
+
+
+# ---------------------------------------------------------------------------
+# AMIS 表单控件映射：每个 FieldType 都必须产出带 type 的控件
+# ---------------------------------------------------------------------------
+
+
+def _all_field_types():
+    """从 schema 的 ``FieldType``（Literal）里取出全部取值，不手抄。"""
+    import typing
+
+    from tools.specgen.schema import FieldType
+
+    args = typing.get_args(FieldType)
+    assert args, "FieldType 不是 Literal，取不到取值列表"
+    return list(args)
+
+
+@pytest.mark.parametrize("field_type", _all_field_types())
+def test_every_field_type_maps_to_amis_control_with_type(field_type):
+    """
+    每个 FieldType 取值都必须映射出**带 type** 的 AMIS 控件。
+
+    早先 `_control()` 漏了 date / datetime 两个分支，生成的字段是个没有
+    `type` 的对象；AMIS 报「找不到对应的渲染器」，**整个新增/编辑弹窗无法提交**。
+    而 API 测试、单元测试、CI 全绿——只有真跑浏览器才会暴露。
+
+    这里遍历 `FieldType` 的**全部取值**（从 Literal 读，不手抄），
+    新增类型却忘了加映射时，这条会红。
+    """
+    from tools.specgen.render_amis import _control
+    from tools.specgen.schema import FieldSpec
+
+    f = FieldSpec(name="probe", type=field_type, label="探针")
+    ctrl = _control(f, {})
+    assert ctrl.get("type"), (
+        f"FieldType={field_type!r} 生成的控件没有 type：{ctrl}")
+    assert isinstance(ctrl["type"], str) and ctrl["type"]
+
+
+def test_choices_field_maps_to_select():
+    """choices 字段映射成 select。"""
+    from tools.specgen.render_amis import _control
+    from tools.specgen.schema import FieldSpec
+
+    f = FieldSpec(name="probe", type="string", label="探针",
+                  choices=["a", "b"])
+    ctrl = _control(f, {})
+    assert ctrl["type"] == "select"
+    assert [o["value"] for o in ctrl["options"]] == ["a", "b"]
+
+
+def test_belongs_to_maps_to_select_with_source():
+    """belongs_to 字段映射成带 source 的 select。"""
+    from tools.specgen.render_amis import _control
+    from tools.specgen.schema import load_specs
+
+    specs = load_specs(Path("specs"), "specs")
+    order = specs["order"]
+    rel = order.belongs_to[0]
+    ctrl = _control(rel, specs)
+    assert ctrl["type"] == "select"
+    assert "source" in ctrl, f"外键控件缺少 source：{ctrl}"
+
+
+def test_control_raises_on_unmapped_type():
+    """
+    兜底：遇到没有映射的类型必须**直接 raise**，而不是产出无 type 的控件。
+
+    这条守的是「新增 FieldType 却忘了加分支」的将来时。
+    """
+    from tools.specgen.render_amis import _control
+    from tools.specgen.schema import FieldSpec
+
+    f = FieldSpec(name="probe", type="string", label="探针")
+    # 绕过 pydantic 校验，模拟「schema 加了新类型但 render 没跟上」
+    object.__setattr__(f, "type", "brand_new_type")
+    object.__setattr__(f, "choices", None)
+    with pytest.raises(ValueError, match="缺少映射"):
+        _control(f, {})
