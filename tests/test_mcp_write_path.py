@@ -10,6 +10,7 @@ MCP 写入路径 git 隔离层的测试（M2 第二段）。
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -98,18 +99,18 @@ def test_git_rejects_force_flag(user_repo: Path) -> None:
 #: 这个测试要手动 `git push`，所以不能经 `_git`（白名单会先拦住）。
 #: 用裸 subprocess 直接调，测的是**第二层**（hook），不是第三层（白名单）。
 def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) -> None:
+    """
+    即使手工加了 remote，push 也必须被 pre-push hook 拦下。
+
+    审核指出上一版的两个问题：
+    1. `"hook" in stderr.lower()` 可能因为 tmp_path 目录名里含 "hook" 而通过——
+       改成「hook 写标记文件」这种**不可伪造**的证据；
+    2. 测试自己又 chmod 了一次 hook，导致实现里的 chmod 根本没被测到——
+       删掉测试里的 chmod，改为断言 `os.access(X_OK)`。
+    """
     bare = tmp_path / "bare.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
 
-    written: list[Path] = []
-
-    def _write(clone_dir: Path) -> None:
-        (clone_dir / "specs" / "demo.yaml").write_text(
-            "name: demo\nfields:\n  - name: priority\n", encoding="utf-8"
-        )
-        written.append(clone_dir)
-
-    # 在提案过程中截获 clone 目录，等它被清理前先拷出来做实验
     branch = make_branch_name("demo")
     import tools.mcp_server.git_isolation as gi
 
@@ -118,67 +119,80 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
 
     def _spy(clone_dir: Path) -> None:
         original_harden(clone_dir)
-        # 把 clone 拷到测试自己的目录，避免 make_proposal 的 finally 删掉它。
-        # **必须保留权限**：copytree 默认不保留可执行位，hook 会丢掉 +x，
-        # 于是 git 直接跳过 pre-push——测试就会因为错误的原因通过。
+        # 拷一份给测试用（make_proposal 的 finally 会删掉原目录）。
+        # copy2 保留权限位；**不再补 chmod**——否则实现里的 chmod 测不到。
         import shutil
         keep = tmp_path / "kept-clone"
-        shutil.copytree(clone_dir, keep, symlinks=True,
-                        copy_function=shutil.copy2)
-        # copy2 保留 mtime/权限位，但 copytree 对可执行位仍可能不精确，显式补一次
-        hook = keep / ".git" / "hooks" / "pre-push"
-        if hook.exists():
-            hook.chmod(0o755)
+        shutil.copytree(clone_dir, keep, symlinks=True, copy_function=shutil.copy2)
+        # hooksPath 是绝对路径，指向原 clone 的 hooks 目录；拷到新位置后必须
+        # 同步改指，否则 git 会去原目录找 hook（那里已经被 make_proposal 删了）。
+        # 这正是 P2-3「显式指定 hooksPath」生效的证据。
+        cfg = keep / ".git" / "config"
+        text = cfg.read_text(encoding="utf-8")
+        old_hooks = str((clone_dir / ".git" / "hooks").resolve())
+        new_hooks = str((keep / ".git" / "hooks").resolve())
+        cfg.write_text(text.replace(old_hooks, new_hooks), encoding="utf-8")
         captured["clone"] = keep
 
     gi._harden_clone = _spy
     try:
-        make_proposal(user_repo, branch, "proposal: add priority", _write)
+        make_proposal(
+            user_repo, branch, "proposal: add priority",
+            lambda d: (d / "specs" / "demo.yaml").write_text(
+                "name: demo\nfields:\n  - name: priority\n", encoding="utf-8"
+            ),
+        )
     finally:
         gi._harden_clone = original_harden
 
     clone = captured["clone"]
-
-    # 前置断言：hook 必须存在且可执行。少了这一条，hook 被跳过时下面的
-    # 「push 失败」会因权限问题而非拦截成立——那就是假测试。
     hook = clone / ".git" / "hooks" / "pre-push"
-    # [临时对照] 前置断言已移除
 
-    # 第一层验证：config 里没有 remote
+    # --- 前置断言：hook 必须存在、可执行（测的是实现里的 chmod）---
+    assert hook.exists(), "pre-push hook 不存在"
+    assert os.access(hook, os.X_OK), (
+        "pre-push hook 不可执行——实现里的 chmod 没生效（测试不得代为 chmod）"
+    )
+    assert "exit 1" in hook.read_text(encoding="utf-8")
+
+    # --- 让 hook 留下不可伪造的执行证据 ---
+    marker = tmp_path / "hook-ran.marker"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'echo ran > "{marker}"\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+
+    # 第一层：config 里没有 remote
     config_text = (clone / ".git" / "config").read_text(encoding="utf-8")
     assert "[remote " not in config_text, "隔离 clone 不该有 remote"
     assert "default = nothing" in config_text
     assert "helper =" in config_text
 
-    # 手动加 remote，模拟绕过第一层
+    # 手工加 remote，模拟绕过第一层
     subprocess.run(
         ["git", "remote", "add", "evil", str(bare)],
         cwd=str(clone), check=True, capture_output=True,
     )
 
-    # 第二层验证：push 必须失败。
-    # **必须推 clone 里真实存在的分支**——推一个不存在的分支也会失败，
-    # 但那失败来自「源引用没有匹配」，与 hook 无关，是假测试（实测踩到过）。
+    # 必须推 clone 里真实存在的分支
     current = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=str(clone), capture_output=True, text=True, check=True,
     ).stdout.strip()
-    assert current, "拿不到 clone 的当前分支"
-    assert subprocess.run(
-        ["git", "rev-parse", "--verify", current],
-        cwd=str(clone), capture_output=True,
-    ).returncode == 0, f"分支 {current} 在 clone 里不存在"
+    assert current and current != "HEAD", "clone 处于分离 HEAD，无法推出有效分支"
 
     proc = subprocess.run(
         ["git", "push", "evil", current],
         cwd=str(clone), capture_output=True, text=True,
     )
-    assert proc.returncode != 0, (
-        f"pre-push hook 没拦住 push；rc={proc.returncode} stderr={proc.stderr[:300]}"
-    )
-    # 失败原因必须是 hook（而非「源引用没有匹配」这类无关失败）
-    assert "pre-push" in proc.stderr or "hook" in proc.stderr.lower(), (
-        f"push 失败但不是 hook 拦的：{proc.stderr[:300]}"
+    assert proc.returncode != 0, f"pre-push hook 没拦住 push：{proc.stderr[:300]}"
+
+    # --- 核心证据：hook 确实被执行了（标记文件）---
+    assert marker.exists() and marker.read_text().strip() == "ran", (
+        "hook 没有执行痕迹——push 失败可能另有原因（如 ref 不存在），不是 hook 拦的"
     )
 
     # bare 仓库必须一个 ref 都没收到
@@ -187,6 +201,29 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert refs == "", f"bare 仓库收到了 ref：{refs}"
+
+    # --- 反向对照：把 hook 换成放行，push 必须成功 ---
+    # 这条证明「上面的失败确实是 hook 造成的」，而不是别的原因
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'echo ran > "{marker}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    marker.unlink()
+    ok_proc = subprocess.run(
+        ["git", "push", "evil", current],
+        cwd=str(clone), capture_output=True, text=True,
+    )
+    assert ok_proc.returncode == 0, (
+        f"hook 放行后 push 应当成功，否则说明失败另有原因：{ok_proc.stderr[:300]}"
+    )
+    refs_after = subprocess.run(
+        ["git", "--git-dir", str(bare), "for-each-ref"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert refs_after != "", "放行后 bare 应当收到 ref（证明这条路径本来是通的）"
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +263,18 @@ def test_propose_never_touches_user_repo_config(user_repo: Path) -> None:
 
 
 def test_fetch_does_not_overwrite_existing_branch(user_repo: Path, tmp_path: Path) -> None:
+    """
+    目标分支已存在时，fetch 必须被拒绝，且**失败原因必须是「非快进」**。
+
+    之前的版本有三个问题（审核指出）：
+    1. clone 里根本没有同名的 proposal 分支，fetch 失败是因为「找不到 ref」，
+       与「拒绝覆盖」无关——测试看起来绿，实际什么都没测到；
+    2. 没有快进场景的对照，无法证明拒绝只发生在分叉时；
+    3. 靠源码文本断言兜底，那是补丁不是测试。
+    """
     branch = make_branch_name("demo")
 
-    # 第一次提案：创建分支
+    # 第一次提案：在用户仓库里创建 proposal 分支
     make_proposal(
         user_repo, branch, "proposal: first",
         lambda d: (d / "specs" / "demo.yaml").write_text(
@@ -237,44 +283,83 @@ def test_fetch_does_not_overwrite_existing_branch(user_repo: Path, tmp_path: Pat
     )
     first_sha = _run(user_repo, "rev-parse", branch).strip()
 
-    # 造一个内容不同的 clone 再 fetch 到同名分支
+    # --- 场景 1：分叉（非快进）---
     clone = tmp_path / "other-clone"
     _run(tmp_path, "clone", "-q", str(user_repo), str(clone))
-    _run(clone, "checkout", "-q", "-b", "tmp-branch")
+    # 在 clone 里基于**提案分支的父提交**造一个真正的分叉（不是接在它后面）
+    _run(clone, "checkout", "-q", "-b", "work", f"origin/{branch}^")
     (clone / "specs" / "demo.yaml").write_text(
         "name: demo\nfields:\n  - name: b\n", encoding="utf-8"
     )
     _run(clone, "add", "-A")
-    _run(clone, "commit", "-q", "-m", "different")
+    _run(clone, "commit", "-q", "-m", "diverged")
+    # 让 clone 里出现同名的本地分支，否则 fetch 失败的原因是「找不到 ref」
+    _run(clone, "update-ref", f"refs/heads/{branch}", "HEAD")
 
-    with pytest.raises(subprocess.CalledProcessError):
-        fetch_from_local_clone(user_repo, clone, branch)
-
+    proc = subprocess.run(
+        ["git", "fetch", str(clone), f"{branch}:{branch}"],
+        cwd=str(user_repo), capture_output=True, text=True,
+    )
+    assert proc.returncode != 0, "分叉场景下 fetch 应当被拒绝"
+    # 失败原因必须是「非快进」——这是本测试的核心断言
+    err = (proc.stderr + proc.stdout).lower()
+    assert "non-fast-forward" in err or "非快进" in err or "rejected" in err, (
+        f"fetch 失败但不是因为非快进：{proc.stderr[:300]}"
+    )
     assert _run(user_repo, "rev-parse", branch).strip() == first_sha, \
         "已存在的分支被覆盖了"
 
-    # 源码层面直接断言：本函数的**代码行**里没有强制标记。
-    # 只剔除 docstring 与注释，保留全部实际代码——AST 取单条调用不够，
-    # 破坏实验证实过会漏（refspec 改成 `+branch:branch` 时仍通过）。
-    import inspect
-    import re as _re
-    from tools.mcp_server.git_isolation import fetch_from_local_clone as _fn
+    # --- 场景 2：快进（同一个分支上多一个提交）---
+    # 快进应当**允许**——否则「拒绝」就不是针对分叉，而是 fetch 本身坏了。
+    ff_clone = tmp_path / "ff-clone"
+    _run(tmp_path, "clone", "-q", "--branch", branch, str(user_repo), str(ff_clone))
+    (ff_clone / "specs" / "demo.yaml").write_text(
+        "name: demo\nfields:\n  - name: c\n", encoding="utf-8"
+    )
+    _run(ff_clone, "add", "-A")
+    _run(ff_clone, "commit", "-q", "-m", "fast-forward")
+    _run(ff_clone, "update-ref", f"refs/heads/{branch}", "HEAD")
+    ff_proc = subprocess.run(
+        ["git", "fetch", str(ff_clone), f"{branch}:{branch}"],
+        cwd=str(user_repo), capture_output=True, text=True,
+    )
+    assert ff_proc.returncode == 0, (
+        f"快进 fetch 应当成功；stderr={ff_proc.stderr[:300]}"
+    )
+    assert _run(user_repo, "rev-parse", branch).strip() != first_sha, \
+        "快进之后分支应当前进"
 
-    code_lines = []
-    in_doc = False
-    for line in inspect.getsource(_fn).splitlines():
-        stripped = line.strip()
-        if stripped.startswith('"""'):
-            in_doc = not in_doc
-            continue
-        if in_doc or stripped.startswith("#"):
-            continue
-        code_lines.append(line)
-    code = "\n".join(code_lines)
 
-    assert "--force" not in code, f"fetch 代码里出现 --force：{code}"
-    assert not _re.search(r'["\']\+\{', code), f"refspec 带强制前缀 +：{code}"
-    assert "{branch}:{branch}" in code, f"refspec 形态变了：{code}"
+def test_propose_refuses_existing_branch_before_writing(user_repo: Path) -> None:
+    """
+    分支已存在时，提案必须在**写入用户仓库之前**就拒绝——快进也不行。
+
+    与 test_fetch_does_not_overwrite_existing_branch 的区别：那条测的是 fetch
+    层（非快进被 git 拒绝），这条测的是提案层的**前置检查**。去掉前置检查后，
+    fetch 仍会因为非快进失败，所以那条测试抓不到——破坏实验证实过。
+    这里断言的是报错来自前置检查（消息含「拒绝写入」），而非 fetch 的 git 错误。
+    """
+    branch = make_branch_name("demo")
+    make_proposal(
+        user_repo, branch, "proposal: first",
+        lambda d: (d / "specs" / "demo.yaml").write_text(
+            "name: demo\nfields:\n  - name: v1\n", encoding="utf-8"
+        ),
+    )
+    first_sha = _run(user_repo, "rev-parse", branch).strip()
+
+    # 同名分支再提案一次（即使内容能让 fetch 快进，也必须被前置检查拒绝）
+    with pytest.raises(GitNotAllowed) as excinfo:
+        make_proposal(
+            user_repo, branch, "proposal: second",
+            lambda d: (d / "specs" / "demo.yaml").write_text(
+                "name: demo\nfields:\n  - name: v2\n", encoding="utf-8"
+            ),
+        )
+    assert "拒绝写入" in str(excinfo.value), (
+        f"拒绝理由不是前置检查：{excinfo.value}"
+    )
+    assert _run(user_repo, "rev-parse", branch).strip() == first_sha
 
 
 # ---------------------------------------------------------------------------

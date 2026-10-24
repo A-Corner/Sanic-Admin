@@ -43,7 +43,7 @@ from tools.specgen.schema import MAX_SPEC_TEXT_BYTES
 
 #: 资源名白名单：小写字母开头，仅小写字母/数字/下划线。
 #: 显式拒绝路径分隔符与 '..'，避免经资源名做路径穿越。
-RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 
 #: 仓库根（可用 --root 覆盖，见 main()）
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -444,18 +444,41 @@ def check() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def build_server():
-    """构建 MCP 服务（stdio）。工具全部只读。"""
+#: 是否允许注册写入工具。由 ``--allow-write`` 启动参数置位，见 ``main()``。
+#:
+#: MCP 是 stdio 本地进程、没有账户体系，默认暴露写能力等于「谁能拉起进程谁就能写」。
+#: 因此写入工具默认完全不注册——不加这个参数，``tools/list`` 里根本看不到它们。
+ALLOW_WRITE = False
+
+
+def build_server(allow_write: bool = False):
+    """构建 MCP 服务（stdio）。默认只读；``allow_write=True`` 时追加写入工具。"""
     from mcp.server.mcpserver import MCPServer
+
+    if allow_write:
+        title = "Sanic-Admin 规格生成器（只读 + 提案写入）"
+        description = (
+            "读取/校验/预演资源规格，并可把规格变更提交到本地 proposal/ 分支，"
+            "由人开 PR 与合并；不 push，不改运行时。"
+        )
+        instructions = (
+            "本服务可用 propose_spec_change 产出提案分支与 diff，"
+            "但**不会 push、不会合并**——下一步必须由人执行。"
+            "其余工具只读。"
+        )
+    else:
+        title = "Sanic-Admin 规格生成器（只读）"
+        description = "读取/校验/预演资源规格，输出 diff 供人工确认；不写仓库。"
+        instructions = (
+            "本服务只读：不会修改仓库任何文件。"
+            "改动请通过 validate_spec / preview_generate 取得 diff，再走 PR 与独立审核。"
+        )
 
     server = MCPServer(
         name="sanic-admin-specgen",
-        title="Sanic-Admin 规格生成器（只读）",
-        description="读取/校验/预演资源规格，输出 diff 供人工确认；不写仓库。",
-        instructions=(
-            "本服务只读：不会修改仓库任何文件。"
-            "改动请通过 validate_spec / preview_generate 取得 diff，再走 PR 与独立审核。"
-        ),
+        title=title,
+        description=description,
+        instructions=instructions,
     )
 
     # 显式给 name=：否则 SDK 以函数名注册，客户端看到的会是 list_resources_tool，
@@ -490,12 +513,26 @@ def build_server():
     def check_tool() -> Dict[str, Any]:
         return check()
 
+    if allow_write:
+        # 写入工具只在显式开启时注册；不开启时工具列表里没有它们。
+        from tools.mcp_server.write_tools import register_write_tools
+
+        register_write_tools(server)
+
     return server
 
 
 def main(argv: List[str] | None = None) -> int:
-    global ROOT
+    global ROOT, ALLOW_WRITE
     args = list(sys.argv[1:] if argv is None else argv)
+
+    # --allow-write：显式开启写入工具。默认关闭——不加这个参数，
+    # propose_spec_change / list_proposals / discard_proposal 不会出现在工具列表里。
+    allow_write = False
+    if "--allow-write" in args:
+        args.remove("--allow-write")
+        allow_write = True
+
     if "--root" in args:
         i = args.index("--root")
         if i + 1 >= len(args):
@@ -507,7 +544,12 @@ def main(argv: List[str] | None = None) -> int:
         print(f"未找到 specs/ 目录：{_specs_dir()}", file=sys.stderr)
         return 2
 
-    server = build_server()
+    ALLOW_WRITE = allow_write
+    if allow_write:
+        print("MCP 写入工具已启用（propose_spec_change / list_proposals / "
+              "discard_proposal）；仍不会 push 或合并。", file=sys.stderr)
+
+    server = build_server(allow_write=allow_write)
     server.run()
     return 0
 
