@@ -251,6 +251,29 @@ npm start                           # 实测：服务起来，但 GET / → 404�
 `ruff check . --select E9,F63,F7,F82` + `pytest --cov=app tests/ --cov-report=xml`。
 **按当前基线，pytest 这一步在 CI 上必然失败**（与本地一致，见 §3.2）。
 
+### 3.5 浏览器 E2E 门禁（改 AMIS 页面必跑）
+
+`scripts/amis_e2e_check.py` 用真实浏览器验收控制台。**凡是改了 `amis/**` 下的页面 JSON
+或 `login.html` / `index.html`，合入前必须跑通本脚本**——AMIS 的校验写法（如
+`validate` 用字符串还是 `validations.isJson`）在 pytest 里覆盖不到，v0.3.2 就是因为
+把 `isJson` 改成字符串表达式，导致角色弹窗直接不渲染（v0.3.3 修复）。
+
+```bash
+# 起一个隔离服务（独立端口 / 独立 SQLite / 一次性口令）后：
+python scripts/amis_e2e_check.py \
+    --base http://127.0.0.1:<port> \
+    --admin-password '<一次性口令>' \
+    --new-password '<新口令>'          # v0.3.2 起首登会停在改密表单，必须提供
+
+# 正向对照：故意改错选择器，要求目标断言必须失败
+python scripts/amis_e2e_check.py ... --negative-control dialog
+python scripts/amis_e2e_check.py ... --negative-control login_password
+```
+
+- 全绿的标准是 **19/19 项通过**（脚本钉死断言总数，少一条就报错）。
+- `--negative-control` 退出码 0 表示「被篡改的断言确实失败了」——这才是门禁有效性的证明。
+- CI 里有对应的 `amis-e2e` job；**浏览器不可用时该 job 标记为 `skipped`，不会静默算通过**。
+
 ---
 
 ## 4. 代码规范
