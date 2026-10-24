@@ -37,18 +37,12 @@ class SpecLoader(yaml.SafeLoader):
 
     def compose_node(self, parent, index):
         event = self.peek_event()
-        if event is not None and (
-            isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None)
-        ):
-            raise yaml.composer.ComposerError(
-                "规格 YAML 不允许锚点（&）或别名（*）", event.start_mark
-            )
+        if event is not None and (isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None)):
+            raise yaml.composer.ComposerError("规格 YAML 不允许锚点（&）或别名（*）", event.start_mark)
         self._depth += 1
         try:
             if self._depth > MAX_YAML_DEPTH:
-                raise yaml.composer.ComposerError(
-                    f"规格 YAML 嵌套超过 {MAX_YAML_DEPTH} 层", event.start_mark
-                )
+                raise yaml.composer.ComposerError(f"规格 YAML 嵌套超过 {MAX_YAML_DEPTH} 层", event.start_mark)
             return super().compose_node(parent, index)
         finally:
             self._depth -= 1
@@ -64,9 +58,24 @@ def safe_load_spec(text, rel: str):
         raise SpecError(rel, [("<yaml>", str(exc).replace("\n", " "))])
 
 
-#: 框架已占用的资源名（权限点 / 路由），规格不得重名
+#: 框架已占用的资源名（权限点 / 路由），规格不得重名。
+#: "spec" 是 MCP 写入路径的权限点资源（spec:write，app/auth/permissions.py）：
+#: 若业务规格生成同名权限会覆盖该注册，故列为保留字。
 RESERVED_RESOURCES = frozenset(
-    {"account", "role", "profile", "log", "setting", "file", "dashboard", "system", "session", "verification", "upload"}
+    {
+        "account",
+        "role",
+        "profile",
+        "log",
+        "setting",
+        "file",
+        "dashboard",
+        "system",
+        "session",
+        "verification",
+        "upload",
+        "spec",
+    }
 )
 #: 模型内置属性名，字段不得重名
 RESERVED_FIELDS = frozenset({"id", "created_at", "updated_at", "deleted", "json", "validate", "pk", "save", "delete"})

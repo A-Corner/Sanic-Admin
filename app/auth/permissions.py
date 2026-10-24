@@ -52,6 +52,12 @@ ALL_PERMISSIONS: Dict[str, List[str]] = {
     "system:database": ["query", "manage", "connectionpool"],
     "system:database:connectionpool": ["manage"],
     "system:compression": ["view", "manage"],
+    # 规格变更（MCP 写入路径，SA-v042-SPECWRITE / docs/mcp-write-path.md §10）：
+    # MCP propose_spec_change / list_proposals / discard_proposal 要求 spec:write；
+    # admin 默认拥有（admin_all_permissions 按注册表键集生成），普通角色显式授予。
+    # 资源名 "spec" 同时列入 tools/specgen/schema.py 的 RESERVED_RESOURCES，
+    # 防止业务规格生成同名权限点覆盖此注册。
+    "spec": ["write"],
 }
 
 #: 资源 -> 父资源。显式声明，不做前缀推断。
@@ -97,6 +103,7 @@ def known_actions(resource: str) -> List[str]:
 # 归一化
 # ---------------------------------------------------------------------------
 
+
 def base_resource(resource: str) -> str:
     """
     资源折叠后的基资源：子资源返回其父资源，基资源返回自身。
@@ -124,7 +131,7 @@ def normalize_permission(resource: str, action: str) -> Tuple[str, str]:
     if base == resource:
         return resource, action
 
-    sub = resource[len(base) + 1:]
+    sub = resource[len(base) + 1 :]
     return base, f"{sub}:{action}"
 
 
@@ -158,7 +165,7 @@ def effective_permissions(granted: Dict[str, Iterable[str]]) -> Dict[str, Set[st
 
     for resource, actions in (granted or {}).items():
         base = base_resource(resource)
-        sub = resource[len(base) + 1:] if base != resource else ""
+        sub = resource[len(base) + 1 :] if base != resource else ""
 
         bucket = effective.setdefault(base, set())
 
@@ -214,8 +221,7 @@ def _implied_paths(path: str) -> Tuple[str, ...]:
     return head, f"{head}:read"
 
 
-def permission_granted(effective: Dict[str, Set[str]], resource: str,
-                       action: str) -> bool:
+def permission_granted(effective: Dict[str, Set[str]], resource: str, action: str) -> bool:
     """
     在折叠后的有效权限表里判断 ``resource:action`` 是否被授予。
 
@@ -252,7 +258,7 @@ def permission_granted(effective: Dict[str, Set[str]], resource: str,
 
     for entry in bucket:
         if entry.endswith(":all"):
-            prefix = entry[:-len(":all")]
+            prefix = entry[: -len(":all")]
             if path.startswith(prefix + ":"):
                 return True
 
@@ -315,9 +321,6 @@ def validate_permissions_dict(permissions: Any) -> Tuple[bool, List[str]]:
                 errors.append(f"资源 '{resource}' 的动作必须是非空字符串")
                 continue
             if allowed and "all" not in allowed and action not in allowed:
-                errors.append(
-                    f"资源 '{resource}' 不支持动作 '{action}'"
-                    f"（允许: {', '.join(sorted(allowed))}）"
-                )
+                errors.append(f"资源 '{resource}' 不支持动作 '{action}'（允许: {', '.join(sorted(allowed))}）")
 
     return (not errors), errors

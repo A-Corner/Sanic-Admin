@@ -22,6 +22,7 @@
    的 TRUSTED_PROXIES 判定（可信代理下才采信 X-Forwarded-For，否则用 socket 直连
    对端）。该逻辑已存在，不另起一套。
 """
+
 import logging
 from typing import Optional
 
@@ -30,16 +31,21 @@ from sanic.request import Request
 logger = logging.getLogger(__name__)
 
 #: 允许写入的操作名（白名单，防止调用方手滑写入任意字符串）
-OPERATIONS = frozenset({
-    "login_success",
-    "login_failure",
-    "logout",
-    "change_password_success",
-    "change_password_failure",
-    "change_password_2fa_pending",
-    "two_step_success",
-    "two_step_failure",
-})
+OPERATIONS = frozenset(
+    {
+        "login_success",
+        "login_failure",
+        "logout",
+        "change_password_success",
+        "change_password_failure",
+        "change_password_2fa_pending",
+        "two_step_success",
+        "two_step_failure",
+        # GET /auth/whoami（SA-v042-SPECWRITE）：MCP 写入路径的身份校验端点。
+        # 每次调用都留痕——它是权限清单的出口，谁在什么时候查过要可归因。
+        "whoami",
+    }
+)
 
 
 def _client_ip(request: Request) -> Optional[str]:
@@ -95,5 +101,4 @@ async def record_auth_event(
         )
     except Exception:
         # 审计是旁路：模型未迁移、库不可写等都不能让登录/改密失败。
-        logger.warning("写入认证审计日志失败（已忽略）: operation=%s", operation,
-                       exc_info=True)
+        logger.warning("写入认证审计日志失败（已忽略）: operation=%s", operation, exc_info=True)

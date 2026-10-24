@@ -183,9 +183,7 @@ def _guard_resource_name(name: str) -> str:
     if ".." in name or "/" in name or "\\" in name or os.path.isabs(name):
         raise ToolError(f"资源名不合法：{name!r}（不允许路径分隔符、'..' 或绝对路径）")
     if not RESOURCE_NAME_RE.fullmatch(name):
-        raise ToolError(
-            f"资源名不合法：{name!r}（必须匹配 {RESOURCE_NAME_RE.pattern}）"
-        )
+        raise ToolError(f"资源名不合法：{name!r}（必须匹配 {RESOURCE_NAME_RE.pattern}）")
     return name
 
 
@@ -231,24 +229,26 @@ def list_resources() -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for name in sorted(specs):
         spec = specs[name]
-        out.append({
-            "resource": spec.resource,
-            "label": spec.label,
-            "plural": spec.plural,
-            "field_count": len(spec.fields),
-            "fields": [
-                {
-                    "name": f.name,
-                    "type": f.type,
-                    "required": f.required,
-                    "unique": f.unique,
-                }
-                for f in spec.fields
-            ],
-            "belongs_to": [{"target": b.target, "column": b.column} for b in spec.belongs_to],
-            "soft_delete": spec.soft_delete,
-            "sorting_allowed": list(spec.sorting.allowed),
-        })
+        out.append(
+            {
+                "resource": spec.resource,
+                "label": spec.label,
+                "plural": spec.plural,
+                "field_count": len(spec.fields),
+                "fields": [
+                    {
+                        "name": f.name,
+                        "type": f.type,
+                        "required": f.required,
+                        "unique": f.unique,
+                    }
+                    for f in spec.fields
+                ],
+                "belongs_to": [{"target": b.target, "column": b.column} for b in spec.belongs_to],
+                "soft_delete": spec.soft_delete,
+                "sorting_allowed": list(spec.sorting.allowed),
+            }
+        )
     return out
 
 
@@ -358,8 +358,7 @@ def preview_generate(yaml_text: str) -> Dict[str, Any]:
     try:
         # 在临时根下铺一份最小骨架：specs/ + 生成器需要读取的现有生成物目录
         (tmp_root / "specs").mkdir(parents=True, exist_ok=True)
-        for sub in ("app/generated/models", "app/generated/resources",
-                    "tests/generated", "amis/pages"):
+        for sub in ("app/generated/models", "app/generated/resources", "tests/generated", "amis/pages"):
             (tmp_root / sub).mkdir(parents=True, exist_ok=True)
         # 生成器渲染菜单时会读 amis/pages/site.json：把仓库现有版本作为基线复制过去，
         # 让 diff 只反映本次规格带来的变化（临时目录内操作，不碰仓库）
@@ -409,9 +408,7 @@ def preview_generate(yaml_text: str) -> Dict[str, Any]:
     if before != after:
         # 正向对照：preview 绝不允许写仓库；一旦写入立即报错而非静默通过。
         # 这是**事后检测**（只能发现、不能阻止），真正的保障是「只在临时目录生成」。
-        changed_paths = sorted(
-            {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
-        )
+        changed_paths = sorted({p for p in before.keys() | after.keys() if before.get(p) != after.get(p)})
         raise ToolError(f"内部错误：preview 修改了仓库文件，已中止（{', '.join(changed_paths)}）")
 
     return {
@@ -458,20 +455,17 @@ def build_server(allow_write: bool = False):
     if allow_write:
         title = "Sanic-Admin 规格生成器（只读 + 提案写入）"
         description = (
-            "读取/校验/预演资源规格，并可把规格变更提交到本地 proposal/ 分支，"
-            "由人开 PR 与合并；不 push，不改运行时。"
+            "读取/校验/预演资源规格，并可把规格变更提交到本地 proposal/ 分支，由人开 PR 与合并；不 push，不改运行时。"
         )
         instructions = (
-            "本服务可用 propose_spec_change 产出提案分支与 diff，"
-            "但**不会 push、不会合并**——下一步必须由人执行。"
-            "其余工具只读。"
+            "本服务可用 propose_spec_change 产出提案分支与 diff，但**不会 push、不会合并**——下一步必须由人执行。"
+            "写入工具每次调用需有效会话 JWT（环境变量 SANIC_ADMIN_MCP_TOKEN）且账户拥有 spec:write 权限。其余工具只读。"
         )
     else:
         title = "Sanic-Admin 规格生成器（只读）"
         description = "读取/校验/预演资源规格，输出 diff 供人工确认；不写仓库。"
         instructions = (
-            "本服务只读：不会修改仓库任何文件。"
-            "改动请通过 validate_spec / preview_generate 取得 diff，再走 PR 与独立审核。"
+            "本服务只读：不会修改仓库任何文件。改动请通过 validate_spec / preview_generate 取得 diff，再走 PR 与独立审核。"
         )
 
     server = MCPServer(
@@ -539,7 +533,7 @@ def main(argv: List[str] | None = None) -> int:
             print("--root 需要一个路径参数", file=sys.stderr)
             return 2
         ROOT = Path(args[i + 1]).resolve()
-        del args[i:i + 2]
+        del args[i : i + 2]
     if not (_specs_dir()).is_dir():
         print(f"未找到 specs/ 目录：{_specs_dir()}", file=sys.stderr)
         return 2
@@ -550,15 +544,35 @@ def main(argv: List[str] | None = None) -> int:
     if allow_write:
         try:
             from tools.mcp_server.proposal_registry import cleanup_stale_workspaces
+
             removed = cleanup_stale_workspaces()
             if removed:
                 print(f"已清理 {len(removed)} 个过期临时工作区。", file=sys.stderr)
         except Exception:
             # 清理是旁路：失败不能阻止服务启动
-            logging.getLogger(__name__).warning(
-                "清理过期临时工作区失败（已忽略）", exc_info=True)
-        print("MCP 写入工具已启用（propose_spec_change / list_proposals / "
-              "discard_proposal）；仍不会 push 或合并。", file=sys.stderr)
+            logging.getLogger(__name__).warning("清理过期临时工作区失败（已忽略）", exc_info=True)
+        print(
+            "MCP 写入工具已启用（propose_spec_change / list_proposals / discard_proposal）；仍不会 push 或合并。",
+            file=sys.stderr,
+        )
+        # AND 矩阵（docs/mcp-write-path.md §10.6）：--allow-write 是注册门槛，
+        # 身份是调用门槛。token 缺失时写入工具仍注册（tools/list 可见、报错可引导），
+        # 但每次调用都会被 identity.require_spec_write 以
+        # identity_not_configured 拒绝——fail-closed。
+        from tools.mcp_server.identity import TOKEN_ENV, get_token
+
+        if get_token():
+            print(
+                "MCP 写入工具已启用（propose_spec_change / list_proposals / "
+                "discard_proposal）；每次调用将经 whoami 校验 spec:write；"
+                "仍不会 push 或合并。",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"MCP 写入工具已启用，但未配置 {TOKEN_ENV}（会话 JWT）：写入工具可见，调用会被拒绝。配置后重启本进程。",
+                file=sys.stderr,
+            )
 
     server = build_server(allow_write=allow_write)
     server.run()

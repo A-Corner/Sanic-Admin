@@ -350,3 +350,167 @@ exit 1
 | 子命令级白名单 | 子命令级 + **参数级** | `clone --upload-pack=<cmd>` 能在子命令合法时执行任意程序 |
 | `commit` 失败保留 clone | 实现为「保留并返回路径」；`finally` 只清 `tmp_root`，clone 在 `tmp_root` 内，因此实际**会被清掉** | 这是初稿与实现的真实冲突。当前选择：失败时也清理（`rmtree(ignore_errors=True)`），并在返回值里给出错误；不保留路径。**文档按实现写**，不再声称「保留」 |
 
+## 10. 账户级权限（`spec:write`）
+
+> 本节是 **SA-v042-SPECWRITE 的设计**（CPL 已裁定：五项全认可 + 4 条附加约束，2026-10-24，见 §10.9）。它补上 §3.1 里「MCP 工具层权限：未实现」那一格：让写入工具不再只靠进程开关 `--allow-write`，而是接入项目 RBAC 的 `spec:write` 权限点。
+> 事实基础（均已核对 master `fef4dd3` 代码）：会话令牌是 RS256 JWT，payload 只含 `session_id` + `session_type`，有效性以服务端会话表为准（`app/models/session.py` `Session.decode`）；鉴权链 `get_session_token`（cookie `session` 或 `Authorization: Bearer`）→ `authenticate_request` → `has_permission(account, resource, action)`（`app/auth/authorization.py`，admin 直通）；权限注册表 `ALL_PERMISSIONS` 在 `app/auth/permissions.py`；现有 `POST /auth/`（`on_authenticate`）带 `@requires_authentication()` 但只返回账户 JSON、**不含权限**。
+
+### 10.1 目标与非目标
+
+**目标**
+
+1. 写入工具的每次调用绑定到一个真实账户，并要求该账户拥有 `spec:write` 权限——admin 默认拥有，普通角色显式授予。
+2. 校验走与 HTTP API **同一套**鉴权栈（`authenticate_request` + `has_permission`），不另造口径。
+3. fail-closed：token 缺失、无效、过期、权限不足、校验服务不可达，一律拒绝且**零副作用**（不建 clone、不建分支）。
+4. 审计可归属：成功与失败都记账户标识（id / username），不记 token 本体。
+
+**非目标（本节不做）**
+
+1. 不给只读层五个工具加权限（它们不落盘，维持现状）。
+2. 不做 MCP 进程与 Sanic 服务之间的双向 TLS / mTLS——本机回环 + token 已覆盖威胁模型（见 §10.7）。
+3. 不做会话热重载：换 token = 重启 MCP 进程（env 在进程启动后不可变；简单、可审计）。
+4. 不解决宿主客户端（Claude Code / Codex）内的 prompt injection——那层由既有四层机制（不能 push / 合并 + 人审）兜底，见 §10.7。
+
+### 10.2 身份从哪里来：两个候选方案
+
+先拆维度再比较。「身份」由两个独立决策组成：**token 怎么传给 MCP 进程**、**MCP 怎么校验它**。
+
+| 维度 | 选项 1 | 选项 2 |
+|---|---|---|
+| 传递 | (a) 启动参数 `--token <token>`（argv） | (b) 环境变量 `SANIC_ADMIN_MCP_TOKEN`（env） |
+| 校验 | HTTP 回调：MCP 带 token 调本地 Sanic 鉴权端点 | 本地校验：MCP 进程内复用 `AuthenticationSession.decode` + `has_permission`（需连 DB） |
+
+**(a) argv 的问题**：进程参数对本机同用户进程可见（Linux `/proc/<pid>/cmdline`；macOS 同用户亦可用 `ps` 观察），且常被原样写进 MCP 客户端配置 JSON 与 shell history。token 属于机密，argv 是机密最差的落点之一。
+
+**(b) env 的边界**：`/proc/<pid>/environ` 仅 owner（及 root）可读；MCP 客户端配置文件里 env 同样明文落盘——这点与 argv 打平，但运行时暴露面更小。注意与 §3.2 「不读取环境变量」**不冲突**：那条约束针对 Git 凭据类（`GH_TOKEN` / `GITHUB_TOKEN`——能推远端）；专用命名空间的 `SANIC_ADMIN_MCP_TOKEN` 只能被服务端校验、换不来 Git 推送能力，能力边界完全不同。
+
+**校验方式对比**：
+
+| | HTTP 回调 | 本地 decode |
+|---|---|---|
+| DB 依赖 | 无（服务端查） | 有——MCP 进程要 Tortoise init + DB 凭据 |
+| MCP 被攻破时的损失 | 只持有 token | 直接持有 DB 访问权 |
+| 口径一致性 | 与 HTTP API 同栈（`authenticate_request`），天然一致 | 同一套函数，但多一条「MCP 直连 DB」的配置漂移面 |
+| 可用性依赖 | 需要运行中的 Sanic 服务 | 无 |
+| 服务端改动 | 需新增一个返回权限的轻端点（现 `POST /auth/` 不含权限） | 无 |
+
+**建议：env 传递 + HTTP 回调校验**（即 (b) 的传递 + (a) 的校验）。理由：
+
+1. argv 会把机密暴露给进程表，env 不会——传递方式没有悬念。
+2. 本地 decode 等于把数据库凭据交给 MCP 进程：MCP 被攻破时损失从「一个 token」升级为「整库访问」。四层隔离（§6）刻意让工具进程「不带凭据」，本地 decode 直接违背这一立场。
+3. HTTP 回调让鉴权口径与 HTTP API 物理同栈，未来鉴权栈演进（如会话校验加码）MCP 侧零改动。
+4. 「依赖运行中的服务」是可接受的：写路径本就该在服务可用时使用；服务不可达时 fail-closed（§10.5），只读工具不受影响。
+5. 依赖成本：主项目无 HTTP 客户端依赖（`requirements.txt` 已核对），但官方 `mcp` 包传递依赖含 httpx；实现时优先用 httpx（MCP 环境必然存在），并在 `anyio.to_thread` 中同步调用避免阻塞事件循环，超时 3s。
+
+**服务端改动**：新增 `GET /auth/whoami`（`auth_bp`）。CPL 对这个**新增对外接口**的硬性约束（全部落实）：
+
+| 约束 | 落实方式 |
+|---|---|
+| 走现有鉴权链 | `@requires_authentication()`（默认 `require_second_factor=True`）→ `authenticate_request`，与 HTTP API 同栈 |
+| 拒绝 2FA 未完成会话 | `requires_authentication` 默认拒绝 `second_factor_pending`（401），无额外代码路径 |
+| 拒绝 `must_change_password=True` | 双保险：①`/auth/whoami` **不进** `PASSWORD_CHANGE_EXEMPT_PREFIXES` 白名单 → 全局中间件 `enforce_password_change` fail-closed 拦截（403 `PASSWORD_CHANGE_REQUIRED`）——改密前拿不到权限清单；②handler 内显式再查一次 `bearer.must_change_password`（纵深防御，测试直接调 handler 时中间件不在场） |
+| 返回最小化 | 只返回 `account_id` 与 `permissions`，**不返回**邮箱、用户名或任何其他字段 |
+| 复用现有限流 | 不新建限流体系：whoami 是认证后低频端点（MCP 每次写调用至多一次），登录限流 `LoginRateLimiter` 不适用于已认证 GET；审计 IP 采信口径复用 `LoginRateLimiter`（`record_auth_event` 内置） |
+| 写审计 | `record_auth_event(request, "whoami", account=bearer, status=...)`；`OPERATIONS` 白名单增加 `"whoami"`；审计不含 token（`app/services/audit.py` 硬约束 1 已保证） |
+
+**权限语义**：`is_admin=True` 的账户返回 `admin_all_permissions()`（与 `has_permission` 的 admin 直通语义一致，MCP 侧无需理解 admin，纯集合判断）；普通账户返回 `get_account_permissions()` 的合并结果。MCP 判 `spec:write` 即「permissions 中 `spec` 含 `write` 或 `all`」。
+
+**token 取舍（CPL 约束 2）**：v0.4.2 **不新增** API token 类型，直接用现有会话 JWT。取舍：会话过期后需要重新取 token 并重启 MCP 进程（不做热重载）；吊销靠作废会话实现（`disabled` / 删除），whoami 每次实时校验，吊销即时生效。专用的长期 API token（独立签发、独立过期策略、独立吊销）记为后续项，不在本版范围。
+
+### 10.3 `spec:write` 权限点注册
+
+```python
+# app/auth/permissions.py 的 ALL_PERMISSIONS 增加一项：
+"spec": ["write"],
+```
+
+- 权限串 `spec:write` 经 `rpartition(":")` 解析为资源 `spec`、动作 `write`，与现有归一化口径一致；不进 `RESOURCE_PARENTS`（无折叠需求）。
+- **admin 默认拥有**：`admin_all_permissions()` 按注册表键集生成，注册即覆盖；惰性同步 `sync_admin_role_permissions()` 会在下次权限判定时把 admin 角色写为全量。
+- **普通角色显式授予**：角色管理端资源列表来自 `all_resources()`，注册后自动出现；存量角色不自动获得（授权字典里没有 `spec` 即无权限，`validate_permissions_dict` 因注册而放行 `{"spec": ["write"]}`）。
+- **保留字冲突**：生成器会把业务资源并入同一张 `ALL_PERMISSIONS`（`app/generated/permissions.py`，幂等覆盖同名键）。若业务规格的 `resource` 命名为 `spec`，会覆盖本权限点。建议在 `tools/specgen/schema.py` 的资源名校验里把 `spec` 列为保留字（一行校验 + 一个测试），列入实现清单。
+
+### 10.4 token 的存放、不打印与过期
+
+| 项 | 设计 |
+|---|---|
+| 存放 | 进程内仅一个模块级变量，从 `SANIC_ADMIN_MCP_TOKEN` 启动时读入一次；不写盘、不进任何返回值 |
+| 不打印 | 启动信息只打「token 已配置 / 未配置」，不打值；审计 JSON（`_audit`）与错误消息**结构性**不含 token（token 不进异常链）；`_redact` 兜底规则增加对该变量的抹除 |
+| 每次校验 | 三个写入工具**每次调用**实时走一遍 whoami，不缓存判定（写操作低频，成本可忽略；会话被禁用后下一次调用立即失效） |
+| 回调目标（CPL 约束 3） | 只允许连 `http://127.0.0.1:<port>`（默认 `http://127.0.0.1:22222`）；要指向别的主机必须在配置里**显式**写 `SANIC_ADMIN_MCP_API_URL` 且通过 host 校验——防止 token 被发到非预期主机。默认配置下 token 不出本机 |
+| 超时与失败 | 超时 **5s 以内**（CPL 上限）；超时、连接失败、非 200 一律**拒绝**（fail-closed），不重试 |
+| 不打印 | 启动信息只打「token 已配置 / 未配置」，不打值；回调 URL 打 host 不打完整 header；审计 JSON（`_audit`）与错误消息**结构性**不含 token（token 不进异常链）；`_redact` 兜底规则增加对该变量的抹除 |
+| 过期 | 会话过期（`SessionExpiredError`）→ whoami 返回 401 → 工具报「token 已失效，请重新签发并重启 MCP 进程」，不自动重试 |
+| 吊销 | 会话可 disable；token 泄露时吊销会话即可，无需换 MCP 部署 |
+
+### 10.5 校验失败时写入工具的表现（fail-closed）
+
+三个写入工具（含只读的 `list_proposals`）**一律要求 `spec:write`**：粒度一致、实现与解释最简单，且 `list_proposals` 暴露提案内容，属提案流程的一部分，不应成为无权限方的探测入口。
+
+校验在 `propose_spec_change` 的 `_guard_resource_name` **之前**执行——任何校验失败都不建 clone、不建分支（与 §7「规格校验失败零副作用」同原则）。
+
+| 情形 | 行为 | 审计 |
+|---|---|---|
+| 未配置 token（env 缺失/空） | `ToolError`：需要配置 `SANIC_ADMIN_MCP_TOKEN` | `status=failure, reason=identity_not_configured` |
+| token 无效 / 会话不存在 | `ToolError`：身份校验未通过 | `reason=identity_invalid` |
+| 会话过期 / 被禁用 | `ToolError`：token 已失效，请重新签发并重启进程 | `reason=identity_invalid`（whoami 返回 401，MCP 不细分过期与无效） |
+| 2FA 未完成（`second_factor_pending`） | `ToolError`（whoami 401，`requires_authentication` 默认拒绝） | `reason=identity_invalid` |
+| 需要改密（`must_change_password=True`） | `ToolError`（whoami 403 `PASSWORD_CHANGE_REQUIRED`：中间件白名单不含 `/auth/whoami`，handler 内还有显式检查） | `reason=permission_denied` |
+| 权限不足（无 `spec:write`） | `ToolError`：当前账户没有 spec:write 权限 | `reason=permission_denied` + 账户标识 |
+| 校验服务不可达 / 超时 | `ToolError`：无法校验权限（服务不可达），**fail-closed 不放行** | `reason=identity_unavailable` |
+| 校验通过 | 继续原有流程；审计 `detail` 增加 `account: {id, username}` | `status=success/failure` 照旧 |
+
+### 10.6 与 `--allow-write` 的关系：建议 AND（两者都满足）
+
+| `--allow-write` | token | 写入工具 |
+|---|---|---|
+| 无 | 无 | 不注册（v0.4.0 行为不变） |
+| 无 | 有 | **不注册**——开关仍是注册门槛 |
+| 有 | 无 | 注册；调用报「需要配置 `SANIC_ADMIN_MCP_TOKEN`」 |
+| 有 | 有 | 注册；每次调用实时校验 `spec:write` |
+
+**为什么是 AND 而不是「token 取代开关」**：
+
+1. 两者语义不同层：`--allow-write` 是**部署意图**（这台机器上的这个进程要有写路径），token 是**调用方资格**（这次调用是谁、有没有权限）。取缔任何一层都会丢失一类表达。
+2. 向后兼容：裸 `--allow-write` 的行为从「能用」变为「报配置错误」，错误消息即引导，可发现性好；若 token 取代开关，裸开关机器会在升级后**静默**改变安全语义。
+3. 审计可区分两级原因（`identity_not_configured` vs `permission_denied`），排障不需要猜。
+4. 「带 token 但没加开关」不注册：写入工具的存在本身就该是显式决定，token 只回答「谁」，不回答「这台机器要不要写路径」。
+
+### 10.7 威胁模型
+
+| 威胁 | 缓解 | 残余风险（如实声明） |
+|---|---|---|
+| 本机其他进程**无 token 拉起** MCP 写入进程 | 写入工具 fail-closed（`identity_not_configured`）；AND 矩阵下连注册都要显式开关 | 无实质残余 |
+| 本机其他进程**读取已运行进程的 token** | env：`/proc/<pid>/environ` 仅 owner/root 可读（Linux）；macOS 更严 | 同 uid 的恶意进程仍可读 env——但同 uid 本就是 §6 四层机制的边界线（同用户可改代码、可挂 hook），本设计不声称防御同 uid 恶意进程 |
+| **宿主客户端内** prompt injection 调用写入工具 | token 校验会**通过**（调用方身份合法）——本层挡不住 | 真正兜底的是既有四层：不能 push / 不能合并 / 人审合并；token 层新增的价值是**审计归属**（提案记到谁头上）与**可吊销**（禁用会话即断） |
+| token 泄露到日志 / 返回值 | §10.4 结构性不打印 + `_redact` 兜底 | 客户端配置文件明文落盘（与 argv 等价，是 MCP 部署形态的固有问题，文档提示用户注意配置文件权限） |
+| token 被窃后在别处使用 | 会话有 `expires`、可 `disable`；whoami 每次实时校验，吊销即时生效 | 吊销前的窗口内可在任何能连到该服务的位置使用——回环服务的暴露面即风险面 |
+| 校验服务被冒充（假 whoami） | 本机回环连接；端口由部署方控制 | 若本机回环上有恶意进程抢占端口并应答任意 200，校验被绕过——该进程已能做任意本机事务，超出本层边界；文档写明「whoami 必须指向真实 Sanic 实例」 |
+
+### 10.8 实现涉及面（裁定后执行；git_isolation.py **不涉及**）
+
+| 文件 | 改动 | 归属 |
+|---|---|---|
+| `app/auth/permissions.py` | `ALL_PERMISSIONS` 增加 `"spec": ["write"]` | A |
+| `app/auth/routes.py` | 新增 `GET /auth/whoami`（返回账户 + 合并权限） | A |
+| `tools/specgen/schema.py` | 资源名保留字 `spec`（§10.3） | A |
+| `tools/mcp_server/__init__.py` | 读 env、构建身份配置、传入 `build_server`；`--allow-write` 语义按 §10.6 矩阵调整 | A |
+| `tools/mcp_server/write_tools.py` | 写调用前置校验（§10.5 矩阵）、审计加账户字段 | A |
+| 新文件 `tools/mcp_server/identity.py` | whoami 客户端 + fail-closed 判定（独立成文件便于单测） | A（新文件，与 B 无冲突） |
+| `tests/test_mcp_write_path.py`、`tests/test_mcp_write_registration.py`、新增 `tests/test_mcp_spec_write_auth.py` | CPL 约束 4 的测试矩阵（见 §10.8.1） | A |
+| `docs/mcp.md` | 配置说明：env 变量、whoami 依赖、AND 矩阵 | A |
+
+`git_isolation.py` 已移交 B，本设计**不需要**改它（身份校验发生在 `write_tools.py` 调用层，隔离层不感知身份）；若裁定后实现中发现必须触碰，先与 B 协调。
+
+### 10.8.1 测试矩阵（CPL 约束 4）
+
+| 组 | 用例 | 断言 |
+|---|---|---|
+| 拒绝 ×7 | token 缺失 / token 无效 / 会话过期 / 2FA pending / 需要改密 / 无 `spec:write` / Sanic 不可达 | 全部拒绝（`ToolError`），且**零副作用**：用户仓库分支列表不变、无 clone 目录残留 |
+| 放行 | 有效 token 且账户有 `spec:write`（admin 与显式授予的普通角色各一条） | 正常产出提案分支 |
+| 审计 | 成功与失败各一条 | stderr JSON 含 `account_id`，全文不含 token 子串 |
+| 破坏实验 | 去掉 whoami 的 `must_change_password` 显式检查 | 对应测试**必须变红**，留存原始 FAILED 行；随后还原并复绿 |
+
+### 10.9 裁定记录（CPL，2026-10-24）
+
+§10.9 原列五项待裁定问题，CPL 裁定：**①方案、②AND 矩阵、③list_proposals 同受约束、④spec 保留字、⑤whoami 返回合并权限——五项全部认可**。另加 4 条约束：whoami 六项要求（§10.2 表）、token 不新增类型及取舍（§10.2 末段）、MCP 回调 URL/超时/日志约束（§10.4）、测试矩阵与破坏实验（§10.8.1）。本项属**必审类**（鉴权 + 对外接口），交付后由 CPL 派人独立审核。
+

@@ -98,6 +98,30 @@ args = ["-m", "tools.mcp_server"]
 cwd = "/absolute/path/to/Sanic-Admin"
 ```
 
+## 写入工具的启用与身份（spec:write，v0.4.2 起）
+
+写入工具（`propose_spec_change` / `list_proposals` / `discard_proposal`）默认不注册，
+启用与可用要**同时**满足两个门槛（AND，设计见 `docs/mcp-write-path.md` §10.6）：
+
+1. **部署门槛**：启动参数加 `--allow-write`——不加，三个工具不出现在 `tools/list`。
+2. **身份门槛**：环境变量 `SANIC_ADMIN_MCP_TOKEN` 配置为有效的会话 JWT，且该账户
+   拥有 `spec:write` 权限（admin 默认拥有；普通角色在角色管理里显式授予）。
+
+每次调用写入工具都会实时调 `GET /auth/whoami` 校验（走与 HTTP API 相同的鉴权栈），
+任何失败——token 缺失、无效、过期、2FA 未完成、需要改密、没有 `spec:write`、
+Sanic 服务不可达——一律拒绝且零副作用（不建 clone、不建分支）。
+
+环境变量：
+
+| 变量 | 说明 |
+|---|---|
+| `SANIC_ADMIN_MCP_TOKEN` | 会话 JWT（登录接口 `Authorization` 头下发的同一个 token）。缺失时写入工具可见但调用被拒。**换 token = 重启 MCP 进程**；吊销 = 在服务端作废该会话，下一次调用即失效 |
+| `SANIC_ADMIN_MCP_API_URL` | 可选。whoami 服务地址，默认 `http://127.0.0.1:22222`（本机回环，token 默认不出本机）。指向别的主机必须显式配置 |
+
+安全约定：token 只经环境变量进入进程，不写入日志、审计与错误消息；回调超时 5 秒，
+失败不重试（fail-closed）。会话 JWT 有过期时间，过期后重新登录取新 token 并重启
+进程；专用的长期 API token 是后续项，本版不提供。
+
 ## 典型用法
 
 ```

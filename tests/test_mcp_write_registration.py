@@ -9,6 +9,7 @@ MCP 写入工具的注册开关与 base_ref 校验测试。
 
 每条都做过「破坏实现 → 必须变红」的对照。
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -24,9 +25,28 @@ from tools.mcp_server.git_isolation import (
 from tools.mcp_server.write_tools import WRITE_TOOL_NAMES
 
 
+@pytest.fixture(autouse=True)
+def _bypass_identity(monkeypatch):
+    """
+    本文件测的是注册开关与 base_ref 校验，不是身份层。
+
+    SA-v042-SPECWRITE 起 ``propose_spec_change`` 等写入工具在入口做
+    ``spec:write`` 校验（whoami 回调）；本文件不关心该层——固定放行并
+    给出确定性的 account_id。身份层的七种拒绝矩阵与零副作用断言见
+    ``tests/test_mcp_spec_write_auth.py``。
+    """
+    from tools.mcp_server import identity
+
+    monkeypatch.setattr(identity, "require_spec_write", lambda: 42)
+
+
 def _run(cwd: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True,
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
 
 
@@ -62,9 +82,7 @@ def test_write_tools_not_registered_by_default(repo: Path, monkeypatch) -> None:
     # 通过 asgi/mcp 暴露的 list 能力拿工具清单。
     names = _tool_names(server)
     for write_tool in WRITE_TOOL_NAMES:
-        assert write_tool not in names, (
-            f"{write_tool} 在默认（只读）模式下不应出现；实际工具：{sorted(names)}"
-        )
+        assert write_tool not in names, f"{write_tool} 在默认（只读）模式下不应出现；实际工具：{sorted(names)}"
     # 正向对照：只读工具必须在，证明上面的「不在」不是因为列表为空
     assert "list_resources" in names, f"只读工具缺失，工具列表异常：{sorted(names)}"
     assert "preview_generate" in names
@@ -77,9 +95,7 @@ def test_write_tools_registered_with_allow_write(repo: Path) -> None:
     server = build_server(allow_write=True)
     names = _tool_names(server)
     for write_tool in WRITE_TOOL_NAMES:
-        assert write_tool in names, (
-            f"{write_tool} 未注册；实际工具：{sorted(names)}"
-        )
+        assert write_tool in names, f"{write_tool} 未注册；实际工具：{sorted(names)}"
 
 
 def test_main_parses_allow_write_flag(monkeypatch) -> None:
@@ -157,10 +173,22 @@ def test_base_ref_accepts_existing_ref(repo: Path) -> None:
     assert validate_base_ref(repo, "master") == "master"
 
 
-@pytest.mark.parametrize("bad", [
-    "", "../etc/passwd", "master..main", "/master", "master/",
-    "ma ster", "master~1", "master^x", "master:path", "master?", "master*",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "../etc/passwd",
+        "master..main",
+        "/master",
+        "master/",
+        "ma ster",
+        "master~1",
+        "master^x",
+        "master:path",
+        "master?",
+        "master*",
+    ],
+)
 def test_base_ref_rejects_bad_shapes(repo: Path, bad: str) -> None:
     with pytest.raises(GitNotAllowed):
         validate_base_ref(repo, bad)
@@ -190,14 +218,15 @@ def test_propose_uses_master_by_default(repo: Path, monkeypatch) -> None:
     assert feature_tip != master_tip
 
     result = propose_spec_change(
-        "demo", "resource: demo\ntable: demo\nlabel: 演示\nfields:\n  - name: title\n    type: string\n    max_length: 64\n    required: true\n    label: 标题\n", repo_root=repo,
+        "demo",
+        "resource: demo\ntable: demo\nlabel: 演示\nfields:\n  - name: title\n    type: string\n    max_length: 64\n    required: true\n    label: 标题\n",
+        repo_root=repo,
     )
     branch = result["branch"]
     parent = _run(repo, "rev-parse", f"{branch}^").strip()
 
     assert parent == master_tip, (
-        f"提案应基于 master（{master_tip[:7]}），实际父提交 {parent[:7]}；"
-        f"若等于 feature tip {feature_tip[:7]} 说明误用了 HEAD"
+        f"提案应基于 master（{master_tip[:7]}），实际父提交 {parent[:7]}；若等于 feature tip {feature_tip[:7]} 说明误用了 HEAD"
     )
 
 
@@ -206,8 +235,10 @@ def test_propose_rejects_invalid_base_ref(repo: Path) -> None:
 
     with pytest.raises(GitNotAllowed):
         propose_spec_change(
-            "demo", "resource: demo\ntable: demo\nlabel: 演示\nfields:\n  - name: title\n    type: string\n    max_length: 64\n    required: true\n    label: 标题\n",
-            base_ref="../evil", repo_root=repo,
+            "demo",
+            "resource: demo\ntable: demo\nlabel: 演示\nfields:\n  - name: title\n    type: string\n    max_length: 64\n    required: true\n    label: 标题\n",
+            base_ref="../evil",
+            repo_root=repo,
         )
     # 失败后不应留下任何提案分支
     branches = _run(repo, "branch", "--list", "proposal/*")
@@ -230,7 +261,8 @@ def test_audit_written_reflects_real_result(repo: Path, monkeypatch) -> None:
 
     # 正常情况：True
     ok = write_tools.propose_spec_change(
-        "first", "resource: first\ntable: first\nlabel: d\nfields:\n  - name: a\n    type: string\n",
+        "first",
+        "resource: first\ntable: first\nlabel: d\nfields:\n  - name: a\n    type: string\n",
         repo_root=repo,
     )
     assert ok["audit_written"] is True
@@ -254,9 +286,7 @@ def test_audit_written_reflects_real_result(repo: Path, monkeypatch) -> None:
     finally:
         write_tools.sys.stderr = real_stderr
 
-    assert broken["audit_written"] is False, (
-        "审计写入失败时 audit_written 仍是 True——字段没有如实反映结果"
-    )
+    assert broken["audit_written"] is False, "审计写入失败时 audit_written 仍是 True——字段没有如实反映结果"
 
 
 def test_result_carries_base_commit(repo: Path) -> None:
@@ -284,7 +314,11 @@ def test_audit_written_to_stderr(repo: Path, capsys) -> None:
     """每次调用都往 stderr 写一行结构化 JSON。"""
     from tools.mcp_server.write_tools import propose_spec_change
 
-    propose_spec_change("demo", "resource: demo\ntable: demo\nlabel: 演示\nfields:\n  - name: title\n    type: string\n    max_length: 64\n    required: true\n    label: 标题\n", repo_root=repo)
+    propose_spec_change(
+        "demo",
+        "resource: demo\ntable: demo\nlabel: 演示\nfields:\n  - name: title\n    type: string\n    max_length: 64\n    required: true\n    label: 标题\n",
+        repo_root=repo,
+    )
     err = capsys.readouterr().err
     assert '"channel": "mcp-audit"' in err or '"channel":"mcp-audit"' in err
     assert '"operation": "propose_spec_change"' in err.replace('":"', '": "')

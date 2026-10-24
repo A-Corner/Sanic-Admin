@@ -21,6 +21,7 @@ MCP 是 stdio 本地进程，**没有账户体系**——它不知道「谁」�
 ``OperationLog`` 依赖数据库连接，MCP 侧不该为此强依赖一个运行中的服务——
 stderr 由启动方捕获即可，`journalctl` / 重定向 / 父进程都能拿到。
 """
+
 from __future__ import annotations
 
 import json
@@ -42,11 +43,13 @@ from tools.mcp_server.git_isolation import (
 )
 
 #: 写入工具名的集合，供 tools/list 断言与文档引用。
-WRITE_TOOL_NAMES = frozenset({
-    "propose_spec_change",
-    "list_proposals",
-    "discard_proposal",
-})
+WRITE_TOOL_NAMES = frozenset(
+    {
+        "propose_spec_change",
+        "list_proposals",
+        "discard_proposal",
+    }
+)
 
 
 def _audit(operation: str, *, status: str, detail: Dict[str, Any]) -> bool:
@@ -81,8 +84,8 @@ def _resolve_commit(repo_root: Path, ref: str) -> str:
     """把 ref 解析成完整 commit SHA。失败返回空串（不影响提案结果）。"""
     try:
         from tools.mcp_server.git_isolation import _git
-        return _git(["rev-parse", "--verify", f"{ref}^{{commit}}"],
-                    cwd=repo_root).strip()
+
+        return _git(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo_root).strip()
     except Exception:
         return ""
 
@@ -115,10 +118,14 @@ def propose_spec_change(
         _repo_root,
         validate_spec,
     )
+    from tools.mcp_server.identity import IdentityError, require_spec_write
 
     root = (repo_root or _repo_root()).resolve()
     detail: Dict[str, Any] = {}
     try:
+        # 身份校验最先执行（SA-v042-SPECWRITE）：任何失败都在建 clone、建分支
+        # 之前发生——零副作用。审计记 reason 与账户（成功时），不含 token。
+        account_id = require_spec_write()
         _guard_resource_name(resource)
         _guard_spec_text(spec_yaml)
         base = validate_base_ref(root, base_ref or DEFAULT_BASE_REF)
@@ -126,19 +133,21 @@ def propose_spec_change(
         # 先校验规格：不合法就**不产生任何分支**，连 clone 都不建
         verdict = validate_spec(spec_yaml)
         if not verdict.get("ok", False):
-            _audit("propose_spec_change", status="failure",
-                   detail={"resource": resource, "reason": "spec_invalid",
-                           "base_ref": base})
-            raise GitNotAllowed(
-                f"规格校验未通过：{verdict.get('errors') or verdict}"
+            _audit(
+                "propose_spec_change",
+                status="failure",
+                detail={"resource": resource, "reason": "spec_invalid", "base_ref": base},
             )
+            raise GitNotAllowed(f"规格校验未通过：{verdict.get('errors') or verdict}")
 
         branch = make_branch_name(resource)
         if branch_exists(root, branch):
             # 理论上 timestamp 精确到秒不会撞，但分支已存在时绝不覆盖。
-            _audit("propose_spec_change", status="failure",
-                   detail={"resource": resource, "reason": "branch_exists",
-                           "branch": branch})
+            _audit(
+                "propose_spec_change",
+                status="failure",
+                detail={"resource": resource, "reason": "branch_exists", "branch": branch},
+            )
             raise GitNotAllowed(f"分支已存在，拒绝覆盖：{branch}")
 
         # Proposed-by 行：审计时能一眼区分「工具提案」与「人的提交」，
@@ -160,6 +169,7 @@ def propose_spec_change(
             "commit": result["commit"],
             "base_ref": base,
             "base_commit": base_commit,
+            "account_id": account_id,
         }
         audit_ok = _audit("propose_spec_change", status="success", detail=detail)
 
@@ -174,43 +184,54 @@ def propose_spec_change(
             "next_step": "由人执行 git push 并开 PR；本工具不会 push，也不会合并。",
             "audit_written": audit_ok,
         }
+    except IdentityError as exc:
+        if not detail:
+            _audit("propose_spec_change", status="failure", detail={"resource": resource, "reason": exc.reason})
+        raise
     except Exception as exc:
         if not detail:
-            _audit("propose_spec_change", status="failure",
-                   detail={"resource": resource, "reason": type(exc).__name__})
+            _audit("propose_spec_change", status="failure", detail={"resource": resource, "reason": type(exc).__name__})
         raise
 
 
 def list_proposals(*, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """列出提案分支（``proposal/`` 前缀）。只读。"""
+    """列出提案分支（``proposal/`` 前缀）。只读，但同样要求 ``spec:write``
+    （CPL 裁定：三个写入工具粒度一致，且提案内容不应向无权限方暴露）。"""
     from tools.mcp_server import _repo_root
+    from tools.mcp_server.identity import IdentityError, require_spec_write
 
     root = (repo_root or _repo_root()).resolve()
     try:
+        account_id = require_spec_write()
         items = list_proposal_branches(root)
-    except Exception as exc:
-        _audit("list_proposals", status="failure",
-               detail={"reason": type(exc).__name__})
+    except IdentityError as exc:
+        _audit("list_proposals", status="failure", detail={"reason": exc.reason})
         raise
-    _audit("list_proposals", status="success", detail={"count": len(items)})
+    except Exception as exc:
+        _audit("list_proposals", status="failure", detail={"reason": type(exc).__name__})
+        raise
+    _audit("list_proposals", status="success", detail={"count": len(items), "account_id": account_id})
     return items
 
 
-def discard_proposal_tool(
-    branch: str, *, force: bool = False, repo_root: Optional[Path] = None
-) -> Dict[str, Any]:
+def discard_proposal_tool(branch: str, *, force: bool = False, repo_root: Optional[Path] = None) -> Dict[str, Any]:
     """删除提案分支。只允许 ``proposal/`` 前缀。"""
     from tools.mcp_server import _repo_root
+    from tools.mcp_server.identity import IdentityError, require_spec_write
 
     root = (repo_root or _repo_root()).resolve()
     try:
+        account_id = require_spec_write()
         discard_proposal(root, branch, force=force)
-    except Exception as exc:
-        _audit("discard_proposal", status="failure",
-               detail={"branch": branch, "reason": type(exc).__name__})
+    except IdentityError as exc:
+        _audit("discard_proposal", status="failure", detail={"branch": branch, "reason": exc.reason})
         raise
-    audit_ok = _audit("discard_proposal", status="success",
-                      detail={"branch": branch, "force": force})
+    except Exception as exc:
+        _audit("discard_proposal", status="failure", detail={"branch": branch, "reason": type(exc).__name__})
+        raise
+    audit_ok = _audit(
+        "discard_proposal", status="success", detail={"branch": branch, "force": force, "account_id": account_id}
+    )
     return {"discarded": branch, "force": force, "audit_written": audit_ok}
 
 
@@ -231,17 +252,13 @@ def register_write_tools(server) -> None:
         ),
     )
     @_mcp_tool
-    def propose_spec_change_tool(
-        resource: str, spec_yaml: str, note: str = "", base_ref: str = ""
-    ) -> Dict[str, Any]:
+    def propose_spec_change_tool(resource: str, spec_yaml: str, note: str = "", base_ref: str = "") -> Dict[str, Any]:
         """resource 为资源名；spec_yaml 为完整规格 YAML；base_ref 留空则用 master。"""
-        return propose_spec_change(
-            resource, spec_yaml, note=note, base_ref=base_ref or None
-        )
+        return propose_spec_change(resource, spec_yaml, note=note, base_ref=base_ref or None)
 
     @server.tool(
         name="list_proposals",
-        description="列出本地 proposal/ 前缀的提案分支。只读。",
+        description="列出本地 proposal/ 前缀的提案分支。只读；每次调用需有效会话且账户拥有 spec:write 权限。",
     )
     @_mcp_tool
     def list_proposals_tool() -> List[Dict[str, Any]]:
