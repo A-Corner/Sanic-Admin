@@ -3,7 +3,7 @@ from tortoise import BaseDBAsyncClient
 
 async def upgrade(db: BaseDBAsyncClient) -> str:
     return """
-        CREATE TABLE "account" (
+        CREATE TABLE IF NOT EXISTS "account" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -16,9 +16,10 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     "password" VARCHAR(255) NOT NULL,
     "disabled" INT NOT NULL  DEFAULT 0,
     "verified" INT NOT NULL  DEFAULT 0,
-    "is_admin" INT NOT NULL  DEFAULT 0
+    "is_admin" INT NOT NULL  DEFAULT 0,
+    "must_change_password" INT NOT NULL  DEFAULT 0
 ) /* 用户账户模型，包含所有可识别用户信息 */;
-CREATE TABLE "authentication_session" (
+CREATE TABLE IF NOT EXISTS "authentication_session" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -31,7 +32,7 @@ CREATE TABLE "authentication_session" (
     "second_factor_verified" INT NOT NULL  DEFAULT 0,
     "bearer_id" INT REFERENCES "account" ("id") ON DELETE CASCADE
 ) /* 认证会话模型，用于用户登录 */;
-CREATE TABLE "captcha_session" (
+CREATE TABLE IF NOT EXISTS "captcha_session" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -44,7 +45,7 @@ CREATE TABLE "captcha_session" (
     "attempts" INT NOT NULL  DEFAULT 0,
     "bearer_id" INT REFERENCES "account" ("id") ON DELETE CASCADE
 ) /* 验证码会话模型 */;
-CREATE TABLE "operation_log" (
+CREATE TABLE IF NOT EXISTS "operation_log" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -58,9 +59,9 @@ CREATE TABLE "operation_log" (
     "user_agent" VARCHAR(255),
     "account_id" INT REFERENCES "account" ("id") ON DELETE SET NULL
 ) /* 操作日志 */;
-CREATE INDEX "idx_operation_l_operati_c9393b" ON "operation_log" ("operation_type");
-CREATE INDEX "idx_operation_l_status_46a453" ON "operation_log" ("status");
-CREATE TABLE "profile" (
+CREATE INDEX IF NOT EXISTS "idx_operation_l_operati_c9393b" ON "operation_log" ("operation_type");
+CREATE INDEX IF NOT EXISTS "idx_operation_l_status_46a453" ON "operation_log" ("status");
+CREATE TABLE IF NOT EXISTS "profile" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -78,7 +79,7 @@ CREATE TABLE "profile" (
     "homepage" VARCHAR(255),
     "account_id" INT NOT NULL UNIQUE REFERENCES "account" ("id") ON DELETE CASCADE
 ) /* 用户个人资料，与账户一对一；所有资料字段均可为空 */;
-CREATE TABLE "role" (
+CREATE TABLE IF NOT EXISTS "role" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -87,7 +88,7 @@ CREATE TABLE "role" (
     "description" VARCHAR(255),
     "permissions" JSON NOT NULL
 ) /* 角色模型，定义用户权限组 */;
-CREATE TABLE "system_setting" (
+CREATE TABLE IF NOT EXISTS "system_setting" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -99,7 +100,7 @@ CREATE TABLE "system_setting" (
     "category" VARCHAR(50) NOT NULL  DEFAULT 'general',
     "is_public" INT NOT NULL  DEFAULT 0
 ) /* 系统参数配置：值统一以字符串存储，``value_type`` 指明如何解释 */;
-CREATE TABLE "two_step_session" (
+CREATE TABLE IF NOT EXISTS "two_step_session" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -112,7 +113,7 @@ CREATE TABLE "two_step_session" (
     "attempts" INT NOT NULL  DEFAULT 0,
     "bearer_id" INT REFERENCES "account" ("id") ON DELETE CASCADE
 ) /* 两步验证会话模型 */;
-CREATE TABLE "uploaded_file" (
+CREATE TABLE IF NOT EXISTS "uploaded_file" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -126,8 +127,8 @@ CREATE TABLE "uploaded_file" (
     "download_count" INT NOT NULL  DEFAULT 0,
     "account_id" INT REFERENCES "account" ("id") ON DELETE SET NULL
 ) /* 上传文件记录 */;
-CREATE INDEX "idx_uploaded_fi_file_pa_28d5b8" ON "uploaded_file" ("file_path");
-CREATE TABLE "verification_tokens" (
+CREATE INDEX IF NOT EXISTS "idx_uploaded_fi_file_pa_28d5b8" ON "uploaded_file" ("file_path");
+CREATE TABLE IF NOT EXISTS "verification_tokens" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 创建时间 */,
     "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP /* 更新时间 */,
@@ -139,13 +140,13 @@ CREATE TABLE "verification_tokens" (
     "data" TEXT   /* 附加数据，存储为JSON格式 */,
     "account_id" INT NOT NULL REFERENCES "account" ("id") ON DELETE CASCADE
 ) /* 验证令牌模型 */;
-CREATE TABLE "aerich" (
+CREATE TABLE IF NOT EXISTS "aerich" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     "version" VARCHAR(255) NOT NULL,
     "app" VARCHAR(100) NOT NULL,
     "content" JSON NOT NULL
 );
-CREATE TABLE "account_role" (
+CREATE TABLE IF NOT EXISTS "account_role" (
     "account_id" INT NOT NULL REFERENCES "account" ("id") ON DELETE CASCADE,
     "role_id" INT NOT NULL REFERENCES "role" ("id") ON DELETE CASCADE
 );"""

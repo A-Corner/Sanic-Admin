@@ -10,16 +10,23 @@
   1. 手工创建 aerich 版本账本表（本脚本完成，DDL 与 aerich 0.7.2 的
      Tortoise 模型产出一致，已实测被 ``aerich upgrade`` 接受）；
   2. 把基线迁移（migrations/models/0_*_init.py）作为「已应用」写入账本
-     （本脚本完成，content 与迁移文件全文一致）；
+     （本脚本完成；content 是 aerich 约定的「当前模型快照 JSON」——后续
+     ``aerich migrate`` 以它为比较基准，写成迁移文件文本会让 migrate 失效）；
   3. 之后 ``aerich upgrade`` 即为无操作（no-op），账本对齐；
   4. 以后每次改模型 → ``aerich migrate`` → ``aerich upgrade``，恢复正常迭代。
 
 幂等：重复执行安全（表已存在则跳过建表；基线行已存在则跳过写入）。
 用法：python scripts/migrations/baseline_existing_db.py <sqlite路径> [迁移目录]
 """
+
+import asyncio
+import json
 import sqlite3
 import sys
 from pathlib import Path
+
+# 脚本在 scripts/migrations/ 下：仓库根加入 sys.path 以便导入 app.models
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 AERICH_TABLE_DDL = (
     'CREATE TABLE "aerich" ('
@@ -28,6 +35,23 @@ AERICH_TABLE_DDL = (
     '"app" VARCHAR(60) NOT NULL, '
     '"content" TEXT NOT NULL)'
 )
+
+
+def models_snapshot(db_path: str, app: str) -> str:
+    """当前模型的 aerich 快照（与 aerich upgrade 写入账本的 content 同源同格式）。"""
+    from aerich.utils import get_models_describe
+    from tortoise import Tortoise
+
+    from app.aerich_config import build_tortoise_config
+
+    async def _run() -> str:
+        await Tortoise.init(config=build_tortoise_config(f"sqlite:///{db_path}"))
+        try:
+            return json.dumps(get_models_describe(app))
+        finally:
+            await Tortoise.close_connections()
+
+    return asyncio.run(_run())
 
 
 def main(db_path: str, migrations_dir: str, app: str = "models", fresh: bool = False) -> int:
@@ -43,13 +67,10 @@ def main(db_path: str, migrations_dir: str, app: str = "models", fresh: bool = F
         print(f"!! 迁移目录里找不到基线迁移(0_*_init.py): {mig_dir}")
         return 1
     baseline_file = baselines[0]
-    content = baseline_file.read_text()
 
     conn = sqlite3.connect(str(db))
     try:
-        exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='aerich'"
-        ).fetchone()
+        exists = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='aerich'").fetchone()
         if exists is None:
             conn.execute(AERICH_TABLE_DDL)
             conn.commit()
@@ -60,15 +81,13 @@ def main(db_path: str, migrations_dir: str, app: str = "models", fresh: bool = F
         if fresh:
             print("  --fresh：只创建账本表，不标记基线（upgrade 将应用基线迁移建表）")
             return 0
-        already = conn.execute(
-            "SELECT id FROM aerich WHERE version=? AND app=?", (baseline_file.name, app)
-        ).fetchone()
+        already = conn.execute("SELECT id FROM aerich WHERE version=? AND app=?", (baseline_file.name, app)).fetchone()
         if already:
             print(f"  基线 {baseline_file.name} 已在账本中，跳过写入")
             return 0
         conn.execute(
             'INSERT INTO "aerich" ("version", "app", "content") VALUES (?, ?, ?)',
-            (baseline_file.name, app, content),
+            (baseline_file.name, app, models_snapshot(str(db), app)),
         )
         conn.commit()
         print(f"  已写入基线: {baseline_file.name} (app={app})")
