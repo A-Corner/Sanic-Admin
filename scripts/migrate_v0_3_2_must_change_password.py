@@ -39,7 +39,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 LEGACY_DEFAULT_ADMIN_PASSWORDS = ("SAdmin@123",)
 
 ALTER_SQL = {
-    "sqlite": "ALTER TABLE account ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT 0;",
+    # SQLite 用 INT：与 aerich 基线（Tortoise 对 BooleanField 生成 INT）一致，
+    # 避免「手写补列 BOOLEAN / 基线 INT」造成守门比对时出现虚假类型差异。
+    "sqlite": "ALTER TABLE account ADD COLUMN must_change_password INT NOT NULL DEFAULT 0;",
     "mysql": "ALTER TABLE account ADD COLUMN must_change_password BOOL NOT NULL DEFAULT FALSE;",
     "postgres": "ALTER TABLE account ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE;",
 }
@@ -78,7 +80,14 @@ async def main(create_initial_admin: bool = False) -> int:
 
     env = os.environ.get("SANIC_ENV", "development")
     cfg = config_to_dict(get_config(env))
-    db_url = os.environ.get("DB_URL") or cfg.get("DATABASE_URL")
+    # 统一读 DATABASE_URL（与 aerich / app.config 同源）；DB_URL 保留兼容但提示弃用
+    db_url = os.environ.get("DATABASE_URL") or cfg.get("DATABASE_URL")
+    if os.environ.get("DB_URL"):
+        print(
+            "[deprecation] 环境变量 DB_URL 已弃用，请改用 DATABASE_URL（本次仍按 DB_URL 生效）。",
+            file=sys.stderr,
+        )
+        db_url = os.environ["DB_URL"] or db_url
     admin_password = os.environ.get("INITIAL_ADMIN_PASSWORD", "")
     if not db_url:
         print("❌ 未找到 DATABASE_URL 配置（环境变量 DB_URL 或 SANIC_ENV 对应配置）", file=sys.stderr)
