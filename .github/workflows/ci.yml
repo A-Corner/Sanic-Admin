@@ -2,9 +2,11 @@ name: Sanic-Admin CI
 
 on:
   push:
-    branches: [ main, master, develop, vj-mp3 ]
+    # release/**：补丁版从 release/v0.3.x 拉 hotfix 分支，PR 目标通常是 release
+    # 分支本身；不加这条，发补丁版的 PR 根本不会触发 CI。
+    branches: [ main, master, develop, vj-mp3, 'release/**' ]
   pull_request:
-    branches: [ main, master, develop, vj-mp3 ]
+    branches: [ main, master, develop, vj-mp3, 'release/**' ]
 
 jobs:
   test:
@@ -49,3 +51,134 @@ jobs:
 
     - name: Test with pytest
       run: pytest --cov=app tests/ --cov-report=xml
+
+  # AMIS 浏览器端到端门禁。
+  #
+  # 为什么单独一个 job：它需要 playwright + 浏览器，装起来比 pytest 重得多，
+  # 不该拖慢 3 个 Python 版本的矩阵。
+  #
+  # 为什么浏览器不可用时「跳过而不是通过」：这里用两段式判定——
+  #   1) probe 步骤检测浏览器能否启动，能就输出 available=true；
+  #   2) 真正跑 E2E 的步骤只在 available=true 时执行。
+  # 若浏览器装不上，job 结论是「skipped」，GitHub 上显示为灰色跳过，
+  # 不会变成绿色通过；同时 probe 步骤会写一条 ::warning:: 说明原因。
+  # 想让它变成硬失败，把 `if: steps.probe.outputs.available == 'true'`
+  # 换成 `if: always()` 即可。
+  # 浏览器可用性探测（独立 job）：输出 available 供下游 job 的 if 判定。
+  # 这样「浏览器不可用」在下游 job 上体现为**真正的 skipped 结论**，
+  # 而不是「step 跳过、job 仍绿」——后者会把「没验证」伪装成「通过」。
+  amis-e2e-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      available: ${{ steps.probe.outputs.available }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: |
+          requirements.txt
+          requirements-dev.txt
+
+    - name: Install Playwright
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt -r requirements-dev.txt playwright
+        python -m playwright install --with-deps chromium
+
+    - name: Probe browser availability
+      id: probe
+      run: |
+        if python - <<'PY'
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            b = pw.chromium.launch(headless=True)
+            b.close()
+        PY
+        then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "browser available"
+        else
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Playwright Chromium 无法启动；下游 amis-e2e job 将被跳过（不会显示为通过）"
+        fi
+
+  # 真正的门禁 job：浏览器不可用时整体 skipped（GitHub 会明确标注），不是绿色通过。
+  amis-e2e:
+    needs: amis-e2e-probe
+    if: needs.amis-e2e-probe.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: |
+          requirements.txt
+          requirements-dev.txt
+
+    - name: Install dependencies and Playwright
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt -r requirements-dev.txt playwright
+        python -m playwright install --with-deps chromium
+
+    - name: Start app
+      env:
+        SANIC_ENV: development
+        DATABASE_URL: sqlite:///tmp/ci-e2e.sqlite3
+        CACHE_TYPE: memory
+        INITIAL_ADMIN_PASSWORD: CiE2ePass#2026
+        AUTO_RELOAD: "false"
+      run: |
+        mkdir -p tmp
+        python main.py > tmp/server.log 2>&1 &
+        # 轮询 /health：首次启动可能要生成 RSA 密钥并建表，给足 60 秒。
+        for i in $(seq 1 60); do
+          if curl -fsS http://127.0.0.1:22222/health > /dev/null 2>&1; then
+            echo "server healthy after ${i}s"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "::error::服务 60 秒内未就绪"
+        tail -50 tmp/server.log
+        exit 1
+
+    - name: Run AMIS E2E
+      env:
+        INITIAL_ADMIN_PASSWORD: CiE2ePass#2026
+      run: |
+        # 初始管理员 must_change_password=True，首次登录必须走强制改密，
+        # 否则登录页停在改密表单、跳不到管理台。
+        python scripts/amis_e2e_check.py \
+          --base-url http://127.0.0.1:22222 \
+          --admin-email SAdmin@Sanic.com \
+          --admin-password "$INITIAL_ADMIN_PASSWORD" \
+          --new-password 'CiE2ePass#2026-new'
+
+    - name: Negative control — broken selector must fail the check
+      env:
+        INITIAL_ADMIN_PASSWORD: CiE2ePass#2026-new   # 上一步已完成改密
+      run: |
+        # 正向对照：故意把弹窗选择器改错，脚本要求「新增角色」这条断言失败。
+        # 若它仍然通过，说明该断言是恒真的，门禁没有意义 —— 脚本以退出码 1 报警。
+        python scripts/amis_e2e_check.py \
+          --base-url http://127.0.0.1:22222 \
+          --admin-email SAdmin@Sanic.com \
+          --admin-password "$INITIAL_ADMIN_PASSWORD" \
+          --negative-control dialog
+
+    - name: Show server log on failure
+      if: failure()
+      run: tail -100 tmp/server.log || true
