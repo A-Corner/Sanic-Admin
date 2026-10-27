@@ -131,17 +131,23 @@ async def _assignable(actor: Account, role: Role) -> Optional[str]:
 # 就能被仅持 ``account:update`` 的非管理员账户撤销 admin 角色 / 改邮箱，
 # 形成提权路径。
 
+
 def _core_resources() -> list:
     """
-    判定「全权限角色」时参与比较的资源：注册表去掉 specgen 生成的资源。
+    判定「全权限角色」时参与比较的资源：注册表去掉 specgen 生成的资源与
+    ``spec``（MCP 权限点）。
 
-    生成资源是后来新增的权限点，存量角色不可能覆盖它们；若把它们计入，
-    新增一份规格就会让现有「全权限」角色（含内置 admin 之外的自建全权限角色）
+    两类资源都是注册表后补的权限点，存量角色不可能覆盖它们；若把它们计入，
+    每新增一项就会让现有「全权限」角色（含内置 admin 之外的自建全权限角色）
     集体失去受保护管理员身份，形成提权路径。
+
+    - 生成资源（``GENERATED_PERMISSIONS``）：随每份新增规格增长；
+    - ``spec``（v0.4.2 新增，``app/auth/permissions.py``）：MCP 写入路径的
+      权限点，静态注册——不在生成清单里，必须显式排除。
     """
     from app.generated.permissions import GENERATED_PERMISSIONS
 
-    return [r for r in all_resources() if r not in GENERATED_PERMISSIONS]
+    return [r for r in all_resources() if r not in GENERATED_PERMISSIONS and r != "spec"]
 
 
 def _role_grants_all_permissions(role: Role) -> bool:
@@ -229,8 +235,7 @@ class RoleResource(HTTPMethodView):
         if role_id is not None:
             role = await Role.filter(id=role_id, deleted=False).first()
             if role is None:
-                return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND",
-                                         status_code=404)
+                return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND", status_code=404)
             return APIResponse.success(data=role_info(role), message="获取角色成功")
 
         query = Role.filter(deleted=False)
@@ -238,14 +243,16 @@ class RoleResource(HTTPMethodView):
         keyword = (request.args.get("keyword") or request.args.get("search") or "").strip()
         if keyword:
             from tortoise.expressions import Q
+
             query = query.filter(Q(name__contains=keyword) | Q(description__contains=keyword))
 
         page, page_size = parse_pagination(request)
         total = await query.count()
         roles = await query.order_by("name").offset((page - 1) * page_size).limit(page_size)
 
-        return APIResponse.list(items=[role_info(r) for r in roles], total=total, page=page,
-                                page_size=page_size, message="获取角色列表成功")
+        return APIResponse.list(
+            items=[role_info(r) for r in roles], total=total, page=page, page_size=page_size, message="获取角色列表成功"
+        )
 
     @check_permissions("role", "create")
     async def post(self, request: Request):
@@ -254,31 +261,41 @@ class RoleResource(HTTPMethodView):
         payload = request_payload(request)
         data = extract_whitelisted(payload, ROLE_CREATE_FIELDS)
 
-        errors = validate_fields(data, {
-            "name": [Required(), Length(min_=2, max_=NAME_MAX_LENGTH)],
-            "description": [Length(max_=DESCRIPTION_MAX_LENGTH)],
-            "permissions": [Required(), Type(dict)],
-        })
+        errors = validate_fields(
+            data,
+            {
+                "name": [Required(), Length(min_=2, max_=NAME_MAX_LENGTH)],
+                "description": [Length(max_=DESCRIPTION_MAX_LENGTH)],
+                "permissions": [Required(), Type(dict)],
+            },
+        )
         if errors:
-            return APIResponse.error(message="参数验证失败", error_code=APIError.VALIDATION_ERROR,
-                                     status_code=400, details=errors)
+            return APIResponse.error(
+                message="参数验证失败", error_code=APIError.VALIDATION_ERROR, status_code=400, details=errors
+            )
 
         name = data["name"].strip()
 
         if await Role.filter(name=name).exists():
-            return APIResponse.error(message="角色名已存在", error_code="ROLE_EXISTS",
-                                     status_code=400)
+            return APIResponse.error(message="角色名已存在", error_code="ROLE_EXISTS", status_code=400)
 
         # 注册表校验：资源/动作必须已登记，避免写入无法生效的权限
         ok, perm_errors = validate_permissions_dict(data["permissions"])
         if not ok:
-            return APIResponse.error(message="权限配置无效", error_code=APIError.VALIDATION_ERROR,
-                                     status_code=400, details={"permissions": perm_errors})
+            return APIResponse.error(
+                message="权限配置无效",
+                error_code=APIError.VALIDATION_ERROR,
+                status_code=400,
+                details={"permissions": perm_errors},
+            )
 
         exceed = _permissions_exceed(await _granted_permissions(actor), data["permissions"])
         if exceed:
-            return APIResponse.error(message=f"无权创建超出自身权限范围的角色：{exceed}",
-                                     error_code=APIError.INSUFFICIENT_PERMISSIONS, status_code=403)
+            return APIResponse.error(
+                message=f"无权创建超出自身权限范围的角色：{exceed}",
+                error_code=APIError.INSUFFICIENT_PERMISSIONS,
+                status_code=403,
+            )
 
         role = await Role.create(
             name=name,
@@ -286,8 +303,7 @@ class RoleResource(HTTPMethodView):
             permissions=data["permissions"],
         )
 
-        return APIResponse.created(data=role_info(role), message="角色创建成功",
-                                   location=f"/api/v1/roles/{role.id}")
+        return APIResponse.created(data=role_info(role), message="角色创建成功", location=f"/api/v1/roles/{role.id}")
 
     @check_permissions("role", "update")
     async def put(self, request: Request, role_id: int):
@@ -295,53 +311,57 @@ class RoleResource(HTTPMethodView):
         actor = request.ctx.authentication_session.bearer
         role = await Role.filter(id=role_id, deleted=False).first()
         if role is None:
-            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND", status_code=404)
 
         # 禁止修改自己拥有的角色：防止通过改角色权限给自己提权
         if await actor.roles.filter(id=role_id).exists():
-            return APIResponse.error(message="不允许修改自己拥有的角色",
-                                     error_code=APIError.FORBIDDEN, status_code=403)
+            return APIResponse.error(message="不允许修改自己拥有的角色", error_code=APIError.FORBIDDEN, status_code=403)
 
         if role.name in PROTECTED_ROLE_NAMES and not actor.is_admin:
-            return APIResponse.error(message="不允许修改内置角色",
-                                     error_code="CANNOT_MODIFY_BUILTIN_ROLE", status_code=403)
+            return APIResponse.error(message="不允许修改内置角色", error_code="CANNOT_MODIFY_BUILTIN_ROLE", status_code=403)
 
         payload = request_payload(request)
         data = extract_whitelisted(payload, ROLE_UPDATE_FIELDS)
 
         if not data:
-            return APIResponse.error(message="没有可更新的字段", error_code=APIError.MISSING_PARAMETER,
-                                     status_code=400)
+            return APIResponse.error(message="没有可更新的字段", error_code=APIError.MISSING_PARAMETER, status_code=400)
 
-        errors = validate_fields(data, {
-            "name": [Length(min_=2, max_=NAME_MAX_LENGTH)],
-            "description": [Length(max_=DESCRIPTION_MAX_LENGTH)],
-            "permissions": [Type(dict)],
-        })
+        errors = validate_fields(
+            data,
+            {
+                "name": [Length(min_=2, max_=NAME_MAX_LENGTH)],
+                "description": [Length(max_=DESCRIPTION_MAX_LENGTH)],
+                "permissions": [Type(dict)],
+            },
+        )
         if errors:
-            return APIResponse.error(message="参数验证失败", error_code=APIError.VALIDATION_ERROR,
-                                     status_code=400, details=errors)
+            return APIResponse.error(
+                message="参数验证失败", error_code=APIError.VALIDATION_ERROR, status_code=400, details=errors
+            )
 
         if "name" in data:
             new_name = data["name"].strip()
             if new_name != role.name and await Role.filter(name=new_name).exists():
-                return APIResponse.error(message="角色名已存在", error_code="ROLE_EXISTS",
-                                         status_code=400)
+                return APIResponse.error(message="角色名已存在", error_code="ROLE_EXISTS", status_code=400)
             data["name"] = new_name
 
         if "permissions" in data:
             ok, perm_errors = validate_permissions_dict(data["permissions"])
             if not ok:
-                return APIResponse.error(message="权限配置无效",
-                                         error_code=APIError.VALIDATION_ERROR, status_code=400,
-                                         details={"permissions": perm_errors})
+                return APIResponse.error(
+                    message="权限配置无效",
+                    error_code=APIError.VALIDATION_ERROR,
+                    status_code=400,
+                    details={"permissions": perm_errors},
+                )
 
             exceed = _permissions_exceed(await _granted_permissions(actor), data["permissions"])
             if exceed:
                 return APIResponse.error(
                     message=f"无权设置超出自身权限范围的角色权限：{exceed}",
-                    error_code=APIError.INSUFFICIENT_PERMISSIONS, status_code=403)
+                    error_code=APIError.INSUFFICIENT_PERMISSIONS,
+                    status_code=403,
+                )
 
         for key, value in data.items():
             setattr(role, key, value)
@@ -356,22 +376,19 @@ class RoleResource(HTTPMethodView):
         actor = request.ctx.authentication_session.bearer
         role = await Role.filter(id=role_id, deleted=False).first()
         if role is None:
-            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND", status_code=404)
 
         if await actor.roles.filter(id=role_id).exists():
-            return APIResponse.error(message="不允许删除自己拥有的角色",
-                                     error_code=APIError.FORBIDDEN, status_code=403)
+            return APIResponse.error(message="不允许删除自己拥有的角色", error_code=APIError.FORBIDDEN, status_code=403)
 
         if role.name in PROTECTED_ROLE_NAMES:
-            return APIResponse.error(message="不允许删除内置角色",
-                                     error_code="CANNOT_DELETE_BUILTIN_ROLE", status_code=403)
+            return APIResponse.error(message="不允许删除内置角色", error_code="CANNOT_DELETE_BUILTIN_ROLE", status_code=403)
 
         in_use = await role.accounts.filter(deleted=False).count()
         if in_use > 0:
             return APIResponse.error(
-                message=f"无法删除角色，因为有 {in_use} 个账户正在使用此角色",
-                error_code="ROLE_IN_USE", status_code=400)
+                message=f"无法删除角色，因为有 {in_use} 个账户正在使用此角色", error_code="ROLE_IN_USE", status_code=400
+            )
 
         role.deleted = True
         await role.save(update_fields=["deleted"])
@@ -389,8 +406,7 @@ class RoleMembersResource(HTTPMethodView):
         """查看角色成员。"""
         role = await Role.filter(id=role_id, deleted=False).first()
         if role is None:
-            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND", status_code=404)
 
         page, page_size = parse_pagination(request)
         # 注意：不能先 await 再当 QuerySet 用——await queryset 求值成 list 后，
@@ -401,10 +417,12 @@ class RoleMembersResource(HTTPMethodView):
         page_items = await query.order_by("id").offset((page - 1) * page_size).limit(page_size)
 
         from app.api.resources.account import account_info
+
         items = [account_info(a) for a in page_items]
 
-        return APIResponse.list(items=items, total=total, page=page, page_size=page_size,
-                                message=f"获取角色 '{role.name}' 成员成功")
+        return APIResponse.list(
+            items=items, total=total, page=page, page_size=page_size, message=f"获取角色 '{role.name}' 成员成功"
+        )
 
     @check_permissions("role", "update")
     async def post(self, request: Request, role_id: int):
@@ -412,34 +430,35 @@ class RoleMembersResource(HTTPMethodView):
         actor = request.ctx.authentication_session.bearer
         role = await Role.filter(id=role_id, deleted=False).first()
         if role is None:
-            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND", status_code=404)
 
         exceed = await _assignable(actor, role)
         if exceed:
-            return APIResponse.error(message=f"无权授予该角色：{exceed}",
-                                     error_code=APIError.INSUFFICIENT_PERMISSIONS, status_code=403)
+            return APIResponse.error(
+                message=f"无权授予该角色：{exceed}", error_code=APIError.INSUFFICIENT_PERMISSIONS, status_code=403
+            )
 
         payload = request_payload(request)
         account_ids = payload.get("account_ids")
         if not isinstance(account_ids, list) or not account_ids:
-            return APIResponse.error(message="account_ids 必须是非空整数列表",
-                                     error_code=APIError.INVALID_PARAMETER, status_code=400)
+            return APIResponse.error(
+                message="account_ids 必须是非空整数列表", error_code=APIError.INVALID_PARAMETER, status_code=400
+            )
         if not all(isinstance(aid, int) and not isinstance(aid, bool) for aid in account_ids):
-            return APIResponse.error(message="account_ids 必须是非空整数列表",
-                                     error_code=APIError.INVALID_PARAMETER, status_code=400)
+            return APIResponse.error(
+                message="account_ids 必须是非空整数列表", error_code=APIError.INVALID_PARAMETER, status_code=400
+            )
 
         accounts = await Account.filter(id__in=account_ids, deleted=False).all()
         if len(accounts) != len(set(account_ids)):
-            return APIResponse.error(message="部分账户不存在", error_code="ACCOUNTS_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="部分账户不存在", error_code="ACCOUNTS_NOT_FOUND", status_code=404)
 
         # 目标账户检查：非管理员不得把受保护的管理员加入/移出角色
         for account in accounts:
             if not await actor_may_modify(actor, account):
                 return APIResponse.error(
-                    message=f"无权改动管理员账户 '{account.username}' 的角色",
-                    error_code=APIError.FORBIDDEN, status_code=403)
+                    message=f"无权改动管理员账户 '{account.username}' 的角色", error_code=APIError.FORBIDDEN, status_code=403
+                )
 
         for account in accounts:
             await role.accounts.add(account)
@@ -452,24 +471,25 @@ class RoleMembersResource(HTTPMethodView):
         actor = request.ctx.authentication_session.bearer
         role = await Role.filter(id=role_id, deleted=False).first()
         if role is None:
-            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND", status_code=404)
 
         account = await Account.filter(id=account_id, deleted=False).first()
         if account is None:
-            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND", status_code=404)
 
         # 目标账户检查：非管理员不得把受保护的管理员移出角色
         # （否则可借"移除 admin 角色"变相把管理员降权）
         if not await actor_may_modify(actor, account):
             return APIResponse.error(
-                message=f"无权改动管理员账户 '{account.username}' 的角色",
-                error_code=APIError.FORBIDDEN, status_code=403)
+                message=f"无权改动管理员账户 '{account.username}' 的角色", error_code=APIError.FORBIDDEN, status_code=403
+            )
 
         if not await role.accounts.filter(id=account_id).exists():
-            return APIResponse.error(message=f"账户 '{account.username}' 不是角色 '{role.name}' 的成员",
-                                     error_code="NOT_ROLE_MEMBER", status_code=400)
+            return APIResponse.error(
+                message=f"账户 '{account.username}' 不是角色 '{role.name}' 的成员",
+                error_code="NOT_ROLE_MEMBER",
+                status_code=400,
+            )
 
         await role.accounts.remove(account)
 
@@ -488,8 +508,7 @@ class AccountRolesResource(HTTPMethodView):
         """查看账户拥有的角色。"""
         account = await Account.filter(id=account_id, deleted=False).first()
         if account is None:
-            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND", status_code=404)
 
         roles = await account.roles.filter(deleted=False).all()
         items = [role_info(role) for role in roles]
@@ -502,33 +521,34 @@ class AccountRolesResource(HTTPMethodView):
         actor = request.ctx.authentication_session.bearer
         account = await Account.filter(id=account_id, deleted=False).first()
         if account is None:
-            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND", status_code=404)
 
         if not await actor_may_modify(actor, account):
-            return APIResponse.error(message="无权修改管理员账户的角色", error_code=APIError.FORBIDDEN,
-                                     status_code=403)
+            return APIResponse.error(message="无权修改管理员账户的角色", error_code=APIError.FORBIDDEN, status_code=403)
 
         payload = request_payload(request)
         role_ids = payload.get("role_ids")
         if not isinstance(role_ids, list) or not role_ids:
-            return APIResponse.error(message="role_ids 必须是非空整数列表",
-                                     error_code=APIError.INVALID_PARAMETER, status_code=400)
+            return APIResponse.error(
+                message="role_ids 必须是非空整数列表", error_code=APIError.INVALID_PARAMETER, status_code=400
+            )
         if not all(isinstance(rid, int) and not isinstance(rid, bool) for rid in role_ids):
-            return APIResponse.error(message="role_ids 必须是非空整数列表",
-                                     error_code=APIError.INVALID_PARAMETER, status_code=400)
+            return APIResponse.error(
+                message="role_ids 必须是非空整数列表", error_code=APIError.INVALID_PARAMETER, status_code=400
+            )
 
         roles = await Role.filter(id__in=role_ids, deleted=False).all()
         if len(roles) != len(set(role_ids)):
-            return APIResponse.error(message="部分角色不存在", error_code="ROLES_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="部分角色不存在", error_code="ROLES_NOT_FOUND", status_code=404)
 
         for role in roles:
             exceed = await _assignable(actor, role)
             if exceed:
-                return APIResponse.error(message=f"无权授予角色 '{role.name}'：{exceed}",
-                                         error_code=APIError.INSUFFICIENT_PERMISSIONS,
-                                         status_code=403)
+                return APIResponse.error(
+                    message=f"无权授予角色 '{role.name}'：{exceed}",
+                    error_code=APIError.INSUFFICIENT_PERMISSIONS,
+                    status_code=403,
+                )
 
         for role in roles:
             await account.roles.add(role)
@@ -541,20 +561,19 @@ class AccountRolesResource(HTTPMethodView):
         actor = request.ctx.authentication_session.bearer
         account = await Account.filter(id=account_id, deleted=False).first()
         if account is None:
-            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND",
-                                     status_code=404)
+            return APIResponse.error(message="账户不存在", error_code="ACCOUNT_NOT_FOUND", status_code=404)
 
         if not await actor_may_modify(actor, account):
-            return APIResponse.error(message="无权修改管理员账户的角色", error_code=APIError.FORBIDDEN,
-                                     status_code=403)
+            return APIResponse.error(message="无权修改管理员账户的角色", error_code=APIError.FORBIDDEN, status_code=403)
 
         role = await Role.filter(id=role_id, deleted=False).first()
         if role is None:
             return APIResponse.error(message="角色不存在", error_code="ROLE_NOT_FOUND", status_code=404)
 
         if not await account.roles.filter(id=role_id).exists():
-            return APIResponse.error(message=f"账户 '{account.username}' 没有角色 '{role.name}'",
-                                     error_code="NO_SUCH_ROLE", status_code=400)
+            return APIResponse.error(
+                message=f"账户 '{account.username}' 没有角色 '{role.name}'", error_code="NO_SUCH_ROLE", status_code=400
+            )
 
         await account.roles.remove(role)
 
@@ -575,14 +594,11 @@ role_resource = RoleResource()
 role_members_resource = RoleMembersResource()
 account_roles_resource = AccountRolesResource()
 
-register_view(v1_bp, "/roles/<role_id:int>", role_resource,
-              ["GET", "PUT", "DELETE"], "role_detail")
+register_view(v1_bp, "/roles/<role_id:int>", role_resource, ["GET", "PUT", "DELETE"], "role_detail")
 register_view(v1_bp, "/roles", role_resource, ["GET", "POST"], "role_list")
-register_view(v1_bp, "/roles/<role_id:int>/members", role_members_resource,
-              ["GET", "POST"], "role_members")
-register_view(v1_bp, "/roles/<role_id:int>/members/<account_id:int>",
-              role_members_resource, ["DELETE"], "role_member_detail")
-register_view(v1_bp, "/accounts/<account_id:int>/roles", account_roles_resource,
-              ["GET", "POST"], "account_roles")
-register_view(v1_bp, "/accounts/<account_id:int>/roles/<role_id:int>",
-              account_roles_resource, ["DELETE"], "account_role_detail")
+register_view(v1_bp, "/roles/<role_id:int>/members", role_members_resource, ["GET", "POST"], "role_members")
+register_view(v1_bp, "/roles/<role_id:int>/members/<account_id:int>", role_members_resource, ["DELETE"], "role_member_detail")
+register_view(v1_bp, "/accounts/<account_id:int>/roles", account_roles_resource, ["GET", "POST"], "account_roles")
+register_view(
+    v1_bp, "/accounts/<account_id:int>/roles/<role_id:int>", account_roles_resource, ["DELETE"], "account_role_detail"
+)

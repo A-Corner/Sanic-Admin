@@ -44,6 +44,7 @@ BAD_SPECS = [
     ("amis_key_in_field", _mut(lambda d: d["fields"][0].update(amis={"type": "input-text"})), "fields.0.amis", "Extra inputs"),
     ("bad_ident", _mut(lambda d: d.update(resource="Bad-Name")), "resource", "必须匹配"),
     ("reserved_resource", _mut(lambda d: d.update(resource="account")), "resource", "与框架内置资源冲突"),
+    ("reserved_spec_permission", _mut(lambda d: d.update(resource="spec")), "resource", "与框架内置资源冲突"),
     ("reserved_field", _mut(lambda d: d["fields"][0].update(name="id")), "fields.0.name", "保留名"),
     (
         "default_not_in_choices",
@@ -344,10 +345,13 @@ def test_soft_delete_must_be_boolean(tmp_path):
 
 def test_date_field_rejects_max_length(tmp_path):
     """date/datetime 字段配 max_length -> 规格错误（仅 string 可用）。"""
-    p = _write(tmp_path, {
-        "resource": "thing",
-        "fields": [{"name": "when", "type": "date", "max_length": 10}],
-    })
+    p = _write(
+        tmp_path,
+        {
+            "resource": "thing",
+            "fields": [{"name": "when", "type": "date", "max_length": 10}],
+        },
+    )
     with pytest.raises(SpecError) as exc:
         load_spec(p, "specs")
     assert any("max_length 仅 string" in reason for _, reason in exc.value.errors)
@@ -355,10 +359,13 @@ def test_date_field_rejects_max_length(tmp_path):
 
 def test_sorting_and_soft_delete_valid_spec_loads(tmp_path):
     """正向对照：合法配置能加载，且字段被正确解析。"""
-    p = _write(tmp_path, _spec_with(
-        sorting={"default": "-id", "allowed": ["id", "title"]},
-        soft_delete=True,
-    ))
+    p = _write(
+        tmp_path,
+        _spec_with(
+            sorting={"default": "-id", "allowed": ["id", "title"]},
+            soft_delete=True,
+        ),
+    )
     spec = load_spec(p, "specs")
     assert spec.sorting.allowed == ["id", "title"]
     assert spec.soft_delete is True
@@ -407,8 +414,7 @@ def test_every_field_type_maps_to_amis_control_with_type(field_type):
 
     f = FieldSpec(name="probe", type=field_type, label="探针")
     ctrl = _control(f, {})
-    assert ctrl.get("type"), (
-        f"FieldType={field_type!r} 生成的控件没有 type：{ctrl}")
+    assert ctrl.get("type"), f"FieldType={field_type!r} 生成的控件没有 type：{ctrl}"
     assert isinstance(ctrl["type"], str) and ctrl["type"]
 
 
@@ -417,8 +423,7 @@ def test_choices_field_maps_to_select():
     from tools.specgen.render_amis import _control
     from tools.specgen.schema import FieldSpec
 
-    f = FieldSpec(name="probe", type="string", label="探针",
-                  choices=["a", "b"])
+    f = FieldSpec(name="probe", type="string", label="探针", choices=["a", "b"])
     ctrl = _control(f, {})
     assert ctrl["type"] == "select"
     assert [o["value"] for o in ctrl["options"]] == ["a", "b"]
