@@ -10,7 +10,8 @@
     login_success / login_failure / logout / change_password（成功 / 失败 / 2FA 未完成）
     / two_step_success / two_step_failure
 
-管理类 CRUD 的审计不在这里（会由生成器统一处理，属另一项任务）。
+管理类 CRUD 的审计见本模块的 :func:`record_resource_event`（SA-v042-AUDIT）：
+生成器在产出 create / update / delete 时统一调用它。
 
 三条硬性约束：
 
@@ -102,3 +103,67 @@ async def record_auth_event(
     except Exception:
         # 审计是旁路：模型未迁移、库不可写等都不能让登录/改密失败。
         logger.warning("写入认证审计日志失败（已忽略）: operation=%s", operation, exc_info=True)
+
+
+#: 允许写入的资源动作（白名单）。与 :data:`OPERATIONS` 分开，避免认证操作名
+#: 与 CRUD 动作名互相污染。
+RESOURCE_ACTIONS = frozenset({"create", "update", "delete"})
+
+
+async def record_resource_event(
+    request: Request,
+    *,
+    resource: str,
+    action: str,
+    object_id,
+    account=None,
+    fields: Optional[list] = None,
+    status: str = "success",
+) -> None:
+    """记录一条生成资源的 CRUD 审计日志（SA-v042-AUDIT）。
+
+    生成器产出 create / update / delete 时调用。**只记字段名，不记字段值**——
+    资源里可能有手机号、邮箱、金额等，值进了日志就等于绕过了脱敏。
+
+    Args:
+        request: 当前请求（用于取 IP / User-Agent）
+        resource: 资源名（如 ``ticket``），写入 ``operation_type``（该列有索引）
+        action: 必须是 :data:`RESOURCE_ACTIONS` 之一
+        object_id: 被操作的记录 id；删除后该行仍可追溯
+        account: 操作者账户
+        fields: **仅字段名**，如 ``["title", "status"]``；调用方不得传值
+        status: ``success`` / ``failure``
+
+    本函数**永不抛出**：审计失败只记 warning，不影响主请求结果。
+    """
+    if action not in RESOURCE_ACTIONS:
+        logger.warning("资源审计动作不在白名单内，已忽略: %r", action)
+        return
+
+    # detail 只拼 id 与字段名，不含任何字段值。
+    parts = [f"id={object_id}"]
+    if fields:
+        parts.append("fields=" + ",".join(str(f) for f in fields))
+    detail = " ".join(parts)
+
+    try:
+        from app.models import OperationLog
+
+        await OperationLog.create(
+            account=account,
+            account_name=getattr(account, "username", None) if account else None,
+            operation=action,
+            operation_type=str(resource)[:64],
+            detail=detail,
+            status=status,
+            ip_address=_client_ip(request),
+            user_agent=(request.headers.get("User-Agent") or "")[:255] or None,
+        )
+    except Exception:
+        # 审计是旁路：日志表写不进去不能让业务写请求失败。
+        logger.warning(
+            "写入资源审计日志失败（已忽略）: resource=%s action=%s",
+            resource,
+            action,
+            exc_info=True,
+        )

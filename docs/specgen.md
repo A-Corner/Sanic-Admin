@@ -188,6 +188,32 @@ soft_delete: true
 
 若后续确有强需求，可在 v0.4 引入 `partial_unique` 规格开关并配套迁移。
 
+## 操作审计（v0.4.2 起自动生成）
+
+生成的资源在 `POST` / `PUT` / `DELETE` 成功后，各写一条 `OperationLog`：
+
+| 字段 | 值 |
+|---|---|
+| `operation_type` | 资源名（如 `ticket`），该列有索引 |
+| `operation` | `create` / `update` / `delete` |
+| `detail` | `id=<对象 id> fields=<字段名列表>` |
+| `account_id` / `account_name` | 操作者（`request.ctx.authentication_session.bearer`） |
+| `ip_address` / `user_agent` | 与登录审计同一口径（`TRUSTED_PROXIES` 下才采信 XFF） |
+
+三条设计约束：
+
+1. **只记字段名，不记字段值。** 资源里可能有手机号、邮箱、金额，值进了日志就等于
+   绕过了脱敏。写入入口 `app/services/audit.py:record_resource_event` 的 `fields`
+   参数按契约只接受名字。
+2. **审计失败不影响主请求。** 该函数**永不抛出**：日志表未迁移、库不可写都只记一条
+   warning，业务写入照常成功。
+3. **动作名走白名单**（`RESOURCE_ACTIONS`），调用方手滑传入其他字符串会被忽略并告警。
+
+查询：`GET /api/v1/logs?operation_type=ticket&operation=create`。
+
+**注意**：审计是**在业务写成功之后**触发的。若审计写失败，业务数据已落库、日志缺失——
+这是有意的取舍（宁可少一条日志，不可让写请求失败）。需要强一致的场景应改用事务内写日志。
+
 ## 迁移
 
 生成模型的结构变化直接落在迁移链上，不再手工 ALTER。

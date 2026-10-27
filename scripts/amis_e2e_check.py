@@ -119,7 +119,7 @@ SELECTORS = {
 EMPTY_ROW_MARKERS = ("暂无数据", "No data", "没有数据")
 
 #: 验收断言总数（与 amis-upgrade.md 的 19 项口径一致）。
-EXPECTED_CHECKS = 22
+EXPECTED_CHECKS = 23
 
 #: 负向对照里被破坏后的选择器
 BROKEN_SELECTORS = {
@@ -662,6 +662,36 @@ def main() -> int:
                 ticket_detail == "seen",
                 f"title={ticket_title} detail={ticket_detail}",
             )
+
+            # SA-v042-AUDIT：浏览器里的写操作必须留下审计痕迹。
+            # 直接查只读日志 API，而不是页面——页面上有没有表格不代表后端写了。
+            audit_detail = "未查询"
+            audit_ok = False
+            try:
+                resp = page.request.get(
+                    f"{args.base_url}/api/v1/logs?operation_type=ticket&operation=create&page_size=5"
+                )
+                if resp.ok:
+                    payload = resp.json()
+                    items = (payload.get("data") or {}).get("items") or []
+                    hit = [
+                        it
+                        for it in items
+                        if it.get("operation") == "create"
+                        and it.get("operation_type") == "ticket"
+                    ]
+                    audit_ok = len(hit) > 0
+                    audit_detail = f"logs={len(items)} hits={len(hit)}"
+                    if hit:
+                        audit_detail += (
+                            f" ip={hit[0].get('ip_address')}"
+                            f" account={'有' if hit[0].get('account_id') else '无'}"
+                        )
+                else:
+                    audit_detail = f"HTTP {resp.status}"
+            except Exception as exc:  # noqa: BLE001
+                audit_detail = f"查询失败：{str(exc)[:120]}"
+            check("最近操作：工单创建已写入审计日志", audit_ok, audit_detail)
 
             browser.close()
     finally:
