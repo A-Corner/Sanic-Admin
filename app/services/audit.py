@@ -24,6 +24,7 @@
    对端）。该逻辑已存在，不另起一套。
 """
 
+import json
 import logging
 from typing import Optional
 
@@ -141,9 +142,14 @@ async def record_resource_event(
         return
 
     # detail 只拼 id 与字段名，不含任何字段值。
+    #
+    # 字段名用 JSON 数组编码而不是逗号拼接：规格允许字段名含任意字符（见
+    # specgen 的字段名校验），``",".join`` 会让 ``["a,b", "c"]`` 编码成
+    # ``a,b,c``，读回时无法区分是 2 个字段还是 3 个（缺陷池 BL-01）。
+    # JSON 数组是自定界的，任何字段名都能无损往返。
     parts = [f"id={object_id}"]
     if fields:
-        parts.append("fields=" + ",".join(str(f) for f in fields))
+        parts.append("fields=" + json.dumps([str(f) for f in fields], ensure_ascii=False))
     detail = " ".join(parts)
 
     try:
