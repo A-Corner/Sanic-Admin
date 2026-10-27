@@ -232,6 +232,14 @@ class DefaultConfig:
     # 此列表时，限流才采信 X-Forwarded-For（从右往左取第一个非可信地址）；
     # 默认为空 = 恒用直连对端，XFF 可被客户端任意伪造，不可作为限流维度
     # （EVT-20261023-007-REVIEW F1）。
+    #
+    # 部署在 nginx / 负载均衡之后时，必须把它设成**代理自己的地址**
+    # （如 "127.0.0.1" 或 "10.0.0.0/8"）。设错方向有两个后果：
+    # - 漏配（保持空）：所有登录共用代理的 IP，一个人输错口令会把整个出口
+    #   锁住 15 分钟；XFF 里的真实 IP 被完全忽略。
+    # - 多配（写成 0.0.0.0/0）：任何客户端都能伪造 XFF 绕过限流，
+    #   等于关掉该防护。
+    # 因此默认值必须保持空（只信 socket 直连），由部署方显式打开。
     TRUSTED_PROXIES = ""
 
     # 邮件配置
@@ -377,6 +385,9 @@ def get_config(name: Optional[str] = None):
     cfg.MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", cfg.MAIL_DEFAULT_SENDER)
     cfg.ENABLE_API_DOCS = _bool_env("ENABLE_API_DOCS", cfg.ENABLE_API_DOCS)
     cfg.REQUIRE_TWO_FACTOR = _bool_env("REQUIRE_TWO_FACTOR", cfg.REQUIRE_TWO_FACTOR)
+    # 反向代理白名单：默认空（只信 socket 直连）。部署在代理后时必须显式配置，
+    # 否则限流会把所有用户算成同一个来源。见类定义处的注释。
+    cfg.TRUSTED_PROXIES = os.getenv("TRUSTED_PROXIES", cfg.TRUSTED_PROXIES)
     origins = os.getenv("CORS_ALLOWED_ORIGINS")
     if origins:
         cfg.CORS_ALLOWED_ORIGINS = [o.strip() for o in origins.split(",") if o.strip()]

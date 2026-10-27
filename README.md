@@ -386,6 +386,7 @@ The handful that matter most:
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` / `REDIS_PASSWORD` | Redis connection settings. |
 | `HOST` / `PORT` | Listen address and port. Defaults to `127.0.0.1` and `22222`. |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allow-list. Production defaults to empty (no cross-origin access). |
+| `TRUSTED_PROXIES` | Comma-separated IPs / CIDR blocks of your reverse proxy. **Empty by default.** Login rate limiting only trusts `X-Forwarded-For` when the direct peer is on this list. See [Deploying › behind a reverse proxy](#behind-a-reverse-proxy-rate-limiting). |
 
 ---
 
@@ -422,6 +423,34 @@ python main.py
 ```
 
 The secrets are the two that gate startup — `JWT_PRIVATE_KEY` and `INITIAL_ADMIN_PASSWORD`. `SECRET_KEY` and `PASSWORD_SALT` are accepted but currently unused.
+
+### Behind a reverse proxy: rate limiting
+
+Login rate limiting counts failures along two dimensions: the submitted account and the **client IP**. The client IP is taken from the socket peer, and only falls back to `X-Forwarded-For` when that peer is listed in `TRUSTED_PROXIES`.
+
+**If you run behind nginx / a load balancer and leave `TRUSTED_PROXIES` empty, every user looks like the proxy.** One person mistyping their password then locks the shared bucket for the whole 15-minute window — and the real client IP in `X-Forwarded-For` is ignored entirely.
+
+```nginx
+# nginx
+location / {
+    proxy_pass http://127.0.0.1:22222;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Host $host;
+}
+```
+
+```bash
+# the address nginx connects FROM (the proxy's own address, not the client's)
+export TRUSTED_PROXIES='127.0.0.1'      # nginx on the same host
+export TRUSTED_PROXIES='10.0.0.0/8'     # a private network of proxies
+export TRUSTED_PROXIES='10.0.0.1,10.0.0.0/8'   # comma-separated, IPs and CIDR mixed
+```
+
+With the gate open, the leftmost-untrusted entry of `X-Forwarded-For` is used, walking the chain from right to left and skipping trusted hops.
+
+**The default is empty on purpose, in every environment.** Setting it to `0.0.0.0/0` would trust `X-Forwarded-For` from anyone — which lets any client send a fresh fake IP per request and bypass the IP dimension of the limiter entirely. Configure the narrowest range that covers your proxies.
+
+The account dimension is unaffected by this setting: it always counts per submitted account, so the limiter still works with the default empty value.
 
 ---
 
