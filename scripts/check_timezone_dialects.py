@@ -76,7 +76,7 @@ async def _run(dialect: str, url: str) -> int:
                 "default_connection": "default",
             }},
         },
-        use_tz=True,
+        use_tz=False,  # [负向验证临时改动]
         timezone="UTC",
     )
     conn = Tortoise.get_connection("default")
