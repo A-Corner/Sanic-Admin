@@ -7,6 +7,50 @@
 
 <!-- 下一版变更写在这里。 -->
 
+## [0.4.2] — 2026-10-27
+
+MCP 写入路径接入项目 RBAC，并给生成资源补上 CRUD 审计日志。
+
+**含 breaking（行为变更）**：仅用 `--allow-write` 启动**不再足以**使用写入工具，
+还需会话 token 且账户拥有 `spec:write` 权限。升级步骤见
+[docs/release/v0.4.2-release-notes.md](docs/release/v0.4.2-release-notes.md)。
+
+### Added
+
+- **`GET /auth/whoami`**（#27）——返回当前会话的 `account_id` 与合并权限，供 MCP 侧
+  判定 `spec:write`。走现有鉴权链：2FA 未完成的会话被拒绝；`must_change_password=True`
+  的账户同样被拒绝；返回字段最小化（不含邮箱/用户名）；每次调用写审计。
+- **`spec:write` 权限点**（#27）——注册进 `ALL_PERMISSIONS`，`is_admin` 默认拥有，
+  普通角色需显式授予。`spec` 同时被 `specgen` 列为资源名保留字。
+- **MCP 写入工具的身份校验**（#27）——token 经环境变量 `SANIC_ADMIN_MCP_TOKEN` 传入
+  （沿用会话 JWT，不新增长期 API token）；回调默认只允许本机回环，拒绝 userinfo /
+  query / fragment；非回环须显式设 `SANIC_ADMIN_MCP_ALLOW_REMOTE=1` 且强制 https；
+  超时 5s；禁止跟随重定向、禁止走代理；任何失败一律拒绝（fail-closed）。
+- **生成资源 CRUD 审计日志**（#35）——生成器为每个资源的 `POST`/`PUT`/`DELETE`
+  自动写审计，在业务写入**成功之后**记录。记 actor / resource / action / id / IP /
+  **变更字段名**，**字段值一律不记**（值进日志等于绕过脱敏）。`operation_type`
+  存资源名，与认证审计的 `auth` 命名空间分离。软删与硬删两条路径都覆盖。
+- **`use_tz` 可观测性测试**（#36）——补上能真正观测到 `use_tz` 开关的断言；
+  v0.4.1 的负向验证因未进入目标路径而未取得结论，本版补齐。
+
+### Changed
+
+- **写入工具要求 `spec:write`（breaking）**（#27）——三个写入工具每次调用实时校验身份
+  与权限，不缓存；校验发生在任何副作用之前（失败时不建 clone、不建分支）。
+  `--allow-write` 与 token 是 **AND** 关系：前者是部署意图，后者是调用方资格。
+- **「全权限角色」判定排除 `spec`**（#27）——否则存量自建全权限角色会因缺少 `spec` 键
+  失去受保护管理员身份（提权路径）。
+
+### Fixed
+
+- **审计写入失败不阻断业务**（#35）——审计是旁路，失败只记 warning，业务请求仍成功、
+  数据已落库。依赖审计做合规的部署需监控 `app.services.audit` 的 warning。
+
+### Docs
+
+- [AGENTS.md](AGENTS.md) §3.6 补充「断言『A 不含 B』的失效陷阱」（#37）——短串可能与
+  合法内容撞车，导致断言恒真或恒假；必要时改用正向精确断言。
+
 ## [0.4.1] — 2026-10-27
 
 时区契约显式化。**含一处 breaking**：API 输出时间字段的格式从空格分隔改为
