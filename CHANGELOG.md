@@ -35,6 +35,18 @@ ISO 8601 的 `T` 分隔。
 
 - 新增 [docs/timezone.md](docs/timezone.md)：时间字段的存储、输入、输出约定。
 
+### Verification
+
+发布树 `c08bd21` 实测（工作区干净）：
+
+```
+$ nice -n 10 .venv/bin/pytest -q -p no:cacheprovider
+671 passed, 59 warnings in 190.86s (0:03:10)     # exit 0
+```
+
+Python 3.12.11 + pytest 8.4.2，**单进程**（未安装 pytest-xdist）。耗时随机器负载
+波动（同命令空闲时 162.96s），条数稳定；CI 同树 16 项全通过。
+
 ### Known limitations
 
 - **`use_tz` 负向验证：结论不可得。** 本次负向用例（`use_tz=False`）**未进入目标
