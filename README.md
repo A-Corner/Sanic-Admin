@@ -481,12 +481,6 @@ The admin console, served by the backend itself at `http://127.0.0.1:22222/amis/
 
 ![AMIS account list](docs/images/amis-account-list.png)
 
-<!--
-The `Readme_image*.png` files in the repository root are screenshots of the
-2023 interface. They do not show v0.2.0 and are deliberately not referenced
-here. Remove them once the new screenshots are in place.
--->
-
 ---
 
 ## Contributing
