@@ -7,7 +7,7 @@
 
 <!-- 下一版变更写在这里。 -->
 
-## [0.4.1] — 2026-10-24
+## [0.4.1] — 2026-10-27
 
 时区契约显式化。**含一处 breaking**：API 输出时间字段的格式从空格分隔改为
 ISO 8601 的 `T` 分隔。
@@ -34,6 +34,21 @@ ISO 8601 的 `T` 分隔。
 ### Docs
 
 - 新增 [docs/timezone.md](docs/timezone.md)：时间字段的存储、输入、输出约定。
+
+### Known limitations
+
+- **`use_tz` 的负向验证未取得结论（非阻塞）。** 原计划在 CI 的 `migrations-dialects`
+  job 上把 `use_tz` 改为 `False` 跑一次，验证「去掉该配置后 MySQL 的时区断言会失败」。
+  实测 **GitHub 未对该临时分支触发任何 workflow**（`check-runs total=0`，
+  `gh run list --branch tmp/tz-negative` 全程为空；即使把 draft PR 改成 ready 也没有），
+  因此**未取得 MySQL / PostgreSQL 上的原始结论**。临时 PR 已关闭、分支已删除。
+  影响面：`use_tz=True/False` 在 SQLite 上行为相同（Tortoise 0.20 的归一逻辑与它无关），
+  本机测试无法区分二者；该配置的价值在于防将来升级 ORM 或换方言时行为漂移。
+- **AMIS 仅验证当前主题**（`sdk.css` / `cxd` 系列）。切换到 ang/antd/dark 需从
+  npm 包补回对应 CSS。
+- **MCP 提案归属标记只证明「分支由本工具创建且未被改动」**，不证明内容经过审核。
+- **临时目录清理只覆盖本工具自己的产物**（`sanic-specgen-*` 前缀 + 标记文件），
+  用户手工 `git worktree` 留下的目录不在范围内。
 
 ## 时区约定（摘要）
 
