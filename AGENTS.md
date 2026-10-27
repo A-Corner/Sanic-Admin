@@ -714,6 +714,20 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 
 类型前缀实测出现过：`fix` / `feat` / `build` / `docs` / `chore` / `refactor` / `test` / `merge`。
 
+### 4.6 临时产物与报告：不得写入仓库
+
+**完成定义里必须包含「清理临时产物」这一条。**
+
+| 类别 | 放哪 | 保留 |
+|---|---|---|
+| 测试/构建报告、日志、测量输出 | 项目外的持久目录（如 `$PROJECT_WORKSPACE/reports/YYYY-MM/`） | 30 天 |
+| 浏览器自动化输出（`.playwright-mcp/` 等） | 同上，或直接丢弃 | — |
+| venv / `node_modules` / 编译产物 | 项目外的 lane 目录（见 §4.4 与构建纪律） | 按需 |
+
+- **不得写入仓库内**：报告、日志、截图、临时数据库都会污染 diff，且来不及在提交前发现。
+- 已加入 `.gitignore` 的目录（如 `.playwright-mcp/`）不代表可以随便生成——**仍应指向仓库外**。
+- 提交前自查：`git status --porcelain` 的未跟踪项里不应出现产物类文件。
+
 ---
 
 ## 4b. 改密（`POST /auth/change-password`）的对外语义
