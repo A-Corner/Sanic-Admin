@@ -430,7 +430,7 @@ cp /tmp/xxx.bak tools/xxx.py          # 恢复
    证明**开关本身有效**，只是原脚本测不到；
 3. **看原始存储值，不看 ORM 读回**：读回经 `to_python_value()` 会被归一，掩盖差异。
 
-**结论的正确写法是「现有验证路径不覆盖 X」，不是「X 已验证有效」，也不是「X 无效」。
+**结论的正确写法是「现有验证路径不覆盖 X」，不是「X 已验证有效」，也不是「X 无效」。**
 
 #### 写判据本身也要做破坏实验
 
@@ -481,7 +481,9 @@ $ find <起点> -maxdepth <足够深度> -name '<目标名>'
 具体做法：
 
 - **判绿**（CI 状态）：`[.check_runs[]|select(.status=="completed" and .conclusion!="success")]|length`
-  ——`status=="completed"` 必须先成立，否则 `null` 会被算成失败
+  ——`status=="completed"` 必须先成立，否则 `null` 会被算成失败。
+  **自测这条需要在 CI 运行中**（此时未完成的 job `conclusion` 才是 `null`）；
+  CI 全绿时新旧判据都得 0，看不出差别——这不是判据无效，是样本条件不满足
 - **判红**（只认明确失败态）：`[.check_runs[]|select(.status=="completed" and (.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out"))]|length`
 - **判等**（SHA）：用 `git rev-parse "${sha}^{commit}"` 逐字比对，**不要用 `--is-ancestor`**
 - **报「零命中」前**：先拿一个已知存在的路径试自己的搜索命令
