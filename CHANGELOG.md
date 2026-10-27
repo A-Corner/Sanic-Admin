@@ -7,7 +7,7 @@
 
 <!-- 下一版变更写在这里。 -->
 
-## [0.4.1] — 2026-10-24
+## [0.4.1] — 2026-10-27
 
 时区契约显式化。**含一处 breaking**：API 输出时间字段的格式从空格分隔改为
 ISO 8601 的 `T` 分隔。
@@ -18,7 +18,7 @@ ISO 8601 的 `T` 分隔。
   `updated_at` / `expires` 等字段此前输出 `2026-10-24 12:55:31+00:00`
   （**空格**分隔），现在输出 `2026-10-24T12:55:31+00:00`（**T** 分隔）。
   客户端若按空格切分解析会失败，需改用 `datetime.fromisoformat()` 或等价解析。
-  涉及 11 个模型/资源文件的 21 处序列化点。
+  涉及 12 个文件（11 个模型/资源 + 1 个生成器模板）的 23 处序列化点。
 - **时区配置显式化**：`Tortoise.init` 与 aerich 配置显式声明
   `use_tz=True, timezone="UTC"`。此前依赖 Tortoise 默认值（实测默认行为恰好
   相同），这是把隐含依赖变成显式契约，避免升级 ORM 时行为漂移。
@@ -34,6 +34,21 @@ ISO 8601 的 `T` 分隔。
 ### Docs
 
 - 新增 [docs/timezone.md](docs/timezone.md)：时间字段的存储、输入、输出约定。
+
+### Known limitations
+
+- **`use_tz` 负向验证：结论不可得。** 本次负向用例（`use_tz=False`）**未进入目标
+  路径**——`check_timezone_dialects.py` 走 `Model.create()` → `to_python_value()` 的
+  **无条件** `make_aware`，不读 `use_tz`，因此该用例即使在真实 MySQL 8 / PostgreSQL 16
+  上全绿（PR #32，`028ec39`），也不构成对 `use_tz` 的验证。**v0.4.1 不宣称时区行为
+  已完整验证。** 已知 `auto_now` / `auto_now_add` 在 `use_tz=False` 下写本地偏移
+  （`Asia/Shanghai` 存 `+08:00`，`True` 存 `+00:00`）；补测排入 v0.4.2。临时验证 PR
+  与分支已关闭删除。
+- **AMIS 仅验证当前主题**（`sdk.css` / `cxd` 系列）。切换到 ang/antd/dark 需从
+  npm 包补回对应 CSS。
+- **MCP 提案归属标记只证明「分支由本工具创建且未被改动」**，不证明内容经过审核。
+- **临时目录清理只覆盖本工具自己的产物**（`sanic-specgen-*` 前缀 + 标记文件），
+  用户手工 `git worktree` 留下的目录不在范围内。
 
 ## 时区约定（摘要）
 
