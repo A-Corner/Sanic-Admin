@@ -666,8 +666,17 @@ def test_fetch_whoami_treats_http_protocol_errors_as_unavailable(monkeypatch, to
 
 
 def test_guard_rejects_query_and_fragment():
-    """低修 b：回调 URL 不允许携带 query 或 fragment。"""
-    with pytest.raises(IdentityError):
-        _guard_api_url("http://127.0.0.1:22222/?from=elsewhere")
-    with pytest.raises(IdentityError):
-        _guard_api_url("http://127.0.0.1:22222/#anchor")
+    """
+    低修 b：回调 URL 不允许携带 query 或 fragment。
+
+    断言**具体拒绝理由**，不只是「抛了 IdentityError」：同类型异常可能来自
+    别的校验分支（如 URL 形态检查先抛），那时这条测试会假绿。
+    """
+    for bad in (
+        "http://127.0.0.1:22222/?from=elsewhere",
+        "http://127.0.0.1:22222/#anchor",
+    ):
+        with pytest.raises(IdentityError) as exc_info:
+            _guard_api_url(bad)
+        assert exc_info.value.reason == "identity_not_configured", bad
+        assert "query 或 fragment" in str(exc_info.value), bad
