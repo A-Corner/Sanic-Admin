@@ -186,8 +186,8 @@ def format_setting(setting: SystemSetting) -> Dict[str, Any]:
         "description": setting.description,
         "category": setting.category,
         "is_public": setting.is_public,
-        "created_at": str(setting.created_at),
-        "updated_at": str(setting.updated_at),
+        "created_at": setting.created_at.isoformat(),
+        "updated_at": setting.updated_at.isoformat(),
     }
 
 

@@ -31,10 +31,10 @@ class Customer(BaseModel):
             "email": self.email,
             "status": self.status,
             "notes": self.notes,
-            "birthday": self.birthday,
-            "onboarded_at": self.onboarded_at,
-            "created_at": str(self.created_at),
-            "updated_at": str(self.updated_at),
+            "birthday": self.birthday.isoformat() if self.birthday else None,
+            "onboarded_at": self.onboarded_at.isoformat() if self.onboarded_at else None,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
         }
 
     def validate(self) -> None:

@@ -89,11 +89,11 @@ class Session(BaseModel):
         """
         return {
             "id": self.id,
-            "created_at": str(self.created_at),
-            "updated_at": str(self.updated_at),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
             "ip": self.ip,
             "user_agent": self.user_agent,
-            "expires": str(self.expires) if self.expires else None,
+            "expires": self.expires.isoformat() if self.expires else None,
             "disabled": self.disabled,
             "bearer_id": self.bearer_id,
         }

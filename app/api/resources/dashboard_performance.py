@@ -94,7 +94,7 @@ class PerformanceResource(HTTPMethodView):
         }
         
         return {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utcnow().isoformat(),
             "platform": platform.platform(),
             "cpu": {
                 "percent": cpu_percent,
@@ -540,7 +540,7 @@ class AlertsResource(HTTPMethodView):
                 "message": f"CPU使用率过高: {cpu_percent}%",
                 "current_value": cpu_percent,
                 "threshold": self.CPU_WARNING_THRESHOLD,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": utcnow().isoformat()
             })
         
         # 检测内存使用率
@@ -553,7 +553,7 @@ class AlertsResource(HTTPMethodView):
                 "message": f"内存使用率过高: {memory.percent}%",
                 "current_value": memory.percent,
                 "threshold": self.MEMORY_WARNING_THRESHOLD,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": utcnow().isoformat()
             })
         
         # 检测磁盘使用率
@@ -566,7 +566,7 @@ class AlertsResource(HTTPMethodView):
                 "message": f"磁盘空间不足: {disk.percent}%",
                 "current_value": disk.percent,
                 "threshold": self.DISK_WARNING_THRESHOLD,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": utcnow().isoformat()
             })
         
         # 检测系统负载
@@ -584,7 +584,7 @@ class AlertsResource(HTTPMethodView):
                     "message": f"系统负载过高: {load_avg} (CPU核心数: {cpu_count})",
                     "current_value": load_avg,
                     "threshold": load_threshold,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": utcnow().isoformat()
                 })
         except:
             # 在不支持的平台上忽略
@@ -646,7 +646,7 @@ class AlertsResource(HTTPMethodView):
                         "message": f"API端点响应时间过长: {endpoint_key}, 平均: {avg_time:.2f}秒",
                         "current_value": avg_time,
                         "threshold": self.RESPONSE_TIME_WARNING_THRESHOLD,
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": utcnow().isoformat(),
                         "details": {
                             "resource_type": data["resource_type"],
                             "operation": data["operation"],
@@ -694,7 +694,7 @@ class AlertsResource(HTTPMethodView):
                 "message": f"系统总体错误率过高: {error_rate:.2%}",
                 "current_value": error_rate,
                 "threshold": self.ERROR_RATE_WARNING_THRESHOLD,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": utcnow().isoformat(),
                 "details": {
                     "error_count": error_count,
                     "total_count": total_count
@@ -731,7 +731,7 @@ class AlertsResource(HTTPMethodView):
                     "message": f"资源 {resource_type} 错误率过高: {resource_error_rate:.2%}",
                     "current_value": resource_error_rate,
                     "threshold": self.ERROR_RATE_WARNING_THRESHOLD,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": utcnow().isoformat(),
                     "details": {
                         "error_count": resource_error_count,
                         "total_count": resource_total_count

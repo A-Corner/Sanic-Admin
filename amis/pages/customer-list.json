@@ -133,7 +133,8 @@
                   "required": false,
                   "type": "input-datetime",
                   "format": "YYYY-MM-DD HH:mm:ss",
-                  "valueFormat": "YYYY-MM-DD HH:mm:ss"
+                  "utc": true,
+                  "valueFormat": "YYYY-MM-DDTHH:mm:ssZ"
                 }
               ]
             }
@@ -241,7 +242,8 @@
               "required": false,
               "type": "input-datetime",
               "format": "YYYY-MM-DD HH:mm:ss",
-              "valueFormat": "YYYY-MM-DD HH:mm:ss"
+              "utc": true,
+              "valueFormat": "YYYY-MM-DDTHH:mm:ssZ"
             }
           ]
         }

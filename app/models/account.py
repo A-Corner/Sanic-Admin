@@ -71,8 +71,8 @@ class Account(BaseModel):
         """
         return {
             "id": self.id,
-            "created_at": str(self.created_at),
-            "updated_at": str(self.updated_at),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
             "email": self.email,
             "username": self.username,
             "phone": self.phone,
