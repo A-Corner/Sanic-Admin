@@ -99,6 +99,7 @@ python -m tools.specgen check      # OK: 生成物与规格一致
 
 - **认证与会话**：注册 / 验证 / 登录 / 登出 / 会话关联、图形验证码、两步验证流程；RS256 签名的 JWT 会话，同时通过 `HttpOnly` Cookie 和 `Authorization` 响应头下发。真实路由前缀为 `/auth`、`/capt`、`/roles`、`/account`（`app/auth/routes.py:27-31`）。
 - **鉴权加固（v0.3.4）**：认证路径写入操作日志（登录成功/失败、登出、改密、2FA，不含口令与 token）；改密需校验当前口令并限速（达阈值 429）；新口令强度与拒绝清单校验，**收敛到 `Account.set_password()`，注册与管理员建账户同样受约束**；改密成功后**当前会话一并作废并轮换**（`token_rotated: true`，breaking）。
+- **资源审计（v0.4.2）**：生成资源的 `POST`/`PUT`/`DELETE` 成功后自动写 `OperationLog`——记操作者、资源名、动作、对象 id、IP 与**变更字段名（不记值）**；审计写失败只记 warning，**不影响主请求**。见 [docs/specgen.md](docs/specgen.md#操作审计v042-起自动生成)。
 - **强制改密（v0.3.2）**：由 `INITIAL_ADMIN_PASSWORD` 创建的管理员首次登录必须改密，未完成前其余 API 返回 `403 PASSWORD_CHANGE_REQUIRED`。
 - **RBAC 权限**：角色模型携带 `{资源: [操作]}` 权限表；提供权限检查、角色检查、角色分配与回收；`is_admin` 账户拥有全部权限。
 - **管理 API**：账户、角色、个人资料、系统设置、操作日志、文件上传、仪表盘、缓存、只读 SQL 分析。这些是**类式 CRUD 资源**（继承 `app/api/base.py` 的 `CRUDResource`），不是独立的 `@bp.route` 蓝图装饰器。

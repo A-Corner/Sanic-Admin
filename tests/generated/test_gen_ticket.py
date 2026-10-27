@@ -9,6 +9,7 @@ from app.models import Customer, Ticket
 
 
 URL = '/api/v1/tickets'
+RES = 'ticket'  # 审计日志的 operation_type（与资源模块的 RESOURCE 同值）
 
 
 async def test_requires_authentication(client):
@@ -173,6 +174,63 @@ async def test_crud_roundtrip(client, auth_headers):
     assert deleted.status_code == 200
     assert (await client.get(f"{URL}/{obj_id}", headers=auth_headers)).status_code == 404
 
+
+
+async def test_crud_writes_audit_log(client, auth_headers):
+    """create / update / delete 各写一条审计；update 只记字段名，不记字段值。"""
+    from app.models import OperationLog
+
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
+    payload = {'title': 'title-sample', 'due_date': '2024-01-10', 'customer_id': customer_1.id}
+    created = await client.post(URL, headers=auth_headers, json=payload)
+    assert created.status_code == 201, created.text[:300]
+    obj_id = created.json()["data"]["id"]
+
+    created_logs = await OperationLog.filter(
+        operation_type=RES, operation='create', detail__contains=f'id={obj_id}'
+    )
+    assert len(created_logs) == 1, '创建未写审计日志'
+    created_log = created_logs[0]
+    assert created_log.account_id is not None, '审计未记录操作者'
+    assert created_log.ip_address, '审计未记录 IP'
+
+    changed = {'status': 'in_progress'}
+    updated = await client.put(f"{URL}/{obj_id}", headers=auth_headers, json=changed)
+    assert updated.status_code == 200, updated.text[:300]
+    update_logs = await OperationLog.filter(
+        operation_type=RES, operation='update', detail__contains=f'id={obj_id}'
+    )
+    assert len(update_logs) == 1, '更新未写审计日志'
+    update_log = update_logs[0]
+    assert 'status' in (update_log.detail or ''), '审计未记录变更字段名'
+    assert 'in_progress' not in (update_log.detail or ''), '审计泄露了字段值'
+
+    deleted = await client.delete(f"{URL}/{obj_id}", headers=auth_headers)
+    assert deleted.status_code == 200
+    delete_logs = await OperationLog.filter(
+        operation_type=RES, operation='delete', detail__contains=f'id={obj_id}'
+    )
+    assert len(delete_logs) == 1, '删除未写审计日志'
+
+
+async def test_audit_write_failure_does_not_break_create(client, auth_headers, monkeypatch):
+    """审计写入抛异常时创建仍须成功——审计是旁路，不能拖垮主请求。
+
+    注意：这里 patch 的是 ``OperationLog.create``，**不是** ``record_resource_event``。
+    后者被整体替换掉的话，本用例就绕过了被测的 try/except，变成假测试
+    （2026-10-27 破坏实验证实：换掉整个函数时，即使把 except 收窄成
+    ``except ZeroDivisionError`` 也不会变红）。
+    """
+    from app.models import OperationLog
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError('模拟审计写入失败')
+
+    monkeypatch.setattr(OperationLog, 'create', _boom)
+    customer_1 = await Customer.create(**{'name': 'name-sample', 'email': 'sample@example.com', 'notes': 'sample text', 'birthday': '2024-01-10', 'onboarded_at': '2024-01-10T08:00:00'})
+    payload = {'title': 'title-sample', 'due_date': '2024-01-10', 'customer_id': customer_1.id}
+    response = await client.post(URL, headers=auth_headers, json=payload)
+    assert response.status_code == 201, response.text[:300]
 
 async def test_create_rejects_empty_payload(client, auth_headers):
     """缺必填字段 -> 400。"""

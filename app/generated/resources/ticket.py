@@ -27,6 +27,7 @@ from app.api.validators import (
 )
 from app.auth.authorization import has_permission, requires_permission
 from app.models import Customer, Ticket
+from app.services.audit import record_resource_event
 
 RESOURCE = 'ticket'
 LABEL = '工单'
@@ -144,6 +145,14 @@ class TicketResource(HTTPMethodView):
             return _error("字段值已存在", APIError.CONFLICT, 409)
         except ValidationError as exc:
             return _error(f"参数验证失败：{exc}", APIError.VALIDATION_ERROR, 400)
+        await record_resource_event(
+            request,
+            resource=RESOURCE,
+            action="create",
+            object_id=obj.id,
+            account=request.ctx.authentication_session.bearer,
+            fields=sorted(payload),
+        )
         return APIResponse.created(
             data=ticket_info(obj), message=f"创建{LABEL}成功", location=f"/api/v1/tickets/{obj.id}"
         )
@@ -172,6 +181,14 @@ class TicketResource(HTTPMethodView):
             await obj.save()
         except IntegrityError:
             return _error("字段值已存在", APIError.CONFLICT, 409)
+        await record_resource_event(
+            request,
+            resource=RESOURCE,
+            action="update",
+            object_id=ticket_id,
+            account=request.ctx.authentication_session.bearer,
+            fields=sorted(payload),
+        )
         return APIResponse.success(data=ticket_info(obj), message=f"{LABEL}更新成功")
 
     @requires_permission("ticket:delete")
@@ -184,6 +201,13 @@ class TicketResource(HTTPMethodView):
                 return _error(f"存在关联的{child_label}，无法删除{LABEL}", APIError.CONFLICT, 409)
         obj.deleted = True
         await obj.save(update_fields=["deleted"])
+        await record_resource_event(
+            request,
+            resource=RESOURCE,
+            action="delete",
+            object_id=ticket_id,
+            account=request.ctx.authentication_session.bearer,
+        )
         return APIResponse.success(message=f"删除{LABEL}成功")
 
 
