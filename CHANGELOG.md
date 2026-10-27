@@ -37,13 +37,13 @@ ISO 8601 的 `T` 分隔。
 
 ### Known limitations
 
-- **`use_tz` 的负向验证未取得结论（非阻塞）。** 原计划在 CI 的 `migrations-dialects`
-  job 上把 `use_tz` 改为 `False` 跑一次，验证「去掉该配置后 MySQL 的时区断言会失败」。
-  实测 **GitHub 未对该临时分支触发任何 workflow**（`check-runs total=0`，
-  `gh run list --branch tmp/tz-negative` 全程为空；即使把 draft PR 改成 ready 也没有），
-  因此**未取得 MySQL / PostgreSQL 上的原始结论**。临时 PR 已关闭、分支已删除。
-  影响面：`use_tz=True/False` 在 SQLite 上行为相同（Tortoise 0.20 的归一逻辑与它无关），
-  本机测试无法区分二者；该配置的价值在于防将来升级 ORM 或换方言时行为漂移。
+- **`use_tz` 负向验证：结论不可得。** 本次负向用例（`use_tz=False`）**未进入目标
+  路径**——`check_timezone_dialects.py` 走 `Model.create()` → `to_python_value()` 的
+  **无条件** `make_aware`，不读 `use_tz`，因此该用例即使在真实 MySQL 8 / PostgreSQL 16
+  上全绿（PR #32，`028ec39`），也不构成对 `use_tz` 的验证。**v0.4.1 不宣称时区行为
+  已完整验证。** 已知 `auto_now` / `auto_now_add` 在 `use_tz=False` 下写本地偏移
+  （`Asia/Shanghai` 存 `+08:00`，`True` 存 `+00:00`）；补测排入 v0.4.2。临时验证 PR
+  与分支已关闭删除。
 - **AMIS 仅验证当前主题**（`sdk.css` / `cxd` 系列）。切换到 ang/antd/dark 需从
   npm 包补回对应 CSS。
 - **MCP 提案归属标记只证明「分支由本工具创建且未被改动」**，不证明内容经过审核。
