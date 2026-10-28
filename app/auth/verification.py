@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-验证模块，提供账户验证、两步验证、图形验证码，以及基于令牌的账户激活/密码重置
+验证模块，提供账户验证、两步验证、图形验证码，以及基于令牌的密码重置
 
 两类机制：
 
 * 会话式（TwoStepSession / CaptchaSession）：验证码绑定在短期会话里，令牌经 Cookie / 请求头下发，
   供注册验证、登录二次验证、验证码使用。
-* 令牌式（VerificationToken）：一次性随机令牌，供账户激活、密码重置（通过邮件等渠道投递）。
+* 令牌式（VerificationToken）：一次性随机令牌，供密码重置（通过邮件等渠道投递）。
 """
 
 import functools
@@ -143,7 +143,7 @@ async def generate_verification_token(account: Account, token_type: str, expiry_
 
     Args:
         account: 账户实例
-        token_type: 令牌类型，如 'activation', 'password_reset'
+        token_type: 令牌类型，目前生产使用的为 'password_reset'
         expiry_hours: 令牌过期时间（小时）
 
     Returns:
@@ -185,7 +185,7 @@ async def validate_token(token: str, token_type: str, *, consume: bool = False):
         TokenExpiredError: 令牌已过期
     """
     # password_reset 的令牌在库里存的是 sha256 哈希，查询前先转换。
-    # 其余类型（activation 等）仍是明文，保持既有行为不变。
+    # 其余类型仍是明文，保持既有行为不变。
     lookup = _hash_reset_token(token) if token_type == "password_reset" else token
 
     if consume:
@@ -211,27 +211,6 @@ async def validate_token(token: str, token_type: str, *, consume: bool = False):
         raise TokenExpiredError("验证令牌已过期")
 
     return verification_token
-
-
-async def activate_account(token: str):
-    """
-    激活（验证）账户
-
-    Raises:
-        TokenInvalidError / TokenExpiredError: 令牌无效或过期
-        VerificationError: 账户已验证
-    """
-    verification_token = await validate_token(token, "activation")
-    account = await verification_token.account.get()
-
-    if account.verified:
-        await verification_token.delete()
-        raise VerificationError("账户已验证")
-
-    account.verified = True
-    await account.save(update_fields=["verified"])
-    await verification_token.delete()
-    return account
 
 
 async def reset_password(token: str, new_password: str):
