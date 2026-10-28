@@ -117,7 +117,7 @@ proposal/<resource>-<timestamp>
 例：`proposal/ticket-20261024-193012`
 
 - 前缀 `proposal/` 是**硬性的命名约束**：`discard_proposal` 与 `list_proposals` 只操作这个前缀的分支
-- **归属不由前缀判定**，而由 ref 标记判定：`refs/specgen/proposals/<name>`（`git_isolation.py:590` `ref = proposal_ref(branch)`，`:596` `rev-parse --verify <ref>^{commit}`）。`discard_proposal` 要求「前缀 + 归属标记存在 + 标记 SHA 一致」三重条件同时成立，见 §9.1
+- **归属不由前缀判定**，而由 ref 标记判定：`refs/specgen/proposals/<name>`（`git_isolation.py:594` `ref = proposal_ref(branch)`，`:596` `rev-parse --verify <ref>^{commit}`）。`discard_proposal` 要求「前缀 + 归属标记存在 + 标记 SHA 一致」三重条件同时成立，见 §9.1
 - `resource` 已经过白名单校验（`^[a-z][a-z0-9_]*$`），不含 `/`、`..`、`-` 开头
 - timestamp 由服务端生成，不接受调用方提供——避免并发覆盖
 
