@@ -16,6 +16,8 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
         -- 幂等防呆：amount 已非 DOUBLE（库已按新模型建过，如 CI --existing 分支）
         -- 时等值搬运，不错误 ×100。
         RENAME TABLE `orders` TO `orders_old`;
+        -- FK 约束名在 MySQL 是 schema 级唯一：RENAME 后 orders_old 仍占用原名（1826 实测），
+        --   新表必须换名；upgrade/downgrade 各用不同后缀避免互相冲突
         CREATE TABLE IF NOT EXISTS `orders` (
     `id` INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
     `created_at` DATETIME(6) NOT NULL  COMMENT '创建时间' DEFAULT CURRENT_TIMESTAMP(6),
@@ -26,8 +28,6 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     `quantity` INT NOT NULL  COMMENT '数量' DEFAULT 1,
     `status` VARCHAR(16) NOT NULL  COMMENT '状态' DEFAULT 'pending',
     `customer_id` INT NOT NULL,
-    -- FK 约束名在 MySQL 是 schema 级唯一：RENAME 后 orders_old 仍占用原名（1826 实测），
-    --   新表必须换名；upgrade/downgrade 各用不同后缀避免互相冲突
     CONSTRAINT `fk_orders_customer_spec005up` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE RESTRICT
 ) CHARACTER SET utf8mb4 COMMENT='订单。客户订单';
         INSERT INTO `orders` (`id`, `created_at`, `updated_at`, `deleted`, `title`, `amount`, `quantity`, `status`, `customer_id`)
