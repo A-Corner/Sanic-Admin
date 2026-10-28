@@ -95,7 +95,7 @@
             "label": "订单列表",
             "url": "/order/list",
             "icon": "fa fa-list",
-            "schemaApi": "get:pages/order-list.json?v=9c9f9cf67fc5"
+            "schemaApi": "get:pages/order-list.json?v=f4b6ab414cd1"
           }
         ],
         "x-specgen": "order"
