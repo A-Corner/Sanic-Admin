@@ -97,7 +97,7 @@ python -m tools.specgen check      # OK: 生成物与规格一致
 
 ## 特性
 
-- **认证与会话**：注册 / 验证 / 登录 / 登出 / 会话关联、图形验证码、两步验证流程；RS256 签名的 JWT 会话，同时通过 `HttpOnly` Cookie 和 `Authorization` 响应头下发。真实路由前缀为 `/auth`、`/capt`、`/roles`、`/account`（`app/auth/routes.py:27-31`）。
+- **认证与会话**：注册 / 验证 / 登录 / 登出 / 会话关联、图形验证码、两步验证流程；RS256 签名的 JWT 会话，同时通过 `HttpOnly` Cookie 和 `Authorization` 响应头下发。真实路由前缀为 `/auth`、`/capt`、`/two-step`、`/roles`、`/account`（见 `app/auth/routes.py:40-44` 的 `Blueprint(...)` 定义）。
 - **鉴权加固（v0.3.4）**：认证路径写入操作日志（登录成功/失败、登出、改密、2FA，不含口令与 token）；改密需校验当前口令并限速（达阈值 429）；新口令强度与拒绝清单校验，**收敛到 `Account.set_password()`，注册与管理员建账户同样受约束**；改密成功后**当前会话一并作废并轮换**（`token_rotated: true`，breaking）。
 - **资源审计（v0.4.2）**：生成资源的 `POST`/`PUT`/`DELETE` 成功后自动写 `OperationLog`——记操作者、资源名、动作、对象 id、IP 与**变更字段名（不记值）**；审计写失败只记 warning，**不影响主请求**。见 [docs/specgen.md](docs/specgen.md#操作审计v042-起自动生成)。
 - **强制改密（v0.3.2）**：由 `INITIAL_ADMIN_PASSWORD` 创建的管理员首次登录必须改密，未完成前其余 API 返回 `403 PASSWORD_CHANGE_REQUIRED`。
@@ -107,7 +107,7 @@ python -m tools.specgen check      # OK: 生成物与规格一致
 - **安全基线**：生产环境缺少必需密钥时 **fail-closed**（直接退出，rc=1）；仓库内无密钥；SQL 分析只接受单条 `SELECT`/`WITH`；上传文件使用生成的文件名，不使用原始文件名拼路径。
 - **API 文档**：OpenAPI 3.0 生成器与 `@api_tags` / `@api_summary` / `@api_response` 等装饰器，由 `ENABLE_API_DOCS` 控制（开发环境开、生产环境关）。实测 `/swagger` 302 跳转后 200、`/redoc` 200、`/swagger.json` 200 且规范含 66 条 path（详见英文版 README）。
 
-**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.3.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；**生产环境下自助注册的账户无法完成验证、因而无法登录**——注册得到的账户为 `verified=False`，登录时被 `UnverifiedError` 拒绝；完成验证需向 `POST /auth/verify` 提交两步验证码，而该验证码**只在 `DEBUG` 时进入响应体**，全仓也没有任何链路把它送到注册者手上（唯一的 `await deliver(` 属于密码重置路径），且 `verified` 不在账户 API 白名单内、管理员同样无法经 API 置位，结果是注册者永远拿不到验证码、账户停在未验证状态，能登录的只有初始管理员；这是**已知的未完成能力，不是缺陷**，与顶部「尚不可用于生产环境」的声明一致，部署者若要开放自助注册，必须自行接入投递渠道（实现 `app/services/delivery.py` 的 `Backend` 抽象）**并**确保账户 `verified` 被置位，或自行决定关闭自助注册；测试覆盖率 68% 仍不足；登录页缺独立的 login-CSRF token（`TRUSTED_PROXIES` 已支持环境变量接线，见 `app/config.py`）。v0.2.x 遗留的 value 长度与请求体上限问题已在 v0.3.0 修复（value ≤ 8192、`REQUEST_MAX_SIZE` 16MB 真实生效）。
+**已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.3.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；**生产环境下自助注册的账户无法完成验证、因而无法登录**——注册得到的账户为 `verified=False`，登录时被 `UnverifiedError` 拒绝；完成验证需向 `POST /auth/verify` 提交两步验证码，而该验证码**只在 `DEBUG` 时进入响应体**，全仓也没有任何链路把它送到注册者手上（唯一的 `await deliver(` 属于密码重置路径），且 `verified` 不在账户 API 白名单内、管理员同样无法经 API 置位，结果是注册者永远拿不到验证码、账户停在未验证状态，能登录的只有初始管理员；这是**已知的未完成能力，不是缺陷**，与顶部「尚不可用于生产环境」的声明一致，部署者若要开放自助注册，必须自行接入投递渠道（实现 `app/services/delivery.py` 的 `Backend` 抽象）**并**确保账户 `verified` 被置位，或自行决定关闭自助注册；测试覆盖率 52% 仍不足（见下方「当前测试状态」）；登录页缺独立的 login-CSRF token（`TRUSTED_PROXIES` 已支持环境变量接线，见 `app/config.py`）。v0.2.x 遗留的 value 长度与请求体上限问题已在 v0.3.0 修复（value ≤ 8192、`REQUEST_MAX_SIZE` 16MB 真实生效）。
 
 ---
 
