@@ -416,6 +416,106 @@ def test_diff_just_under_limit_is_returned_whole(repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# diff 上限之外的第二个闸：commits 条数上限
+#
+# 起因（PR #55 审核，清单外低危）：diff 闸只封 ``diff`` 字段，``commits`` 是另一个
+# 独立字段。空提交不产生任何 diff，因此能让 commits 无上限增长而完全不触发 diff 闸。
+# ---------------------------------------------------------------------------
+
+
+def _add_empty_commits(repo: Path, branch: str, base: str, n: int) -> None:
+    """
+    在 ``branch`` 上追加 ``n`` 条**空提交**（树与 ``base`` 完全相同）。
+
+    为什么用 ``fast-import`` 而不是循环 ``git commit``：500 次 commit 约 16 秒，
+    两条用例就要 30 秒以上，会把整个测试文件拖慢一个数量级。``fast-import``
+    同样走 git 自己的对象库与提交链，0.2 秒内完成，产物与 ``--allow-empty``
+    逐字段一致（``git log --format`` 输出格式相同，树不变、diff 为空）。
+
+    ``from`` 必须写在第一条 ``commit`` 的 ``data`` **之后**——fast-import 的
+    ``from`` 是「相对当前 commit 的状态」而非全局指令，放在最前面会被拒
+    （实测：``Unsupported command: from``）。
+    """
+    if n <= 0:
+        return
+    script = []
+    for i in range(n):
+        msg = f"empty {i}"
+        script.append(f"commit refs/heads/{branch}")
+        script.append(f"committer t <t@x.invalid> {1800000000 + i} +0000")
+        script.append(f"data {len(msg)}")
+        script.append(msg)
+        if i == 0:
+            script.append(f"from {base}")
+    subprocess.run(
+        ["git", "update-ref", f"refs/heads/{branch}", base],
+        cwd=str(repo), capture_output=True, text=True, check=True, env=_clean_env(),
+    )
+    subprocess.run(
+        ["git", "fast-import", "--quiet"],
+        cwd=str(repo), input="\n".join(script) + "\n",
+        capture_output=True, text=True, check=True, env=_clean_env(),
+    )
+
+
+def test_too_many_commits_is_rejected_not_truncated(repo: Path) -> None:
+    """
+    提交条数超过 ``MAX_PROPOSAL_COMMITS``：抛 ``GitNotAllowed``，含实际条数与上限。
+
+    失败场景（审核实测形态）：向带归属标记的分支推 5 万个**空提交**——diff 为空、
+    diff 闸不触发，``commits`` 数组却几 MB 原样进 JSON 响应。
+
+    **破坏实验**：删掉 ``if commit_count > MAX_PROPOSAL_COMMITS`` 那段，本用例红。
+    """
+    proposed = _propose(repo)
+    # 提案分支已含 1 条提交，再补到「上限 + 1」条
+    _add_empty_commits(
+        repo, proposed["branch"], proposed["commit"], gi.MAX_PROPOSAL_COMMITS
+    )
+
+    with pytest.raises(gi.GitNotAllowed) as exc_info:
+        gi.describe_proposal(repo, proposed["branch"])
+    msg = str(exc_info.value)
+    assert "过大" in msg, f"拒绝理由不对：{msg}"
+    # 告诉调用方实际条数与上限，二者都必须出现
+    assert str(gi.MAX_PROPOSAL_COMMITS) in msg, f"没告诉调用方上限是多少：{msg}"
+    assert str(gi.MAX_PROPOSAL_COMMITS + 1) in msg, f"没告诉实际条数：{msg}"
+    assert "truncated" not in msg.lower(), "不能以「截断后照常返回」的方式通过"
+    # 不能泄露内部 git 命令
+    _assert_no_git_command_leak(msg)
+
+
+def test_commits_at_limit_are_returned_whole(repo: Path) -> None:
+    """
+    正向对照：恰好等于上限的提案必须**完整**返回全部提交。
+
+    没有这条，「超限报错」可能来自一个把上限写成 0（或 ``>=`` 写反）的实现——
+    那样所有提案都报错，超限用例照样绿。
+    """
+    proposed = _propose(repo)
+    # 提案分支原有 1 条，补到恰好 MAX_PROPOSAL_COMMITS 条
+    _add_empty_commits(
+        repo, proposed["branch"], proposed["commit"], gi.MAX_PROPOSAL_COMMITS - 1
+    )
+
+    result = gi.describe_proposal(repo, proposed["branch"])
+
+    assert len(result["commits"]) == gi.MAX_PROPOSAL_COMMITS, (
+        f"应返回 {gi.MAX_PROPOSAL_COMMITS} 条提交，实际 {len(result['commits'])} 条"
+    )
+    # 场景前提：补的那些空提交**不产生任何 diff**——这正是 commits 需要独立闸门
+    # 的原因（diff 闸看不见它们）。这里只应看到提案自己那一条提交改的 demo.yaml。
+    changed = [
+        ln for ln in result["diff"].splitlines()
+        if ln.startswith("diff --git ")
+    ]
+    assert changed == ["diff --git a/specs/demo.yaml b/specs/demo.yaml"], (
+        f"空提交不应产生 diff，实际改动文件：{changed}"
+    )
+    assert result["commits"][0]["subject"], "提交条目不能被截断成空壳"
+
+
+# ---------------------------------------------------------------------------
 # 中危 4：files[].status 对非 ASCII 与重命名路径必须判对
 # ---------------------------------------------------------------------------
 

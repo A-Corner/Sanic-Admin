@@ -74,6 +74,22 @@ DEFAULT_BASE_REF = "master"
 #: 超限**报错而不是截断**：静默截断会让审核人以为看到了全部改动。
 MAX_PROPOSAL_DIFF_BYTES = 4 * MAX_SPEC_TEXT_BYTES
 
+#: 单次 ``describe_proposal`` 返回的提交条数上限。
+#:
+#: 为什么 diff 的上限不够：那道上限只封 ``diff`` 字段，而 ``commits`` 是**另一个**
+#: 无上限的字段。归属标记不校验 SHA，任何人都能在带标记的分支上推大量提交——
+#: 每一条都进 ``commits`` 数组、原样进 JSON 响应，一个字节的 diff 都不用产生
+#: （空提交，``--allow-empty``）。审核实测的形态：5 万个空提交 → diff 为空、
+#: 闸不触发、响应却是几 MB 的 commits 数组。
+#:
+#: 为什么取 500：``propose_spec_change`` 一次提交一条提案，人工迭代的正常提案
+#: 远达不到这个量级；500 条已远超任何真实提案的提交数，同时把 ``commits``
+#: 元数据的 JSON 体积封在几百 KB 内（与 diff 闸同一量级）。
+#:
+#: 超限**报错而不是截断**：只返回前 N 条会让读者以为提案只有这些提交——与 diff
+#: 截断是同一类误导，处置方式保持一致。
+MAX_PROPOSAL_COMMITS = 500
+
 #: 提案提交使用的工具身份。
 #:
 #: 为什么必须显式指定：``_git`` 会设 ``GIT_CONFIG_GLOBAL=/dev/null`` 与
@@ -760,7 +776,8 @@ def describe_proposal(repo_root: Path, branch: str, *, base_ref: str = DEFAULT_B
 
     Raises:
         GitNotAllowed: 前缀/形态不合法、分支不存在、无归属标记、基线不可达、
-            diff 超过 :data:`MAX_PROPOSAL_DIFF_BYTES`
+            diff 超过 :data:`MAX_PROPOSAL_DIFF_BYTES`、提交条数超过
+            :data:`MAX_PROPOSAL_COMMITS`
     """
     repo_root = repo_root.resolve()
     _check_proposal_ownership(repo_root, branch, action="描述")
@@ -800,10 +817,21 @@ def describe_proposal(repo_root: Path, branch: str, *, base_ref: str = DEFAULT_B
             ["log", "--format=%H%x1f%an%x1f%aI%x1f%s", f"{base}..{head}"],
             cwd=clone_dir,
         ).strip()
+
+        # 提交条数闸：上面的 diff 闸只封 ``diff`` 字段，``commits`` 是另一个
+        # 独立字段——空提交（``--allow-empty``）不产生任何 diff，能让 commits
+        # 无上限增长而完全不触发 diff 闸。超限同样**报错而不是截断**。
+        commit_lines = [line for line in commits_out.split("\n") if line.strip()]
+        commit_count = len(commit_lines)
+        if commit_count > MAX_PROPOSAL_COMMITS:
+            raise GitNotAllowed(
+                f"提案过大：{commit_count} 条提交，超过上限 "
+                f"{MAX_PROPOSAL_COMMITS} 条。本工具不返回被截断的内容——"
+                "请缩小提案，或由人在本地用 git log 查看完整提交列表。"
+            )
+
         commits = []
-        for line in commits_out.split("\n"):
-            if not line.strip():
-                continue
+        for line in commit_lines:
             sha, author, iso, subject = line.split("\x1f", 3)
             commits.append(
                 {"sha": sha, "author": author, "date": iso, "subject": subject}
