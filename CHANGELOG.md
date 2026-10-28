@@ -7,6 +7,51 @@
 
 <!-- 下一版变更写在这里。 -->
 
+## [0.4.3] — 待发布
+
+没有新功能、无破坏性变更，是自 v0.4.2 以来的提交归集，代码行为只变了一处
+（审计日志 `detail` 编码），其余是文档、测试与仓库卫生。
+
+**无 breaking。**
+
+### Fixed
+
+- **审计日志 `detail` 的字段名改用 JSON 数组编码**（#44，`56c2cbb`，BL-01）——
+  此前 `",".join(fields)` 拼在 `fields=` 之后，字段名含逗号时无法无损还原；
+  改为 `json.dumps([...], ensure_ascii=False)`，`detail` 仍只记字段名、不记字段值。
+  附 `tests/test_audit_detail_encoding.py`（含反向对照：证明旧编码确实有歧义）。
+- **pre-push 测试补齐进程组 kill**（#48，`5e4144b`，BL-11）——PR #30 只合入了读空 stdin
+  那一半，`start_new_session=True` + `os.killpg` 整组杀未合入；本版在
+  `tests/test_mcp_write_path.py` 新增 `_run_git_push_isolated()`，超时分支整组杀掉
+  派生进程，不再留孤儿。
+
+### Changed
+
+- **文档陈述与实现不符的纠正（第一批）**（`eb38d9b`、`aebe72a`/PR #49、`809e940`）——
+  CSRF 实为全局 request 中间件（`app/middleware/__init__.py:59`），对非 GET 请求默认生效，
+  README / `docs/architecture.md` / `docs/configuration.md` 此前的「未启用」说法已改；
+  `docs/release/v0.4.2-release-notes.md` 的 `discard_proposal` 判定补为三重条件。
+  只改文档，不改代码。
+- **文档陈述与实现不符的纠正（第二批）**（#51/`994fc3c`、#52/`67d781a`、#53/`aa409a5`）——
+  涉及 `README.md`、`README_cn.md`、`AGENTS.md`、`docs/mcp*.md`、
+  `docs/architecture.md`、`docs/configuration.md`、`docs/migrations.md`。只改文档。
+- **仓库卫生**（`5b12fd5`、`cb82c5a`、`f606ed1`、`490fac8`、`7a2b8de`）——删除 8 个零引用的
+  孤儿截图 `Readme_image*`；`.gitignore` 补 `.playwright-mcp/` 与 `.ruff_cache/`；
+  新增 `scripts/run_tests_safe.sh`，前置条件不满足即 `exit 2` 且测试不启动，
+  使 pytest 临时产物落在仓库外。
+- **`AGENTS.md` 判据纪律**（`14c40a8`、`2c2631d`、`7da6d40`、`fcce493`、`1c5a0b1`）——
+  补写判据自测、报告数字的纪律、五层递进与「报缺口前先查现状」、观察点必须是
+  「破坏时一定会变」的那个。协作者指南，不影响运行时行为。
+
+### Environment
+
+- **运行测试需要 `sanic-routing>=23.12.0`**。低于该版本时，Sanic 会把「方法不允许」
+  静默转换为 `404 NotFound`，使断言「这里应返回 404」的测试**假绿**。
+  `requirements.txt` 已固定 `sanic-routing==23.12.0`；用旧环境（如 `sanic-ext 23.6.0`
+  携带的 venv）验证测试结果不可信。
+
+详见 [docs/release/v0.4.3-release-notes.md](docs/release/v0.4.3-release-notes.md)。
+
 ## [0.4.2] — 2026-10-27
 
 MCP 写入路径接入项目 RBAC，并给生成资源补上 CRUD 审计日志。
