@@ -29,6 +29,7 @@ from app.api.responses import APIError
 from app.auth.authorization import check_permissions
 from app.cache import get_cache
 from app.cache.decorators import clear_route_cache
+from app.services.audit import record_resource_event
 
 #: 缓存键列表分页上限
 MAX_LIMIT = 1000
@@ -126,9 +127,44 @@ class CacheResource(HTTPMethodView):
 
     @check_permissions("system", "admin")
     async def delete(self, request: Request):
-        """清理缓存（``type=route`` 只清路由缓存，``type=all`` 清全部）。"""
+        """
+        清理缓存。**必须显式指定 ``type``**，没有默认行为。
+
+        ``type`` 的三个合法值：
+
+        =========== ============================================== ==========
+        type        行为                                           写审计
+        =========== ============================================== ==========
+        ``route``   只清路由缓存（``pattern`` 生效）               否
+        ``pattern`` 按 ``pattern`` 删除匹配的键                     否
+        ``all``     全量清空（**破坏性**）                          **是**
+        =========== ============================================== ==========
+
+        为什么取消默认值（EVT-20261028-041）
+        ===================================
+        此前 ``type`` 默认 ``"all"`` —— 一个**不带参数的 DELETE 就会清空整个缓存**。
+        实测：``DELETE /api/v1/cache`` 不带任何 query 直接全清。
+
+        这与 HTTP 语义相悖（DELETE 通常针对**指定资源**），且**审计后置**：
+        全量清空是三个分支里唯一不可逆的，却是唯一有默认值的。
+
+        改为必填后，误操作需要显式写 ``?type=all`` —— 从「默认危险」变成
+        「显式危险」。
+
+        为什么只有 ``all`` 写审计
+        =========================
+        ``route`` 与 ``pattern`` 都是**定范围**的删除，删掉的东西可由 pattern
+        重建；``all`` 是**无范围**的，事后无法知道删了什么。所以只在 ``all``
+        留一条「谁在什么时候清了整个缓存」。
+        """
+        cache_type = request.args.get("type")
+        if cache_type not in ("route", "pattern", "all"):
+            return _bad_request(
+                "必须显式指定 type 参数，可选值：route（只清路由缓存）/ "
+                "pattern（按 pattern 删除匹配键）/ all（全量清空，会写审计）"
+            )
+
         pattern = request.args.get("pattern", "*")
-        cache_type = request.args.get("type", "all")
 
         try:
             if cache_type == "route":
@@ -145,6 +181,28 @@ class CacheResource(HTTPMethodView):
                     message = f"已清除 {count} 个缓存键"
         except Exception:
             return _server_error("清理缓存失败")
+
+        if cache_type == "all":
+            # 审计是旁路：record_resource_event 永不抛出（audit.py:144），
+            # 所以这里不需要 try/except，也不该因为它影响主请求的结果。
+            #
+            # object_id 用 "all"：record_resource_event 的契约是「被操作记录的 id」
+            # （audit.py:139），而全量清空没有单一对象。用 "all" 作显式标记，
+            # 让 detail 读作 "id=all"，配合 resource=cache / action=delete
+            # 语义通顺。
+            #
+            # 这是对契约的拉伸，不是完美契合 —— 见 PR 描述里的 NOTE。
+            await record_resource_event(
+                request,
+                resource="cache",
+                action="delete",
+                object_id="all",
+                account=getattr(
+                    getattr(request.ctx, "authentication_session", None),
+                    "bearer",
+                    None,
+                ),
+            )
 
         return APIResponse.success(message=message)
 
