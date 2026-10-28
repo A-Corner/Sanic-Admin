@@ -153,6 +153,50 @@ echo "总数=$TOTAL 命中=$HIT $([ "$TOTAL" = "$HIT" ] && echo OK || echo 不�
 
 ### 2.2 安装后端依赖（实测通过）
 
+> **关于下文所有 `.venv/bin/...` 命令**
+>
+> 本文档统一用 `.venv` 表示「你为本项目创建的 Python 虚拟环境」，**不约定它放在哪里**。
+> 它可以建在仓库根（`.venv/`，见本节末尾，已被 `.gitignore` 忽略），也可以建在项目外的
+> lane 目录——后者是多人 / 多分支并行时的推荐做法（见 §4.6）。
+>
+> **唯一硬性要求**：该 venv 的依赖版本必须与 `requirements.txt` 的一致。
+> **版本不符的环境会让测试结论不可信**——`sanic-ext 23.6.0` 带的老 `sanic-routing`
+> 会把 405 变成 404，使该红的地方假绿，详见本节下文
+> 「不要用 `sanic-ext 23.6.0` 的环境验证测试结果」。
+>
+> **下文所有 `.venv/bin/xxx` 都应替换成你自己 venv 的路径。**
+
+校验方法（在仓库根执行，**用你自己的 venv 的 python**）：
+
+```bash
+<你的 venv>/bin/python -c "
+from importlib.metadata import version, PackageNotFoundError
+import re
+want = dict(re.findall(r'^([A-Za-z0-9_.-]+)==(\S+)', open('requirements.txt').read(), re.M))
+assert want, 'requirements.txt 里没有任何 == 钉版，无法校验'
+bad = []
+for k, exp in want.items():
+    try: got = version(k)
+    except PackageNotFoundError: got = '未安装'
+    if got != exp: bad.append((k, exp, got))
+if bad:
+    print('不符:', bad)
+    raise SystemExit(1)
+print('不符: 无')
+"
+```
+
+元组含义：`(包名, 期望版本, 实际版本或「未安装」)`
+
+输出 `不符: 无` 才可用。三种结果的含义：
+
+- `不符: 无` —— 全部匹配
+- `('sanic', '25.12.1', '未安装')` —— 该包没装
+- `('sanic', '25.12.1', '25.11.0')` —— 装了但版本不对
+
+> 直接运行，不要接管道 —— 否则退出码是管道的，不是脚本的。
+> 退出码：0 = 全部匹配，1 = 有包未安装或版本不符，或 requirements 无钉版。
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
@@ -191,8 +235,18 @@ python3 -m venv .venv
 
 启动后**必须 kill 进程**（含 Sanic 派生的 worker 子进程），否则端口 22222 会被占：
 ```bash
-pkill -f "m23-d/.venv/bin/python main.py"   # 按自己的 worktree 路径调整
+# 查占用 22222 的进程（无输出 = 端口未被占用，属正常）
+lsof -ti:22222
+# 确认是自己的 worktree 后，按 PID 停
+kill <PID>
 ```
+
+> **为什么不用 `pkill -f "<你的 venv>/bin/python main.py"`**：`pkill -f` 匹配整个命令行、
+> 不做归属判断，会连带杀掉别人的 lane 进程；而 `ps | grep '[m]ain.py'` 的方括号技巧
+> 在 `bash -c '...'` 里会匹配到 shell 自己，读者按第一个 PID kill 会杀掉自己的终端。
+> `lsof -ti:22222` 换了个维度：不问「哪个进程命令行像这个」，问「**谁占着我要的端口**」
+> —— 而本节要解决的问题正是「端口 22222 被占」，端口才是真判据。
+> `lsof` 在端口未占用时**无输出且 exit=1**，这是正常结果，不是命令失败。
 
 ### 2.4 冒烟检查（实测通过）
 
@@ -924,7 +978,7 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 |---|---|---|
 | 测试/构建报告、日志、测量输出 | 项目外的持久目录（如 `$PROJECT_WORKSPACE/reports/YYYY-MM/`） | 30 天 |
 | 浏览器自动化输出（`.playwright-mcp/` 等） | 同上，或直接丢弃 | — |
-| venv / `node_modules` / 编译产物 | 项目外的 lane 目录（见 §4.4 与构建纪律） | 按需 |
+| venv / `node_modules` / 编译产物 | 项目外的 lane 目录 | 按需 |
 
 - **不得写入仓库内**：报告、日志、截图、临时数据库都会污染 diff，且来不及在提交前发现。
 - 已加入 `.gitignore` 的目录（如 `.playwright-mcp/`）不代表可以随便生成——**仍应指向仓库外**。
@@ -1359,7 +1413,7 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 9. **提交前自检**：
    ```bash
    .venv/bin/ruff check .          # 期望 All checks passed!
-   .venv/bin/pytest --collect-only -q   # 期望数字与 §3.2 一致或更好
+   .venv/bin/pytest --collect-only -q   # 记下数字，改动前后对比（见 §0.1）
    git status --short              # 期望只有你有意改动的文件
    ```
 10. **清理临时产物**：venv、`node_modules`、`package-lock.json`（未被跟踪）、
