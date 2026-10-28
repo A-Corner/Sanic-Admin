@@ -313,6 +313,9 @@ python main.py
 | [docs/release/v0.3.2-release-notes.md](docs/release/v0.3.2-release-notes.md) | v0.3.2：首登强制改密、2FA 修复；**从 v0.3.1 及更早升级需跑迁移** |
 | [docs/release/v0.3.3-release-notes.md](docs/release/v0.3.3-release-notes.md) | v0.3.3：控制台角色弹窗热修、E2E 门禁修复、新增 `amis-e2e` CI |
 | [docs/release/v0.3.4-release-notes.md](docs/release/v0.3.4-release-notes.md) | v0.3.4：鉴权加固——审计日志、改密限速、口令强度、会话轮换（含两处 breaking） |
+| [docs/release/v0.4.0-release-notes.md](docs/release/v0.4.0-release-notes.md) | v0.4.0：规格即代码——一份 YAML 生成模型、CRUD API、AMIS 页面与三方言迁移；生产环境要求 `aerich` 账本（breaking） |
+| [docs/release/v0.4.1-release-notes.md](docs/release/v0.4.1-release-notes.md) | v0.4.1：时间字段改 ISO 8601、AMIS 升级 6.13.0、`discard_proposal` 归属校验（含一处 breaking） |
+| [docs/release/v0.4.2-release-notes.md](docs/release/v0.4.2-release-notes.md) | v0.4.2：账户级 `spec:write`、`GET /auth/whoami`、生成资源 CRUD 审计日志（含一处 breaking） |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南与 PR 流程 |
 | [SECURITY.md](SECURITY.md) | 安全漏洞私下报告渠道 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |

@@ -458,6 +458,9 @@ gate is not optional.
 | [docs/release/v0.3.2-release-notes.md](docs/release/v0.3.2-release-notes.md) | v0.3.2: forced password change on first login, 2FA fix, **migration required from v0.3.1 and earlier** |
 | [docs/release/v0.3.3-release-notes.md](docs/release/v0.3.3-release-notes.md) | v0.3.3: console role-dialog hotfix, E2E gate repair, `amis-e2e` CI job |
 | [docs/release/v0.3.4-release-notes.md](docs/release/v0.3.4-release-notes.md) | v0.3.4: authentication hardening — audit log, rate limiting, password strength, session rotation (two breaking changes) |
+| [docs/release/v0.4.0-release-notes.md](docs/release/v0.4.0-release-notes.md) | v0.4.0: spec generator — one YAML to models, CRUD API, AMIS page and three-dialect migrations; production now requires an `aerich` ledger (breaking) |
+| [docs/release/v0.4.1-release-notes.md](docs/release/v0.4.1-release-notes.md) | v0.4.1: ISO 8601 time fields, AMIS 6.13.0, ownership check for `discard_proposal` (one breaking change) |
+| [docs/release/v0.4.2-release-notes.md](docs/release/v0.4.2-release-notes.md) | v0.4.2: account-level `spec:write`, `GET /auth/whoami`, CRUD audit log for generated resources (one breaking change) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, branch and PR workflow, code style |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability privately |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 |
