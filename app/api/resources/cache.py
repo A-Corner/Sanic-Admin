@@ -29,7 +29,7 @@ from app.api.responses import APIError
 from app.auth.authorization import check_permissions
 from app.cache import get_cache
 from app.cache.decorators import clear_route_cache
-from app.services.audit import record_resource_event
+from app.services.audit import record_resource_event, validate_audit_object_id
 
 #: 缓存键列表分页上限
 MAX_LIMIT = 1000
@@ -220,18 +220,28 @@ class CacheResource(HTTPMethodView):
         # PR 描述里不要把它列为「修了空 pattern」。
         if not pattern:
             return _bad_request("pattern 不能为空；要清空全部请用 type=all（会写审计）")
+
+        # ``\r`` / ``\n`` / ``\t`` 是**本调用方**的额外约束，不属于审计函数的
+        # 通用要求 —— 它们不破坏 detail 解析（``split(" ", 1)`` 只认 ASCII 空格），
+        # 但会破坏**下游日志系统**（按行收集时 ``\n`` 把一条审计拆成两行）。
+        # 所以这一层留在调用方，见 `validate_audit_object_id` 的 docstring。
         for _ch, _name in (
-            (" ", "空格"),
             ("\r", "回车"),
             ("\n", "换行"),
             ("\t", "制表符"),
         ):
             if _ch in pattern:
                 return _bad_request(
-                    f"pattern 不能包含{_name}（会破坏审计记录结构或下游日志按行解析）"
+                    f"pattern 不能包含{_name}（会破坏下游日志系统的按行解析）"
                 )
-        if "fields=" in pattern:
-            return _bad_request("pattern 不能包含 'fields=' 子串（会伪造审计记录中的字段名）")
+
+        # 空格与 ``fields=`` 由审计模块的共享校验负责（EVT-20261028-043）——
+        # 那两条是**所有用字符串作 object_id 的调用方**都必须满足的，
+        # 不是本端点特有的。转成 400 而不是让它冒成 500。
+        try:
+            validate_audit_object_id(pattern, field_name="pattern")
+        except ValueError as exc:
+            return _bad_request(str(exc))
 
         # object_id 的取值按分支填，让 detail 能读出删除范围：
         #   type=all     -> id=all

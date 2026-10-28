@@ -87,6 +87,41 @@ def parse_detail(detail):
 - 其他 → 旧格式（逗号拼接），用 `split(",")`
 - 没有 `fields=` → 该记录没有字段名信息
 
+## `object_id` 的格式约束
+
+> **`object_id` 不得包含空格或 `fields=` 子串。**
+
+原因：`object_id` 被裸拼进 `detail` 的 `id=` 段
+（`app/services/audit.py` 的 `parts = [f"id={object_id}"]`），而 `detail` 是
+**空格分隔的 `key=value` 格式** —— 本页的 `parse_detail` 按两处取值：
+
+```python
+object_id = detail[3:].split(" ", 1)[0]      # 按空格截断
+idx = detail.find("fields=")                 # 按子串定位
+```
+
+所以含空格会**截断 id 段**，含 `fields=` 会**伪造 fields 段**（后者更隐蔽：
+id 段看起来正常，整条记录格式合法）。
+
+**这个约束由调用方保证** —— 用 `app/services/audit.py` 的
+`validate_audit_object_id()`：
+
+```python
+from app.services.audit import validate_audit_object_id
+
+try:
+    validate_audit_object_id(pattern, field_name="pattern")
+except ValueError as exc:
+    return _bad_request(str(exc))
+```
+
+**审计函数本身不校验** —— `record_resource_event` 的契约是「永不抛出」
+（审计是旁路，不能影响主请求）。所以校验属于调用方，不属于审计函数。
+
+> **注意**：制表符 / 换行**不在**这条通用约束里 —— 它们不破坏 `detail` 解析
+> （`split(" ", 1)` 只认 ASCII 空格）。拒绝它们是**下游日志系统**的要求
+> （按行收集时 `\n` 会伪造记录），属各调用方的额外约束。
+
 ## 迁移期注意事项
 
 1. **新旧记录共存。** v0.4.3 之前落库的记录仍是逗号格式，**本版不提供回填迁移**。

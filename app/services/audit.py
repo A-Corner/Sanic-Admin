@@ -117,6 +117,64 @@ async def record_auth_event(
 RESOURCE_ACTIONS = frozenset({"create", "update", "delete"})
 
 
+def validate_audit_object_id(value, field_name: str = "object_id") -> None:
+    """
+    校验 ``object_id`` 能否安全嵌入审计 ``detail``（EVT-20261028-043）。
+
+    ``detail`` 是**空格分隔的 key=value 格式**（本模块 ``record_resource_event``
+    拼装）：``parts = [f"id={object_id}"]; detail = " ".join(parts)``。
+    官方解析器（``docs/audit-log-format.md``）按 ``detail[3:].split(" ", 1)[0]``
+    取 id、按 ``detail.find("fields=")`` 取字段名。
+
+    两类内容会破坏它，且都能让操作者**伪造审计内容**：
+
+    1. **空格** → ``split(" ", 1)[0]`` 截断 id：
+         ``"a b"`` → ``id=a b`` → 解析出 ``id="a"``
+    2. **子串 "fields="** → ``find("fields=")`` 命中的是 object_id 里那个：
+         ``"fields=y"`` → ``id=fields=y`` → 解析出 ``fields=["y"]``
+       **这条更隐蔽**：id 段没被截断，整条记录看起来格式合法。
+
+    Args:
+        value: 待校验的值（任意类型，内部 ``str()`` 后检查）。
+        field_name: 出现在错误信息里的参数名，便于调用方定位。
+
+    Raises:
+        ValueError: 含空格或 ``fields=`` 子串。
+
+    为什么是 ``ValueError`` 而不是 ``AssertionError``
+    ================================================
+    这个函数是**给调用方主动调用**的 —— 调用方应当把它转成 400（客户端传了
+    非法参数），而不是让它冒成 500。断言适合「程序自身的 bug」，这里防的是
+    「外部输入」，语义上属于参数校验。
+
+    为什么 ``record_resource_event`` 内部不调用它
+    ============================================
+    那个函数的契约是「**永不抛出**」（审计是旁路，不能影响主请求）。
+    在它内部加校验会破坏这个契约 —— 而「环境分叉」（只在非生产校验）
+    同样不可靠：``__debug__`` 取决于解释器 ``-O`` 参数（本项目生产启动
+    是 ``CMD ["python", "main.py"]``，无 ``-O``，故 ``__debug__`` 恒 True），
+    模块级 ``config`` 又与应用实例配置可能不一致。
+
+    **所以约束放在调用方，本函数只提供可复用的实现。**
+
+    为什么 ``\\t`` / ``\\n`` 不在这里拒绝
+    ====================================
+    ``split(" ", 1)`` 只认 ASCII 空格，这两种字符**不破坏 detail 解析**。
+    拒绝它们是**下游日志系统**的要求（按行收集时 ``\\n`` 会伪造记录），
+    属调用方各自的额外约束 —— 例如 ``app/api/resources/cache.py`` 就同时
+    拒绝了它们。**两层约束不同，不能混。**
+    """
+    text = str(value)
+    if " " in text:
+        raise ValueError(
+            f"{field_name} 不能含空格（会截断审计 detail 的 id 段）：{text!r}"
+        )
+    if "fields=" in text:
+        raise ValueError(
+            f"{field_name} 不能含 'fields=' 子串（会伪造 detail 的 fields 段）：{text!r}"
+        )
+
+
 async def record_resource_event(
     request: Request,
     *,
