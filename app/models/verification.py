@@ -20,7 +20,7 @@ class VerificationToken(BaseModel):
     """
     account = fields.ForeignKeyField('models.Account', related_name='verification_tokens')
     token = fields.CharField(max_length=128, unique=True, description="验证令牌")
-    token_type = fields.CharField(max_length=32, description="令牌类型，如 'activation', 'password_reset', 'two_factor'")
+    token_type = fields.CharField(max_length=32, description="验证令牌的类型（当前仅使用 'password_reset'）")
     expires_at = fields.DatetimeField(description="过期时间")
     used = fields.BooleanField(default=False, description="是否已使用")
     _data = fields.TextField(null=True, description="附加数据，存储为JSON格式", source_field="data")
