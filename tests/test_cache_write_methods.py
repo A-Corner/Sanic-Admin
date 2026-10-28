@@ -43,16 +43,47 @@ from app.cache import get_cache
 # ----------------------------------------------------------------------
 # 405 兜底：未声明的方法
 # ----------------------------------------------------------------------
+#
+# 两个 URI 的 ``Allow`` 不同，**原因是它们声明的写方法不同**（实测值，非推断）：
+#   /api/v1/cache            ["GET", "DELETE"]        -> Allow=GET, HEAD, DELETE
+#   /api/v1/cache/keys/<key> ["GET", "PUT", "DELETE"] -> Allow=GET, HEAD, PUT, DELETE
+#
+# ``HEAD`` 来自 ``register_view`` 的自动回落（GET 存在时 HEAD 交给视图，
+# 见 route_methods.py:140-142），不是显式声明的。
 
+#: (URI 模板, 该 URI 上应出现在 Allow 里的方法, 该 URI 上不应出现的方法)
+_DECLARED_METHODS = [
+    pytest.param(
+        "/api/v1/cache",
+        ("GET", "HEAD", "DELETE"),
+        ("PATCH", "POST", "PUT"),
+        id="cache-overview",
+    ),
+    pytest.param(
+        "/api/v1/cache/keys/{key}",
+        ("GET", "HEAD", "PUT", "DELETE"),
+        ("PATCH", "POST"),
+        id="cache-single-key",
+    ),
+]
+
+
+@pytest.mark.parametrize("uri_template,expected_allow,absent", _DECLARED_METHODS)
 @pytest.mark.parametrize("method", ["PATCH", "POST"])
-async def test_undeclared_methods_still_405(client, auth_headers, method):
+async def test_undeclared_methods_still_405(
+    client, auth_headers, method, uri_template, expected_allow, absent
+):
     """
-    补注册后，未声明的方法必须仍是 405（不能变 500 或 404）。
+    补注册后，未声明的方法必须仍是 405（不能变 500 或 404），**两个 URI 都要覆盖**。
 
     这是本项最容易被破坏的不变量：``register_view`` 的兜底路由是「除
     ``implemented`` 之外的全部方法」，补注册改变了 ``implemented`` 的构成，
     兜底分支必须相应收窄。断言 ``Allow`` 头同时验证收窄是正确的，
     而不是「全部方法都被兜底吃掉」。
+
+    **为什么必须覆盖两个 URI**：本项 diff 同时改了 ``/cache`` 和
+    ``/cache/keys/<key>`` 的注册。只测前者的话，后者的兜底若算错（比如
+    误把 ``PUT`` 从 ``implemented`` 排除，导致 PUT 落到兜底），测试发现不了。
 
     **只测 PATCH / POST**：``route_methods.py:56`` 的 ``ALL_HTTP_METHODS``
     只含 ``GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS`` —— ``TRACE`` 不在其中，
@@ -60,19 +91,26 @@ async def test_undeclared_methods_still_405(client, auth_headers, method):
     断言 ``Allow`` 会在那种情况下失败。**测一个不归兜底管的方法，
     测的不是本项改动的行为。**
     """
-    resp = await client.request(method, "/api/v1/cache", headers=auth_headers)
-    assert resp.status_code == 405, (
-        f"{method} /api/v1/cache 应 405（未声明），实际 {resp.status_code}"
-    )
-    allow = resp.headers.get("allow", "")
-    for declared in ("GET", "DELETE"):
-        assert declared in allow, (
-            f"Allow 头应包含已声明的 {declared}，实际 {allow!r}"
+    cache = get_cache()
+    key = "rbac09b-405"
+    cache.set(key, "v", timeout=300)
+    try:
+        uri = uri_template.format(key=key) if "{key}" in uri_template else uri_template
+        resp = await client.request(method, uri, headers=auth_headers)
+        assert resp.status_code == 405, (
+            f"{method} {uri} 应 405（未声明），实际 {resp.status_code}"
         )
-    for undeclared in ("PATCH", "POST"):
-        assert undeclared not in allow, (
-            f"Allow 头不应包含未声明的 {undeclared}，实际 {allow!r}"
-        )
+        allow = resp.headers.get("allow", "")
+        for declared in expected_allow:
+            assert declared in allow, (
+                f"{method} {uri}: Allow 头应包含已声明的 {declared}，实际 {allow!r}"
+            )
+        for undeclared in absent:
+            assert undeclared not in allow, (
+                f"{method} {uri}: Allow 头不应包含未声明的 {undeclared}，实际 {allow!r}"
+            )
+    finally:
+        cache.delete(key)
 
 
 # ----------------------------------------------------------------------
@@ -175,7 +213,14 @@ async def test_put_missing_key_returns_404(client, auth_headers):
 @pytest.mark.parametrize(
     "method,url,body",
     [
-        ("delete", "/api/v1/cache", None),
+        # admin 半边用**非破坏性端点**：删单个键，不清空共享缓存。
+        #
+        # 原先第一条是 ("delete", "/api/v1/cache") —— 它会让 admin 半边真实执行
+        # 全量清空。虽然实测证明每个测试的 teardown 都会 cache.clear()
+        # （get_cache() 是进程内单例，app.ctx.cache 就是它），所以跨测试污染
+        # 在本套件里不会发生 —— 但那个结论依赖「teardown 一定跑到」，
+        # 而测试在 teardown 前崩溃时 teardown 不会跑。
+        # 用非破坏性端点后，这个依赖消失了。
         ("put", "/api/v1/cache/keys/rbac09-perm", {"timeout": 60}),
         ("delete", "/api/v1/cache/keys/rbac09-perm", None),
     ],
@@ -184,34 +229,40 @@ async def test_non_admin_gets_403(
     client, auth_headers, normal_auth_headers, method, url, body
 ):
     """
-    非 admin 调三个写方法都必须 403，**且同一请求 admin 拿到非 403**。
+    非 admin 调写方法必须 403，**且同一请求 admin 拿到非 403**。
 
     **为什么要成对断言**：只断言「普通用户 403」无法区分两种情况 ——
     ① 权限装饰器真的拦住了，② 请求根本没走到视图（比如路由没注册，
     被别的中间件拦下）。加上 admin 那半边才能排除 ②：如果 admin 也 403，
     说明是中间件在拦，不是权限点在拦。
+
+    **清理用 try/finally**：断言失败时要保证键被删掉，否则后续测试
+    可能看到残留的 ``rbac09-perm``（尤其当套件内其他测试也用这个名字时）。
     """
     cache = get_cache()
     cache.set("rbac09-perm", "v", timeout=300)
+    try:
+        kwargs = {"headers": normal_auth_headers}
+        if body is not None:
+            kwargs["json"] = body
+        resp_user = await getattr(client, method)(url, **kwargs)
+        assert resp_user.status_code == 403, (
+            f"普通用户 {method.upper()} {url} 应 403，"
+            f"实际 {resp_user.status_code}: {resp_user.text}"
+        )
 
-    kwargs = {"headers": normal_auth_headers}
-    if body is not None:
-        kwargs["json"] = body
-    resp_user = await getattr(client, method)(url, **kwargs)
-    assert resp_user.status_code == 403, (
-        f"普通用户 {method.upper()} {url} 应 403，实际 {resp_user.status_code}: {resp_user.text}"
-    )
-
-    kwargs = {"headers": auth_headers}
-    if body is not None:
-        kwargs["json"] = body
-    resp_admin = await getattr(client, method)(url, **kwargs)
-    assert resp_admin.status_code != 403, (
-        f"admin {method.upper()} {url} 不应 403（否则说明是中间件在拦，"
-        f"权限点没生效），实际 {resp_admin.status_code}"
-    )
-
-    cache.delete("rbac09-perm")
+        # admin 半边：请求前确保键存在（PUT 需要键存在才能 404 以外的结果）
+        cache.set("rbac09-perm", "v", timeout=300)
+        kwargs = {"headers": auth_headers}
+        if body is not None:
+            kwargs["json"] = body
+        resp_admin = await getattr(client, method)(url, **kwargs)
+        assert resp_admin.status_code != 403, (
+            f"admin {method.upper()} {url} 不应 403（否则说明是中间件在拦，"
+            f"权限点没生效），实际 {resp_admin.status_code}"
+        )
+    finally:
+        cache.delete("rbac09-perm")
 
 
 @pytest.mark.parametrize(
