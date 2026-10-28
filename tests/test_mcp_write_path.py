@@ -11,6 +11,7 @@ MCP 写入路径 git 隔离层的测试（M2 第二段）。
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -78,6 +79,43 @@ def user_repo(tmp_path: Path) -> Path:
     _run(repo, "add", "-A")
     _run(repo, "commit", "-q", "-m", "init")
     return repo
+
+
+def _run_git_push_isolated(cwd: Path, args: list, timeout: int = 30):
+    """
+    跑 `git push`，超时时**杀掉整个进程组**，不留孤儿。
+
+    为什么不能只用 ``subprocess.run(timeout=...)``：它超时只杀掉直接子进程
+    （`git push`），而 `git push` 会再拉起 `git-receive-pack`，后者又调用
+    pre-push hook。这两个孙进程不随父进程退出，变成 PPID=1 的孤儿继续等待
+    （实测：一次超时留下 4 个 `git-receive-pack` / `pre-push.real` 进程）。
+
+    做法：
+    - ``start_new_session=True`` 让子进程成为新会话/进程组的组长；
+    - 超时时 ``os.killpg(pgid, SIGKILL)`` 把整组一次干掉。
+
+    Returns:
+        ``(returncode, stdout, stderr)``
+    """
+    proc = subprocess.Popen(
+        ["git", *args],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # 整组一起杀：pgid == 子进程 pid（start_new_session 的效果）
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        raise
+    return proc.returncode, out, err
 
 
 # ---------------------------------------------------------------------------
@@ -229,16 +267,15 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
     assert current and current != "HEAD", "clone 处于分离 HEAD，无法推出有效分支"
 
     # 超时判**失败**：真挂起时必须报错，不能因为「没返回」而被当成「被 hook 拦截」。
+    # 用 _run_git_push_isolated 而不是 subprocess.run——后者超时只杀直接子进程，
+    # `git-receive-pack` 与 hook 这两个孙进程会变成孤儿继续等待（PR #30 遗漏的那半）。
     try:
-        proc = subprocess.run(
-            ["git", "push", "evil", current],
-            cwd=str(clone), capture_output=True, text=True, timeout=30,
-        )
+        rc, _out, err = _run_git_push_isolated(clone, ["push", "evil", current])
     except subprocess.TimeoutExpired:
         pytest.fail(
             "git push 30 秒未返回——hook 或管道死锁，不能判定为「被 hook 拦截」"
         )
-    assert proc.returncode != 0, f"pre-push hook 没拦住 push：{proc.stderr[:300]}"
+    assert rc != 0, f"pre-push hook 没拦住 push：{err[:300]}"
 
     # --- 核心证据：hook 确实被执行了（标记文件）---
     assert marker.exists() and marker.read_text().strip() == "ran", (
@@ -258,14 +295,13 @@ def test_pre_push_hook_blocks_even_with_remote(user_repo: Path, tmp_path: Path) 
     real_hook.chmod(0o755)
     marker.unlink()
     try:
-        ok_proc = subprocess.run(
-            ["git", "push", "evil", current],
-            cwd=str(clone), capture_output=True, text=True, timeout=30,
+        ok_rc, _ok_out, ok_err = _run_git_push_isolated(
+            clone, ["push", "evil", current]
         )
     except subprocess.TimeoutExpired:
         pytest.fail("反向对照的 git push 30 秒未返回——同样视为死锁，判失败")
-    assert ok_proc.returncode == 0, (
-        f"hook 放行后 push 应当成功，否则说明失败另有原因：{ok_proc.stderr[:300]}"
+    assert ok_rc == 0, (
+        f"hook 放行后 push 应当成功，否则说明失败另有原因：{ok_err[:300]}"
     )
     refs_after = subprocess.run(
         ["git", "--git-dir", str(bare), "for-each-ref"],
