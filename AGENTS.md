@@ -164,29 +164,38 @@ echo "总数=$TOTAL 命中=$HIT $([ "$TOTAL" = "$HIT" ] && echo OK || echo 不�
 > 会把 405 变成 404，使该红的地方假绿，详见本节下文
 > 「不要用 `sanic-ext 23.6.0` 的环境验证测试结果」。
 >
-> 校验方法（在仓库根执行，**用你自己的 venv 的 python**）：
->
-> ````bash
-> <你的 venv>/bin/python -c "
-> from importlib.metadata import version, PackageNotFoundError
-> import re
-> want = dict(re.findall(r'^([A-Za-z0-9_.-]+)==(\S+)', open('requirements.txt').read(), re.M))
-> assert want, 'requirements.txt 里没有任何 == 钉版，无法校验'
-> bad = []
-> for k, exp in want.items():
->     try: got = version(k)
->     except PackageNotFoundError: got = '未安装'
->     if got != exp: bad.append((k, exp, got))
-> print('不符:', bad or '无')
-> "
-> ````
->
-> 输出 `不符: 无` 才可用。三种结果的含义：
-> - `不符: 无` —— 全部匹配
-> - `('sanic', '25.12.1', '未安装')` —— 该包没装
-> - `('sanic', '25.12.1', '25.11.0')` —— 装了但版本不对
->
 > **下文所有 `.venv/bin/xxx` 都应替换成你自己 venv 的路径。**
+
+校验方法（在仓库根执行，**用你自己的 venv 的 python**）：
+
+```bash
+<你的 venv>/bin/python -c "
+from importlib.metadata import version, PackageNotFoundError
+import re
+want = dict(re.findall(r'^([A-Za-z0-9_.-]+)==(\S+)', open('requirements.txt').read(), re.M))
+assert want, 'requirements.txt 里没有任何 == 钉版，无法校验'
+bad = []
+for k, exp in want.items():
+    try: got = version(k)
+    except PackageNotFoundError: got = '未安装'
+    if got != exp: bad.append((k, exp, got))
+if bad:
+    print('不符:', bad)
+    raise SystemExit(1)
+print('不符: 无')
+"
+```
+
+元组含义：`(包名, 期望版本, 实际版本或「未安装」)`
+
+输出 `不符: 无` 才可用。三种结果的含义：
+
+- `不符: 无` —— 全部匹配
+- `('sanic', '25.12.1', '未安装')` —— 该包没装
+- `('sanic', '25.12.1', '25.11.0')` —— 装了但版本不对
+
+> 直接运行，不要接管道 —— 否则退出码是管道的，不是脚本的。
+> 退出码：0 = 全部匹配，1 = 有包未安装或版本不符，或 requirements 无钉版。
 
 ```bash
 python3 -m venv .venv
