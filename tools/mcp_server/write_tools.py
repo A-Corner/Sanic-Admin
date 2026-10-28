@@ -35,6 +35,7 @@ from tools.mcp_server.git_isolation import (
     PROPOSAL_PREFIX,
     GitNotAllowed,
     branch_exists,
+    describe_proposal,
     discard_proposal,
     list_proposal_branches,
     make_branch_name,
@@ -48,6 +49,7 @@ WRITE_TOOL_NAMES = frozenset(
         "propose_spec_change",
         "list_proposals",
         "discard_proposal",
+        "describe_proposal",
     }
 )
 
@@ -214,6 +216,40 @@ def list_proposals(*, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
     return items
 
 
+def describe_proposal_tool(
+    branch: str, *, base_ref: Optional[str] = None, repo_root: Optional[Path] = None
+) -> Dict[str, Any]:
+    """返回提案相对基线的完整 diff 与元数据。只读，但与其他三工具同级权限。"""
+    from tools.mcp_server import _repo_root
+    from tools.mcp_server.identity import IdentityError, require_spec_write
+
+    root = (repo_root or _repo_root()).resolve()
+    try:
+        account_id = require_spec_write()
+        result = describe_proposal(root, branch, base_ref=base_ref or DEFAULT_BASE_REF)
+    except IdentityError as exc:
+        _audit("describe_proposal", status="failure", detail={"branch": branch, "reason": exc.reason})
+        raise
+    except Exception as exc:
+        _audit(
+            "describe_proposal",
+            status="failure",
+            detail={"branch": branch, "reason": type(exc).__name__},
+        )
+        raise
+    _audit(
+        "describe_proposal",
+        status="success",
+        detail={
+            "branch": branch,
+            "account_id": account_id,
+            "files": len(result["files"]),
+            "commits": len(result["commits"]),
+        },
+    )
+    return result
+
+
 def discard_proposal_tool(branch: str, *, force: bool = False, repo_root: Optional[Path] = None) -> Dict[str, Any]:
     """删除提案分支。只允许 ``proposal/`` 前缀。"""
     from tools.mcp_server import _repo_root
@@ -263,6 +299,19 @@ def register_write_tools(server) -> None:
     @_mcp_tool
     def list_proposals_tool() -> List[Dict[str, Any]]:
         return list_proposals()
+
+    @server.tool(
+        name="describe_proposal",
+        description=(
+            "返回指定提案分支相对基线的完整 unified diff 与元数据（分支、基线、head、"
+            "提交列表、改动文件）。只读——不读工作区、不写任何东西；每次调用需有效会话"
+            "且账户拥有 spec:write 权限（与其他三个提案工具同级）。"
+        ),
+    )
+    @_mcp_tool
+    def describe_proposal_handler(branch: str, base_ref: str = "") -> Dict[str, Any]:
+        """branch 必须是本工具创建的 proposal/ 分支；base_ref 留空则用 master。"""
+        return describe_proposal_tool(branch, base_ref=base_ref or None)
 
     @server.tool(
         name="discard_proposal",

@@ -328,9 +328,42 @@ exit 1
 | 项 | 原因 |
 |---|---|
 | 生成器与迁移的实际调用 | 最小原型只做「写规格 → 提交 → fetch」。生成与迁移在 `preview_generate` 的路径里已有，接线留到下一轮 |
-| `describe_proposal`（返回某提案的完整 diff 与元数据） | 设计初稿列为工具之一，**未实现**。当前用 `list_proposals` 看分支与 commit，完整 diff 需要人工 `git show` |
 | `apply_proposal`（把提案写回主工作区） | **刻意不做**。应用应当由人执行 `git merge` / `git cherry-pick`；加了它等于绕开「人来合并」 |
 | 提案分支过期清理 | 由 `list_proposals` + 人工 `discard_proposal` 处理，不自动回收 |
+
+### 9.2.1 `describe_proposal`（v0.5 已实现，第四个提案工具）
+
+设计初稿列在「未实现」里的这一项，v0.5 补上了。此前看提案改了什么，只能 `list_proposals` 拿到分支名与 commit，再人工 `git show`——这是「AI 能读规格、提交提案」这条链路里唯一还靠人工的环节。
+
+**入参**
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `branch` | 是 | 提案分支名，必须是本工具创建的 `proposal/` 分支 |
+| `base_ref` | 否 | 对比基线，留空则用 `master` |
+
+**出参**
+
+```json
+{
+  "branch": "proposal/ticket-20261028-101500",
+  "base": "<master 的 commit sha>",
+  "head": "<提案分支的 commit sha>",
+  "commits": [
+    {"sha": "...", "author": "...", "date": "2026-10-28T10:15:00+00:00", "subject": "proposal: ticket"}
+  ],
+  "files": [{"status": "M", "path": "specs/ticket.yaml"}],
+  "diff": "diff --git a/specs/ticket.yaml b/specs/ticket.yaml\n--- a/specs/ticket.yaml\n+++ b/specs/ticket.yaml\n@@ ..."
+}
+```
+
+**三条性质**
+
+1. **只读**：全程在隔离 clone 里跑 `git diff <base>..<head>`，不读用户工作区、不写任何东西。测试用「调用前后 `git status --porcelain` 完全一致」锁定这一点。
+2. **权限与其余三个提案工具一致**：注册在 `--allow-write` 分支，需要 `spec:write`；无 token 时 `identity_not_configured`。这不是疏漏——提案 diff 可能含客户业务规格片段，暴露面大于分支名列表，所以与 `list_proposals` 同级，**不存在「看不到列表却能看全文」的权限倒挂**。
+3. **归属校验与 `discard_proposal` 同源**：`proposal/` 前缀 + 合法形态 + `refs/specgen/proposals/<name>` 标记存在。**但不比对标记 SHA**——那条是为防删除时被人偷换内容；读操作应该如实返回分支现在的样子。
+
+**与「空 diff」的区分**：提案存在但相对基线无改动 → 返回 `diff: ""` 与空 `files`，不报错。若把空 diff 报成错误，调用方无法判断该补提案还是该修 id。
 
 ### 9.3 已定事项
 
