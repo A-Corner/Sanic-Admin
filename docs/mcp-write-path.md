@@ -33,6 +33,7 @@ AI 通过 MCP 提交规格变更，系统产出：
 |---|---|---|
 | `propose_spec_change` | 接收规格文本与可选说明，产出分支 + diff 统计 | **是**（仅在工作区内） |
 | `list_proposals` | 列出本机已产生的提案分支及其状态 | 否 |
+| `describe_proposal` | 返回单个提案相对基线的完整 diff 与元数据（只读） | 否 |
 | `discard_proposal` | 删除一个提案分支 | 是（删除自己的产物） |
 
 ### 2.1 `propose_spec_change`
@@ -319,7 +320,8 @@ exit 1
 | `base_ref` 校验（形态 + 存在性 + 不以 `-` 开头） | 同上 `validate_base_ref()` | 默认 `master`，**不取 HEAD** |
 | 分支名形态校验（`_BRANCH_RE`，check-ref-format 子集） | 同上 `make_branch_name()` | resource 白名单之后再验一次 |
 | 写用户仓库前 `branch_exists` 前置拒绝（快进也不行） | 同上 `make_proposal()` | 报错消息含「拒绝写入」 |
-| `propose_spec_change` / `list_proposals` / `discard_proposal` 注册 | `tools/mcp_server/write_tools.py` | **默认不注册**，需 `--allow-write` |
+| `propose_spec_change` / `list_proposals` / `describe_proposal` / `discard_proposal` 注册 | `tools/mcp_server/write_tools.py` | **默认不注册**，需 `--allow-write` |
+| `describe_proposal` 的 diff 上限 `MAX_PROPOSAL_DIFF_BYTES`（256KB） | 同上 `describe_proposal()` | 超限**报错不截断**；`files` 用 `--name-status -z` 解析 |
 | `--allow-write` 启动开关 | `tools/mcp_server/__init__.py` | 不加则 `tools/list` 里没有写入工具 |
 | 审计写 stderr（结构化 JSON） | `write_tools.py` `_audit()` | 不依赖数据库，不写规格全文 |
 | **提案归属标记**：`refs/specgen/proposals/<name>` → commit SHA | `proposal_registry.py` `proposal_ref()` | `discard_proposal` 必须同时满足：①`proposal/` 前缀 ②存在归属标记 ③标记 SHA == 分支当前 SHA。任一条不满足即拒绝 |
@@ -350,7 +352,7 @@ exit 1
 ```json
 {
   "branch": "proposal/ticket-20261028-101500",
-  "base": "<master 的 commit sha>",
+  "base": "<merge-base(base_ref, head) 的 commit sha>",
   "head": "<提案分支的 commit sha>",
   "commits": [
     {"sha": "...", "author": "...", "date": "2026-10-28T10:15:00+00:00", "subject": "proposal: ticket"}
@@ -360,11 +362,29 @@ exit 1
 }
 ```
 
-**三条性质**
+`files[].status` 取自 `git diff --name-status -z`：`A` 新增 / `M` 修改 / `D` 删除 /
+`R` 重命名 / `C` 复制。重命名与复制额外给出 `old_path`。**不要从 diff 头解析**——
+git 对非 ASCII 路径输出转义引号形式，手写解析会得到「状态恒为 M + 转义串」，
+重命名的旧路径也会消失（PR #46 审核实测）。
 
-1. **只读**：全程在隔离 clone 里跑 `git diff <base>..<head>`，不读用户工作区、不写任何东西。测试用「调用前后 `git status --porcelain` 完全一致」锁定这一点。
+**四条性质**
+
+1. **只读**：全程在隔离 clone 里跑 `git diff`，不读用户工作区、不写任何东西。测试用「调用前后 `git status --porcelain` 完全一致」锁定这一点。
 2. **权限与其余三个提案工具一致**：注册在 `--allow-write` 分支，需要 `spec:write`；无 token 时 `identity_not_configured`。这不是疏漏——提案 diff 可能含客户业务规格片段，暴露面大于分支名列表，所以与 `list_proposals` 同级，**不存在「看不到列表却能看全文」的权限倒挂**。
-3. **归属校验与 `discard_proposal` 同源**：`proposal/` 前缀 + 合法形态 + `refs/specgen/proposals/<name>` 标记存在。**但不比对标记 SHA**——那条是为防删除时被人偷换内容；读操作应该如实返回分支现在的样子。
+3. **归属校验与 `discard_proposal` 同源**：两者调用**同一个函数** `_check_proposal_ownership()`——`proposal/` 前缀 + 合法形态 + 分支存在 + `refs/specgen/proposals/<name>` 标记存在。**但不比对标记 SHA**——那条是为防删除时被人偷换内容；读操作应该如实返回分支现在的样子。
+4. **diff 区间是 merge-base 三点号**：`git diff <base>...<head>`，即 `merge-base(base_ref, head)..head`。两点号 `A..B` 是两棵树的全量对比，提案从旧 master 分出后 master 又前进时，会把别人已合并的改动**反向**显示成本提案删除的内容，`files` 里也混入别人的文件。出参的 `base` 是 merge-base 的 SHA，diff 与 files 都同源于它。
+
+**入参校验**：`base_ref` 与 `propose_spec_change` **逐字一致**地调用 `validate_base_ref()`
+（形态 + 存在性 + 不以 `-` 开头）。合法 tag 可用；`HEAD~0` / `master^{commit}` /
+`--output=...` 在进入 clone 之前即以 `ToolError` 拒绝，不会把裸 `CalledProcessError`
+（含内部 git argv）冒到客户端。**已知缺口**：`validate_base_ref` 目前接受 `HEAD`，
+两个工具行为一致地接受它；是否改成拒绝属于共享行为变更，待单独裁定。
+
+**diff 大小上限**：超过 `MAX_PROPOSAL_DIFF_BYTES`（256KB = 4 × `MAX_SPEC_TEXT_BYTES`）
+直接报错，**不截断**。归属标记按设计不校验 SHA，任何人在带标记的分支上提交一个大
+文件即可让 diff 变大；静默截断会让审核人以为看到了全部改动。取 4× 而不是 1×，是因为
+64KB 规格文本的 diff 加上文件头与行前缀后必然超过 64KB——上限过紧会让工具拒绝自己
+产生的合法提案。
 
 **与「空 diff」的区分**：提案存在但相对基线无改动 → 返回 `diff: ""` 与空 `files`，不报错。若把空 diff 报成错误，调用方无法判断该补提案还是该修 id。
 
@@ -471,7 +491,7 @@ exit 1
 |---|---|
 | 存放 | 进程内仅一个模块级变量，从 `SANIC_ADMIN_MCP_TOKEN` 启动时读入一次；不写盘、不进任何返回值 |
 | 不打印 | 启动信息只打「token 已配置 / 未配置」，不打值；审计 JSON（`_audit`）与错误消息**结构性**不含 token（token 不进异常链）；`_redact` 兜底规则增加对该变量的抹除 |
-| 每次校验 | 三个写入工具**每次调用**实时走一遍 whoami，不缓存判定（写操作低频，成本可忽略；会话被禁用后下一次调用立即失效） |
+| 每次校验 | 四个写入工具**每次调用**实时走一遍 whoami，不缓存判定（写操作低频，成本可忽略；会话被禁用后下一次调用立即失效） |
 | 回调目标（CPL 约束 3） | 只允许连 `http://127.0.0.1:<port>`（默认 `http://127.0.0.1:22222`）；要指向别的主机必须在配置里**显式**写 `SANIC_ADMIN_MCP_API_URL` 且通过 host 校验——防止 token 被发到非预期主机。默认配置下 token 不出本机 |
 | 超时与失败 | 超时 **5s 以内**（CPL 上限）；超时、连接失败、非 200 一律**拒绝**（fail-closed），不重试 |
 | 不打印 | 启动信息只打「token 已配置 / 未配置」，不打值；回调 URL 打 host 不打完整 header；审计 JSON（`_audit`）与错误消息**结构性**不含 token（token 不进异常链）；`_redact` 兜底规则增加对该变量的抹除 |
@@ -480,7 +500,7 @@ exit 1
 
 ### 10.5 校验失败时写入工具的表现（fail-closed）
 
-三个写入工具（含只读的 `list_proposals`）**一律要求 `spec:write`**：粒度一致、实现与解释最简单，且 `list_proposals` 暴露提案内容，属提案流程的一部分，不应成为无权限方的探测入口。
+四个写入工具（含只读的 `list_proposals` / `describe_proposal`）**一律要求 `spec:write`**：粒度一致、实现与解释最简单，且 `list_proposals` 暴露提案内容，属提案流程的一部分，不应成为无权限方的探测入口。
 
 校验在 `propose_spec_change` 的 `_guard_resource_name` **之前**执行——任何校验失败都不建 clone、不建分支（与 §7「规格校验失败零副作用」同原则）。
 

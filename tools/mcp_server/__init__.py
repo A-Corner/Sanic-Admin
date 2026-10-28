@@ -468,7 +468,8 @@ def build_server(allow_write: bool = False):
             "读取/校验/预演资源规格，并可把规格变更提交到本地 proposal/ 分支，由人开 PR 与合并；不 push，不改运行时。"
         )
         instructions = (
-            "本服务可用 propose_spec_change 产出提案分支与 diff，但**不会 push、不会合并**——下一步必须由人执行。"
+            "本服务可用 propose_spec_change 产出提案分支与 diff，用 list_proposals / "
+            "describe_proposal 查看提案，但**不会 push、不会合并**——下一步必须由人执行。"
             "写入工具每次调用需有效会话 JWT（环境变量 SANIC_ADMIN_MCP_TOKEN）且账户拥有 spec:write 权限。其余工具只读。"
         )
     else:
@@ -531,7 +532,8 @@ def main(argv: List[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     # --allow-write：显式开启写入工具。默认关闭——不加这个参数，
-    # propose_spec_change / list_proposals / discard_proposal 不会出现在工具列表里。
+    # propose_spec_change / list_proposals / describe_proposal / discard_proposal
+    # 都不会出现在工具列表里。
     allow_write = False
     if "--allow-write" in args:
         args.remove("--allow-write")
@@ -562,7 +564,8 @@ def main(argv: List[str] | None = None) -> int:
             # 清理是旁路：失败不能阻止服务启动
             logging.getLogger(__name__).warning("清理过期临时工作区失败（已忽略）", exc_info=True)
         print(
-            "MCP 写入工具已启用（propose_spec_change / list_proposals / discard_proposal）；仍不会 push 或合并。",
+            "MCP 写入工具已启用（propose_spec_change / list_proposals / "
+            "describe_proposal / discard_proposal）；仍不会 push 或合并。",
             file=sys.stderr,
         )
         # AND 矩阵（docs/mcp-write-path.md §10.6）：--allow-write 是注册门槛，
@@ -574,7 +577,7 @@ def main(argv: List[str] | None = None) -> int:
         if get_token():
             print(
                 "MCP 写入工具已启用（propose_spec_change / list_proposals / "
-                "discard_proposal）；每次调用将经 whoami 校验 spec:write；"
+                "describe_proposal / discard_proposal）；每次调用将经 whoami 校验 spec:write；"
                 "仍不会 push 或合并。",
                 file=sys.stderr,
             )
