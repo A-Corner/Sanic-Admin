@@ -316,6 +316,16 @@ npm start                           # 实测：服务起来，GET / → 200（se
 .venv/bin/pytest --cov=app tests/ --cov-report=xml
 ```
 
+> **本机门禁入口（macOS，可选）**：`scripts/run_tests_safe.sh` 是带前置校验的
+> pytest 包装，比直接跑 pytest 多三层保护：
+> ① 临时产物强制落外挂卷——`TMPDIR` / `PYTEST_BASETEMP` 必须显式设置且不在内盘；
+> ② **`PYTHON_BIN` 必须显式 `export` 指向你的 venv，不回退 `.venv` / PATH**，
+>    且启动时逐包校验 `requirements.txt` 的 `==` 钉版，任一不符即 `exit 2`
+>    且测试不启动（版本不符的环境会让结论不可信，见 §2.2 的警示）；
+> ③ pytest 完整输出落盘到 `${PYTEST_LOG:-${PYTEST_BASETEMP}/pytest.log}`，
+>    失败时终端打印全量、成功只打末尾 20 行；退出码沿用 pytest 自身的。
+> 不满足前置条件时 `exit 2` 是预期行为，不是脚本坏了。CI 不经过该脚本。
+
 ### 3.2 基线数字（不写死 —— 跑出来才算）
 
 **本节不列具体数字。** 原因见 §0.1：用例数、覆盖率、耗时都会随代码漂移，
