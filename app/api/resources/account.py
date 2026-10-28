@@ -5,9 +5,11 @@
 账户 API 资源模块，提供账户管理与自助账户信息接口。
 
 安全要点：
-* 字段白名单是唯一入口：创建只接受 username/email/password/phone，
-  更新只接受 username/email/phone/password。``is_admin``、``verified``、
-  ``disabled``、``roles``、``deleted``、``id`` 一律不接受（即使客户端显式传入也被丢弃）。
+* 字段白名单是唯一入口：创建只接受 username/email/password/phone/verified，
+  更新只接受 username/email/phone/password。``is_admin``、``disabled``、
+  ``roles``、``deleted``、``id`` 一律不接受（即使客户端显式传入也被丢弃）。
+* 创建时的 ``verified`` 只允许布尔值，且**置 True 需要管理员**（AUTH-02②）：
+  自助注册默认关闭，建号并可直接登录是管理员的操作。
 * 口令只以 Argon2 哈希落库（``Account.set_password``），响应中永不回显口令或哈希。
 * 非 admin 账户不能：创建/修改 ``is_admin``、修改 admin 账户、删除 admin 账户、
   给账户授予自身不具备权限的角色。
@@ -29,6 +31,7 @@ from app.api.validators import (
     Length,
     Optional as OptionalRule,
     Required,
+    Type,
     extract_whitelisted,
     parse_bool_arg,
     parse_pagination,
@@ -37,11 +40,13 @@ from app.api.validators import (
 )
 from app.auth.authentication import authenticate_request
 from app.auth.authorization import check_permissions, get_account_permissions
+from app.services.exceptions import InsufficientPermissionsError
 from app.api.resources.route_methods import register_view
 from app.models import Account, AuthenticationSession
 
 # 创建账户时允许写入的字段（白名单）
-ACCOUNT_CREATE_FIELDS = ("username", "email", "password", "phone")
+# ``verified`` 可写但受限于管理员判定，见 ``AccountResource.post``。
+ACCOUNT_CREATE_FIELDS = ("username", "email", "password", "phone", "verified")
 # 更新账户时允许写入的字段（白名单）
 ACCOUNT_UPDATE_FIELDS = ("username", "email", "phone", "password")
 
@@ -57,6 +62,11 @@ ACCOUNT_RULES = {
     "email": [Required(), Email()],
     "password": [Required(), Length(min_=PASSWORD_MIN_LENGTH, max_=PASSWORD_MAX_LENGTH)],
     "phone": [OptionalRule(), Length(max_=PHONE_MAX_LENGTH)],
+    # 严格布尔：``extract_whitelisted`` 只过滤字段名、不转换类型，客户端传
+    # ``{"verified": "true"}`` 会原样得到字符串，而 ``bool("false")`` 为 True。
+    # ``Type(bool)`` 让非布尔值（含 "true"/1）在 ``validate_fields`` 处 400，
+    # 而不是被悄悄当成"未请求 verified"。
+    "verified": [Type(bool)],
 }
 
 
@@ -182,7 +192,8 @@ class AccountResource(HTTPMethodView):
         """创建账户（只接受白名单字段；口令哈希后落库）。"""
         payload = request_payload(request)
 
-        # 白名单之外的字段（is_admin/verified/disabled/roles/deleted/id）在这里被丢弃
+        # 白名单之外的字段（is_admin/disabled/roles/deleted/id）在这里被丢弃。
+        # ``verified`` 是例外：它可写，但置 True 需要管理员（见下方判定）。
         data = extract_whitelisted(payload, ACCOUNT_CREATE_FIELDS)
 
         errors = validate_fields(data, ACCOUNT_RULES)
@@ -196,6 +207,17 @@ class AccountResource(HTTPMethodView):
         phone = phone.strip() if isinstance(phone, str) else None
         password = data["password"]
 
+        # 缺省 False：普通调用方建出的账户默认不可登录（未验证）。
+        # 只有显式请求 True 才要求管理员 —— 权限判定必须发生在
+        # ``Account(...)`` 创建**之前**，否则会留下「已建号、然后报错」的脏数据。
+        want_verified = data.get("verified") is True
+        if want_verified:
+            from app.api.resources.role import is_protected_admin
+
+            actor = request.ctx.authentication_session.bearer
+            if not await is_protected_admin(actor):
+                raise InsufficientPermissionsError("只有管理员可以设置 verified")
+
         conflict = await _ensure_unique(None, username, email, phone)
         if conflict:
             return APIResponse.error(message=conflict, error_code="ACCOUNT_EXISTS", status_code=400)
@@ -204,7 +226,7 @@ class AccountResource(HTTPMethodView):
             username=username,
             email=email,
             phone=phone,
-            verified=False,
+            verified=want_verified,
             disabled=False,
             is_admin=False,
         )

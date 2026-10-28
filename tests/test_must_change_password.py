@@ -776,8 +776,14 @@ async def test_banlist_is_case_insensitive():
     assert validate_not_banlisted("TotallyFine#2026", _A()) is None
 
 
-async def test_register_rejects_weak_password(client):
-    """注册接口传弱口令 → 400（走真实路由，精确错误码）。"""
+async def test_register_rejects_weak_password(client, app):
+    """注册接口传弱口令 → 400（走真实路由，精确错误码）。
+
+    AUTH-02② 起自助注册默认关闭，``/auth/register`` 会在口令校验之前就
+    403 ``REGISTRATION_DISABLED``。本条测的是**口令强度规则**，因此显式
+    打开开关；测试意图不变（弱口令仍必须被 400 拒绝），只是要走到规则校验。
+    """
+    app.config["ALLOW_SELF_REGISTRATION"] = True
     resp = await client.post("/auth/register", json={
         "email": "weak1@example.com", "username": "weak1",
         "password": "alllowercase"})

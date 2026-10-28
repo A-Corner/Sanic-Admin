@@ -100,8 +100,17 @@ async def test_get_requests_do_not_require_csrf(client):
     assert listing.status_code == 200, listing.text
 
 
-async def test_login_and_register_are_exempt(client):
-    """登录前端点豁免：没有 csrf token 也能正常提交（401 是凭据问题，不是 403）。"""
+async def test_login_and_register_are_exempt(client, app):
+    """登录前端点豁免：没有 csrf token 也能正常提交（401 是凭据问题，不是 403）。
+
+    AUTH-02② 起自助注册默认关闭，``/auth/register`` 默认返回 403
+    ``REGISTRATION_DISABLED``。那个 403 与「CSRF 校验失败 403」在状态码上
+    无法区分，会让本条失去判别力 —— 所以这里显式开启开关，让端点真正走到
+    处理函数。断言不变：**没有 csrf token 也能 200**，这仍然证明豁免成立
+    （CSRF 校验发生在路由之前，开关关闭时同样豁免，只是结果也是 403）。
+    """
+    app.config["ALLOW_SELF_REGISTRATION"] = True
+
     wrong_password = await client.post(
         "/auth/login", json={"email": ADMIN_EMAIL, "password": "WrongPassword123!"}
     )

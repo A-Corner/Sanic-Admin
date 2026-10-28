@@ -250,15 +250,30 @@ def _register_listeners(app: Sanic) -> None:
         **为什么在 `setup_db` 之前注册**：Sanic 按注册顺序执行监听器，配置问题
         应该在建库/建表之前就暴露，避免「连了库、建了表、然后才拒绝启动」。
 
+        AUTH-02② 追加：同一个监听器顺带检查「开了自助注册但没有投递渠道」。
+        注册账户固定 `verified=False`，验证码只能经投递渠道送出；没有渠道时
+        自助注册**开了也无人能登录**。这类「能开但没用」的开关半年后会让人
+        误以为开了就能用，所以在启动期明确说一次。只 warning 不 fail——开了
+        也不危险，只是没效果。
+
         Args:
             app: 当前应用实例（Sanic 会把 app 传进来，覆盖外层同名变量）
         """
         from app.services.delivery import check_backend_configured
 
-        check_backend_configured(
+        delivery_ready = check_backend_configured(
             env=app.config.get("ENV"),
             allow_noop=bool(app.config.get("ALLOW_NOOP_DELIVERY", False)),
         )
+
+        if app.config.get("ALLOW_SELF_REGISTRATION", False) and not delivery_ready:
+            logger.warning(
+                "ALLOW_SELF_REGISTRATION 已开启，但投递后端未配置真实实现："
+                "自助注册创建的账户固定 verified=False，验证码无法送达，"
+                "注册者永远无法登录。该开关当前没有实际效果——"
+                "请配置投递后端（app/services/delivery.py 的 Backend），"
+                "或关闭自助注册、改由管理员建号（POST /api/v1/accounts 带 verified=true）。"
+            )
 
     @app.listener('before_server_start')
     async def setup_db(app):
