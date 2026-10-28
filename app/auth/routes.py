@@ -22,12 +22,16 @@ from app.auth.verification import (
     request_two_step_verification,
     verify_account,
     request_captcha,
+    request_password_reset,
+    reset_password,
 )
 from app.middleware.security_middleware import issue_csrf_token
 from app.services.exceptions import (
     CredentialsError,
     PasswordChangeRequiredError,
     RateLimitExceededError,
+    TokenExpiredError,
+    TokenInvalidError,
     ValidationError,
 )
 
@@ -229,6 +233,105 @@ async def on_login(request):
     return response
 
 
+# 密码重置（AUTH-03）
+
+#: 重置请求的限流前缀。**刻意与 `login_rl_*` 分开**——共用会让重置拖累登录。
+RESET_RL_PREFIX = "pwreset_rl"
+
+
+def _enforce_reset_rate_limit(request, email: str) -> None:
+    """
+    重置请求的限流：按（账户键 + IP）计数，**完全独立于登录限流**。
+
+    复用 `LoginRateLimiter` 的 cache / 窗口参数，但键前缀自建，不走它的
+    `_keys()`（那个方法无条件带 IP 键，跨动作耦合）。
+
+    Raises:
+        RateLimitExceededError: 窗口内重置请求次数已达上限
+    """
+    import time
+
+    limiter = LoginRateLimiter.from_request(request)
+    cache = limiter.cache
+    window = limiter.window_seconds
+    limit = limiter.max_attempts
+    ip = limiter._client_ip(request)
+    keys = [f"{RESET_RL_PREFIX}:acct:{email.strip().lower()}", f"{RESET_RL_PREFIX}:ip:{ip}"]
+
+    now = time.time()
+    cutoff = now - window
+    for key in keys:
+        recent = [ts for ts in (cache.get(key) or []) if ts > cutoff]
+        if len(recent) >= limit:
+            raise RateLimitExceededError(f"重置请求次数过多，请约 {max(window // 60, 1)} 分钟后再试")
+    # 未被拦下才记一次（与登录语义一致：被拦的尝试不额外延长封锁）
+    for key in keys:
+        recent = [ts for ts in (cache.get(key) or []) if ts > cutoff]
+        recent.append(now)
+        cache.set(key, recent, timeout=window)
+
+
+@auth_bp.post("/password-reset/request")
+async def on_password_reset_request(request):
+    """
+    发起密码重置。
+
+    **无论邮箱是否存在，一律返回 200 且响应体完全一致**——这是防账户枚举的
+    最低要求。时间侧信道见 `request_password_reset()` 的 docstring：本端点
+    防的是响应差异，不防时序分析，不声称完全不可枚举。
+
+    限流：复用登录限流器按（标识 + IP）计数，避免被用作邮箱探测或投递滥用。
+    """
+    from app.services.audit import record_auth_event
+
+    email = str(get_request_value(request, "email") or "").strip()
+    if not email:
+        return json("如果该邮箱已注册，重置说明将发送到该地址。")
+
+    # **独立限流**：不能复用 `LoginRateLimiter`——它的 `_keys()` 无条件追加
+    # `login_rl_ip:<ip>` 这个 IP 维度键（与 identity 无关），用户连试几次重置
+    # 就会把同一出口 IP 下的登录计数一并打满，把两个不相干的动作耦合在一起。
+    # 这里用独立前缀自建计数，只按 (重置, 账户键, IP) 计。
+    _enforce_reset_rate_limit(request, email)
+
+    delivered = await request_password_reset(email)
+    # 投递失败要如实记 failure：真后端故障时用户看到「已发送」却永远收不到，
+    # 审计若还写 success，事后无从排查。（deliver() 永不抛，只返回 bool。）
+    await record_auth_event(
+        request,
+        "password_reset_request",
+        status="failure" if delivered is False else "success",
+        detail="投递失败" if delivered is False else None,
+    )
+    return json("如果该邮箱已注册，重置说明将发送到该地址。")
+
+
+@auth_bp.post("/password-reset/confirm")
+async def on_password_reset_confirm(request):
+    """
+    用令牌重置口令。令牌单次有效、TTL 30 分钟、用后即焚。
+
+    失败一律 400 且不区分「令牌不存在」与「令牌已过期」之外的细节——
+    前者泄露不了什么（令牌是随机的），后者对用户有实际意义（需要重新申请）。
+    """
+    from app.services.audit import record_auth_event
+
+    token = str(get_request_value(request, "token") or "").strip()
+    new_password = get_request_value(request, "new_password") or ""
+    if not token or not new_password:
+        raise ValidationError("令牌与新口令均为必填")
+
+    try:
+        account = await reset_password(token, new_password)
+    except (TokenInvalidError, TokenExpiredError) as exc:
+        await record_auth_event(request, "password_reset_confirm", status="failure", detail=type(exc).__name__)
+        raise
+
+    await record_auth_event(request, "password_reset_confirm", account=account, status="success")
+    return json("口令已重置，请用新口令登录。")
+
+
+# 修改密码路由
 @auth_bp.post("/change-password")
 async def on_change_password(request):
     """

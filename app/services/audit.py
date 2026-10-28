@@ -46,6 +46,12 @@ OPERATIONS = frozenset(
         # GET /auth/whoami（SA-v042-SPECWRITE）：MCP 写入路径的身份校验端点。
         # 每次调用都留痕——它是权限清单的出口，谁在什么时候查过要可归因。
         "whoami",
+        # 密码重置（AUTH-03）：两阶段流程，各自留痕。
+        # request 阶段不记邮箱（防枚举——不存在的邮箱和存在的邮箱写同样的日志
+        # 就没意义了，但记了会变成「谁能查哪些邮箱注册过」的侧信道）；
+        # confirm 阶段记账户与失败原因（令牌无效 / 过期）。
+        "password_reset_request",
+        "password_reset_confirm",
     }
 )
 
