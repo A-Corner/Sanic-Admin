@@ -235,8 +235,18 @@ python3 -m venv .venv
 
 启动后**必须 kill 进程**（含 Sanic 派生的 worker 子进程），否则端口 22222 会被占：
 ```bash
-pkill -f "m23-d/.venv/bin/python main.py"   # 按自己的 worktree 路径调整
+# 查占用 22222 的进程（无输出 = 端口未被占用，属正常）
+lsof -ti:22222
+# 确认是自己的 worktree 后，按 PID 停
+kill <PID>
 ```
+
+> **为什么不用 `pkill -f "<你的 venv>/bin/python main.py"`**：`pkill -f` 匹配整个命令行、
+> 不做归属判断，会连带杀掉别人的 lane 进程；而 `ps | grep '[m]ain.py'` 的方括号技巧
+> 在 `bash -c '...'` 里会匹配到 shell 自己，读者按第一个 PID kill 会杀掉自己的终端。
+> `lsof -ti:22222` 换了个维度：不问「哪个进程命令行像这个」，问「**谁占着我要的端口**」
+> —— 而本节要解决的问题正是「端口 22222 被占」，端口才是真判据。
+> `lsof` 在端口未占用时**无输出且 exit=1**，这是正常结果，不是命令失败。
 
 ### 2.4 冒烟检查（实测通过）
 
