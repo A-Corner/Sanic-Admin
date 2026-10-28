@@ -23,12 +23,21 @@
 #
 # pattern 类参数的边界约束见 delete 端点；本脚本不涉及。
 #
+# 输出：
+#   pytest 的完整输出（stdout + stderr）写入日志文件，终端只显示摘要：
+#   失败 → 打印完整输出；成功 → 打印末尾 20 行。
+#   日志路径默认 ${PYTEST_BASETEMP}/pytest.log，可用环境变量 PYTEST_LOG 覆盖。
+#   日志与 basetemp 同受「必须落在外挂盘」的约束——日志是本次运行最大的产物，
+#   指向内盘等于绕过脚本的立身之本。
+#   注意：重定向后测试运行期间终端不再实时滚动输出（结果在结束后统一给出）。
+#
 # 退出码：
 #   0  测试通过
-#   1  测试失败
+#   1  测试失败（沿用 pytest 自身的退出码）
 #   2  环境不合规（外挂盘未挂载 / 路径指向内盘 / 变量未设置 /
 #      requirements.txt 缺失或未钉版 / PYTHON_BIN 未设置 / 不可执行 /
-#      不是 Python / 版本与钉版不符）——测试未运行
+#      不是 Python / 版本与钉版不符 /
+#      日志目录无法创建 / 不可写 / 不在外挂盘 / 旧日志无法清理）——测试未运行
 
 set -euo pipefail
 
@@ -63,10 +72,14 @@ mkdir -p "$TMPDIR" 2>/dev/null || fail "无法创建 TMPDIR=${TMPDIR}"
 # 将来若真要在 Linux 上跑，再连同验证一起加，不要先加分支后补验证。
 check_external() {
     local path="$1" label="$2" mount dev root_dev
-    mount="$(df -P "$path" | awk 'NR==2 {print $NF}')"
+    # df 管道必须 || true（与下方 6c 段 grep 的做法同理，实测教训）：df 失败时
+    # set -e + pipefail 会让脚本以退出码 1 静默终止——退出码 1 的语义是「测试
+    # 失败」，而此时测试根本没跑，属误报。|| true 让空值落入下一行的显式 fail
+    # （exit 2，环境不合规），与头部退出码声明一致。
+    mount="$(df -P "$path" | awk 'NR==2 {print $NF}' || true)"
     [ -n "$mount" ] || fail "无法确定 ${label}=${path} 的挂载点"
-    dev="$(df -P "$path" | awk 'NR==2 {print $1}')"
-    root_dev="$(df -P / | awk 'NR==2 {print $1}')"
+    dev="$(df -P "$path" | awk 'NR==2 {print $1}' || true)"
+    root_dev="$(df -P / | awk 'NR==2 {print $1}' || true)"
 
     # 与根设备相同 → 明确是内盘
     if [ "$dev" = "$root_dev" ]; then
@@ -220,4 +233,41 @@ echo "✅            REPO_ROOT=${REPO_ROOT}"
 echo "✅            python=${PY}  (${PY_VERSION})"
 
 # --- 7. 执行 ----------------------------------------------------------------
-exec "$PY" -m pytest --basetemp="$PYTEST_BASETEMP" "$@"
+#
+# 输出重定向：pytest 的完整输出写入日志文件，终端只保留摘要。
+#
+# 为什么不走「管道边写文件边打屏幕」的路子：
+#   - 全量输出会照旧刷满终端，与「终端只给摘要」的目的相反；
+#   - 本脚本已开 pipefail，管道状态取「最后一个非零」，pytest 的失败码其实
+#     能透出来（不要以为会丢）。真正的风险在另一处：若管道末端命令向外写时
+#     对端已关闭（如外层套了 head、CI 日志流被截断），它收到 SIGPIPE 返回
+#     141，pipefail 下管道状态就变成 141，pytest 真实的失败码反而被掩盖。
+# 这里分两步：先重定向落盘并立刻取退出码，再按结果决定打印全量还是末尾 20 行。
+#
+# 日志路径：默认 ${PYTEST_BASETEMP}/pytest.log，可用 PYTEST_LOG 覆盖。
+# （已实测：当前钉版 pytest 用 --basetemp 时不清空该目录的既有文件，
+# 日志放在目录内是安全的；若未来 pytest 行为变化清空了目录，
+# 下面的「日志不可读」分支会显式报出来，不会静默丢失。）
+LOG="${PYTEST_LOG:-${PYTEST_BASETEMP}/pytest.log}"
+LOG_DIR="$(dirname "$LOG")"
+mkdir -p "$LOG_DIR" 2>/dev/null || fail "无法创建日志目录 ${LOG_DIR}"
+[ -w "$LOG_DIR" ] || fail "日志目录不可写：${LOG_DIR}"
+# 日志目录与 basetemp/TMPDIR 同等约束：必须在外挂盘，防止产物落内盘。
+check_external "$LOG_DIR" LOG_DIR >/dev/null
+
+# 先删掉上一轮的旧日志：否则本轮若异常未产出日志，看到的是上一次的残留，
+# 会把旧结果误当成本次的。
+rm -f "$LOG" 2>/dev/null || fail "无法清理旧日志 ${LOG}"
+
+rc=0
+"$PY" -m pytest --basetemp="$PYTEST_BASETEMP" "$@" > "$LOG" 2>&1 || rc=$?
+
+if [ "$rc" -ne 0 ]; then
+    echo "❌ 测试失败（pytest 退出码 ${rc}）。完整输出如下（日志：${LOG}）："
+    cat "$LOG" 2>/dev/null || echo "（日志文件不可读：${LOG}）"
+else
+    echo "✅ 测试通过。完整输出见 ${LOG}，以下为末尾 20 行："
+    tail -n 20 "$LOG" 2>/dev/null || echo "（日志文件不可读：${LOG}）"
+fi
+
+exit "$rc"
