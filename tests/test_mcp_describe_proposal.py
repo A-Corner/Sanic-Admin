@@ -80,10 +80,29 @@ def repo(tmp_path: Path) -> Path:
     _run(r, "init", "-q")
     (r / "specs").mkdir()
     (r / "specs" / "demo.yaml").write_text("name: demo\n", encoding="utf-8")
+    # 两个**内容在提案分支上不变**的基线文件：给「重命名」「删除」用例用。
+    # 若拿 demo.yaml 改名就不行——提案分支上 demo.yaml 的内容已被改过，
+    # git 判不出相似度，只会输出 D + A（不是解析的锅）。
+    (r / "specs" / "movable.yaml").write_text("a\nb\nc\nd\ne\n", encoding="utf-8")
+    (r / "specs" / "touchable.yaml").write_text("t\n", encoding="utf-8")
     _run(r, "add", "-A")
     _run(r, "-c", "user.name=t", "-c", "user.email=t@x.invalid", "commit", "-q", "-m", "init")
     _run(r, "update-ref", "refs/heads/master", "HEAD")
     return r
+
+
+@pytest.fixture()
+def allow_spec_write(monkeypatch):
+    """
+    放行身份层。
+
+    ``describe_proposal_tool`` 在入口调 ``identity.require_spec_write()``（每次调用
+    实时校验），本文件除 ``test_requires_spec_write_when_no_token`` 外都不测这一层。
+    与 ``tests/test_mcp_write_registration.py`` 同一做法。
+    """
+    from tools.mcp_server import identity
+
+    monkeypatch.setattr(identity, "require_spec_write", lambda: 42)
 
 
 def _propose(repo: Path, resource: str = "demo") -> dict:
@@ -95,6 +114,34 @@ def _propose(repo: Path, resource: str = "demo") -> dict:
         f"proposal: {resource}",
         lambda d: (d / "specs" / "demo.yaml").write_text(_SPEC, encoding="utf-8"),
     )
+
+
+def _commit(repo: Path, message: str, files: dict) -> str:
+    """在**当前分支**上再提交一批文件，返回新 HEAD 的 SHA。"""
+    for rel, content in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    _run(repo, "add", "-A")
+    _run(
+        repo,
+        "-c", "user.name=t", "-c", "user.email=t@x.invalid",
+        "commit", "-q", "-m", message,
+    )
+    return _run(repo, "rev-parse", "HEAD").strip()
+
+
+def _assert_no_git_command_leak(message: str) -> None:
+    """错误信息不得暴露内部 git 命令（argv、CalledProcessError 文案）。"""
+    for needle in (
+        "Command '['git'",
+        "calledprocesserror",
+        "update-ref",
+        "returned non-zero exit status",
+    ):
+        assert needle.lower() not in message.lower(), (
+            f"错误信息泄露了内部 git 命令细节（{needle!r}）：{message}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +315,307 @@ def test_empty_diff_is_reported_as_empty_not_error(repo: Path) -> None:
     result = gi.describe_proposal(repo, branch)
     assert result["diff"] == "", f"无改动的提案应返回空 diff，实际 {result['diff'][:200]!r}"
     assert result["files"] == [], f"无改动时 files 应为空，实际 {result['files']}"
+
+
+# ---------------------------------------------------------------------------
+# 中危 1：diff 区间必须是 merge-base 三点，不能是两点全量对比
+# ---------------------------------------------------------------------------
+
+
+def test_diff_excludes_changes_merged_into_master_after_branching(repo: Path) -> None:
+    """
+    提案从旧 master 分出后 master 又前进：diff 不得把别人的改动显示成删除。
+
+    审核实测的场景：master 上后来加了 ``reviewer: approved``，两点区间
+    （``A..B``）把这一行显示成 ``-reviewer: approved``，``files`` 里也混入
+    ``specs/other.yaml``——审核人会误判「AI 删了已批准的行」。
+
+    **破坏实验**：把实现里的 ``f"{base}...{head}"`` 改回 ``f"{base}..{head}"``
+    （``--name-status`` 与 diff 两处都要改），本用例必须变红。
+    """
+    proposed = _propose(repo)
+    base_sha = proposed  # 提案 commit
+    assert base_sha
+
+    # 提案分支不动；master 上再落一个**别人**的改动。
+    _run(repo, "checkout", "-q", "master")
+    other_sha = _commit(repo, "others: approve reviewer", {"specs/other.yaml": "reviewer: approved\n"})
+    assert other_sha != proposed["commit"]
+
+    result = gi.describe_proposal(repo, proposed["branch"])
+
+    # 正向：提案自己的改动必须在
+    assert "specs/demo.yaml" in result["diff"], result["diff"][:400]
+    assert any(f["path"] == "specs/demo.yaml" for f in result["files"]), result["files"]
+
+    # 反向：master 上别人的改动**一格都不该出现**
+    assert "specs/other.yaml" not in result["diff"], (
+        "diff 混入了 master 上别人的改动——区间不是 merge-base 三点号：\n"
+        + result["diff"][:600]
+    )
+    assert "reviewer: approved" not in result["diff"], (
+        "diff 把 master 上已合并的行显示成了删除：\n" + result["diff"][:600]
+    )
+    assert all(f["path"] != "specs/other.yaml" for f in result["files"]), (
+        f"files 混入了别人的文件：{result['files']}"
+    )
+
+    # base 必须是 merge-base，不是 master 当前的 tip
+    master_tip = _run(repo, "rev-parse", "master").strip()
+    assert result["base"] != master_tip, (
+        "base 是 master 的 tip，不是 merge-base——说明区间还是两点全量对比"
+    )
+    assert result["base"] == _run(repo, "merge-base", "master", proposed["commit"]).strip()
+
+
+# ---------------------------------------------------------------------------
+# 中危 3：diff 必须有大小上限，且超限是**报错**不是静默截断
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_diff_is_rejected_not_truncated(repo: Path, monkeypatch) -> None:
+    """
+    超过上限的提案：抛 ``GitNotAllowed``，消息里给出现实字节数与上限。
+
+    为什么选「报错」而不是「截断 + truncated:true」：静默截断会让审核人以为
+    看到了全部改动。归属标记不校验 SHA，所以任何人都能让 diff 变大——必须有闸。
+
+    **破坏实验**：删掉 ``if diff_size > MAX_PROPOSAL_DIFF_BYTES`` 那段，本用例红。
+    """
+    proposed = _propose(repo)
+    _run(repo, "checkout", "-q", proposed["branch"])
+    # 一个明确超过上限的文件（上限 = 256KB）
+    big = "x" * (gi.MAX_PROPOSAL_DIFF_BYTES + 1024)
+    _commit(repo, "proposal: 超大文件", {"specs/big.yaml": big})
+    _run(repo, "checkout", "-q", "master")
+
+    with pytest.raises(gi.GitNotAllowed) as exc_info:
+        gi.describe_proposal(repo, proposed["branch"])
+    msg = str(exc_info.value)
+    assert "过大" in msg, f"拒绝理由不对：{msg}"
+    assert str(gi.MAX_PROPOSAL_DIFF_BYTES) in msg, f"没告诉调用方上限是多少：{msg}"
+    # 关键：不能是「截断后照常返回」
+    assert "truncated" not in msg.lower()
+
+
+def test_diff_just_under_limit_is_returned_whole(repo: Path) -> None:
+    """
+    正向对照：上限以内的提案必须**完整**返回。
+
+    没有这条，「超限报错」可能来自一个把上限写成 0 的实现——那样所有提案都
+    报错，超限用例照样绿。
+    """
+    proposed = _propose(repo)
+    result = gi.describe_proposal(repo, proposed["branch"])
+
+    size = len(result["diff"].encode("utf-8"))
+    assert 0 < size <= gi.MAX_PROPOSAL_DIFF_BYTES, (size, gi.MAX_PROPOSAL_DIFF_BYTES)
+    assert result["diff"].rstrip().endswith(("+", "1", "true", "string", "demo", _SPEC.splitlines()[-1])), (
+        "diff 看起来被截断了：末尾 " + repr(result["diff"][-80:])
+    )
+
+
+# ---------------------------------------------------------------------------
+# 中危 4：files[].status 对非 ASCII 与重命名路径必须判对
+# ---------------------------------------------------------------------------
+
+
+def test_files_status_added_non_ascii_path(repo: Path) -> None:
+    """
+    新增非 ASCII 文件名：``status == "A"``，``path`` 是真实中文路径。
+
+    改前从 diff 头切 ``" b/"``：git 输出的是转义引号形式
+    ``diff --git "a/specs/\\346\\226\\260..." "b/..."``，解析结果是
+    ``{'status': 'M', 'path': '"specs/\\346\\226\\260..."'}``——状态错、路径是转义串。
+    """
+    proposed = _propose(repo)
+    _run(repo, "checkout", "-q", proposed["branch"])
+    _commit(repo, "proposal: 新增中文规格", {"specs/新增.yaml": "name: added\n"})
+    _run(repo, "checkout", "-q", "master")
+
+    result = gi.describe_proposal(repo, proposed["branch"])
+    entry = [f for f in result["files"] if f["path"].endswith("新增.yaml")]
+    assert entry, f"files 里没有中文路径（实际：{result['files']}）"
+    assert entry[0]["status"] == "A", entry[0]
+    assert entry[0]["path"] == "specs/新增.yaml", entry[0]
+    assert '"' not in entry[0]["path"] and "\\" not in entry[0]["path"], (
+        f"路径还是 git 的转义引号串：{entry[0]['path']!r}"
+    )
+
+
+def test_files_status_rename_reports_r_and_old_path(repo: Path) -> None:
+    """
+    重命名：``status == "R"``，并给出 ``old_path``。
+
+    改前只报 ``M`` 且旧路径消失——审核实测。``git diff --name-status -z`` 对
+    重命名输出 ``R100\\0old\\0new``（实测确认），这里断言两段都解析到了。
+
+    **必须先提交提案、再单独提交一次改名**：若在同一提交里既写规格又改名，
+    git 认为两份内容相似度 0%，只会输出 ``D`` + ``A``，根本走不到 ``R`` 分支。
+    这里改的是 ``movable.yaml``（提案分支上与 master 完全一致的文件），确保 git
+    能把这次改名识别成 100% 相似。
+    """
+    proposed = _propose(repo)
+    _run(repo, "checkout", "-q", proposed["branch"])
+    _run(repo, "mv", "specs/movable.yaml", "specs/moved.yaml")
+    _commit(repo, "proposal: rename only", {})
+
+    result = gi.describe_proposal(repo, proposed["branch"])
+    _run(repo, "checkout", "-q", "master")
+    renames = [f for f in result["files"] if f["status"] == "R"]
+    assert len(renames) == 1, (
+        f"重命名没识别成 R：{result['files']}——"
+        "确认是不是夹具让 git 看不到相似度（同一提交里改内容）"
+    )
+    assert renames[0]["path"] == "specs/moved.yaml", renames[0]
+    assert renames[0].get("old_path") == "specs/movable.yaml", renames[0]
+
+
+def test_files_status_delete_and_modify(repo: Path) -> None:
+    """删除 → ``D``；修改 → ``M``。"""
+    proposed = _propose(repo)
+    _run(repo, "checkout", "-q", proposed["branch"])
+    _run(repo, "rm", "-q", "specs/movable.yaml")
+    _commit(repo, "proposal: delete movable, touch touchable", {"specs/touchable.yaml": "t2\n"})
+
+    result = gi.describe_proposal(repo, proposed["branch"])
+    _run(repo, "checkout", "-q", "master")
+    by_path = {f["path"]: f["status"] for f in result["files"]}
+    assert by_path.get("specs/movable.yaml") == "D", result["files"]
+    assert by_path.get("specs/touchable.yaml") == "M", result["files"]
+
+
+def test_status_field_is_covered_at_all(repo: Path) -> None:
+    """
+    正向对照：**至少存在一条**对 ``status`` 的强断言。
+
+    审核实测：把实现改成「status 恒置 M」，原 16 项测试全绿——字段没有任何覆盖。
+    这条用例与上面三条一起，保证「恒置 M」必然变红。
+    """
+    proposed = _propose(repo)
+    _run(repo, "checkout", "-q", proposed["branch"])
+    _run(repo, "rm", "-q", "specs/demo.yaml")
+    _commit(repo, "proposal: 全新增", {"specs/brand_new.yaml": "b: 1\n"})
+    _run(repo, "checkout", "-q", "master")
+
+    statuses = {f["path"]: f["status"] for f in gi.describe_proposal(repo, proposed["branch"])["files"]}
+    assert statuses == {"specs/demo.yaml": "D", "specs/brand_new.yaml": "A"}, statuses
+
+
+# ---------------------------------------------------------------------------
+# 中危 2：base_ref 必须走 validate_base_ref
+# ---------------------------------------------------------------------------
+
+
+def test_base_ref_head_is_accepted_by_both_tools_gap(repo: Path, allow_spec_write) -> None:
+    """
+    **已知缺口，已上报待裁定**：``validate_base_ref`` 目前**接受** ``"HEAD"``。
+
+    本次修复只把 ``describe_proposal`` 接到 ``validate_base_ref``（与
+    ``propose_spec_change`` 一致），**没有**给共享函数加「拒绝 HEAD」的逻辑——
+    那会同时改变另一个工具的行为，属于共享行为变更，需要单独裁定。
+
+    这条用例锁定的是「修复后两个工具**行为一致**」这个事实：要么一起拒，要么
+    一起接受。若将来给 ``validate_base_ref`` 加上 HEAD 拒绝，这里的两条
+    ``pytest.raises`` 会变红——提醒同步更新本用例，而不是让它悄悄失配。
+    """
+    from tools.mcp_server.write_tools import describe_proposal_tool
+
+    proposed = _propose(repo)
+    # 当前共享校验接受 HEAD（缺口）；describe 不再单独放行，而是与 propose 同源。
+    assert gi.validate_base_ref(repo, "HEAD") == "HEAD"
+    assert describe_proposal_tool(
+        proposed["branch"], base_ref="HEAD", repo_root=repo
+    )["branch"] == proposed["branch"]
+
+
+def test_base_ref_tag_is_accepted(repo: Path, allow_spec_write) -> None:
+    """合法 tag 与 ``propose_spec_change`` 一致地被接受（改前报「找不到 base_ref」）。"""
+    from tools.mcp_server.write_tools import describe_proposal_tool
+
+    proposed = _propose(repo)
+    _run(repo, "tag", "v1", "master")
+
+    result = describe_proposal_tool(proposed["branch"], base_ref="v1", repo_root=repo)
+    assert result["branch"] == proposed["branch"]
+    assert result["base"] == _run(repo, "rev-parse", "master").strip(), (
+        "以 tag 为基线时 merge-base 应等于 tag 指向的 master"
+    )
+
+
+@pytest.mark.parametrize("bad", ["HEAD~0", "master^{commit}", "--output=/tmp/x", "master..main"])
+def test_base_ref_invalid_shapes_raise_tool_error_without_git_leak(repo: Path, bad: str, allow_spec_write) -> None:
+    """
+    形态非法的 base_ref：抛 ``ToolError`` 家族异常，且**不暴露**内部 git 命令。
+
+    改前 ``HEAD~0`` 让 clone 里的 ``update-ref`` 抛裸 ``CalledProcessError``，
+    客户端看到 ``Error executing tool ... returned non-zero exit status 128``。
+    """
+    from tools.mcp_server import ToolError
+    from tools.mcp_server.write_tools import describe_proposal_tool
+
+    proposed = _propose(repo)
+    with pytest.raises(ToolError) as exc_info:
+        describe_proposal_tool(proposed["branch"], base_ref=bad, repo_root=repo)
+    _assert_no_git_command_leak(str(exc_info.value))
+
+
+def test_base_ref_matches_propose_spec_change_behavior(repo: Path, allow_spec_write) -> None:
+    """
+    同族一致性：两个工具的 ``validate_base_ref`` 判定必须相同。
+
+    这是中危 2 的核心——改前 ``describe_proposal`` 完全没走校验，于是同一批
+    输入在 ``propose_spec_change`` 与 ``describe_proposal`` 上得到相反结论。
+    """
+    from tools.mcp_server.write_tools import describe_proposal_tool
+
+    proposed = _propose(repo)
+    _run(repo, "tag", "v2", "master")
+
+    for ref in ("HEAD~0", "master^{commit}", "--output=/tmp/x", "master..main", "no-such"):
+        with pytest.raises(Exception) as propose_exc:
+            gi.validate_base_ref(repo, ref)
+        with pytest.raises(Exception) as describe_exc:
+            describe_proposal_tool(proposed["branch"], base_ref=ref, repo_root=repo)
+        assert type(describe_exc.value).__name__ == type(propose_exc.value).__name__, (
+            f"{ref!r}：propose 抛 {type(propose_exc.value).__name__}，"
+            f"describe 抛 {type(describe_exc.value).__name__}"
+        )
+        assert str(describe_exc.value) == str(propose_exc.value), (
+            f"{ref!r}：两个工具的拒绝理由不一致\n"
+            f"propose: {propose_exc.value}\ndescribe: {describe_exc.value}"
+        )
+
+    # 合法的 tag 两边都接受
+    assert gi.validate_base_ref(repo, "v2") == "v2"
+    assert describe_proposal_tool(proposed["branch"], base_ref="v2", repo_root=repo)["branch"]
+
+
+def test_invalid_base_ref_reaches_client_as_tool_error(repo: Path, monkeypatch) -> None:
+    """
+    端到端：非法 base_ref 经 MCP 出口后，客户端拿到的是**可读原因**，
+    不是笼统的 ``Error executing tool``。
+
+    改前 ``GitNotAllowed`` 是裸 Exception，``_mcp_tool`` 不转换，原因被丢掉。
+    走真实的 ``server.call_tool``（公开入口），只把 ``ROOT`` 指到临时仓库。
+    """
+    import asyncio
+
+    import tools.mcp_server as mcp_server
+    from tools.mcp_server import identity
+
+    monkeypatch.setattr(identity, "require_spec_write", lambda: 42)
+    monkeypatch.setattr(mcp_server, "ROOT", repo)
+    proposed = _propose(repo)
+    server = mcp_server.build_server(allow_write=True)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(server.call_tool(
+            "describe_proposal", {"branch": proposed["branch"], "base_ref": "HEAD~0"}
+        ))
+    message = str(exc_info.value)
+    assert "不合法" in message or "base_ref" in message, f"客户端只看到笼统错误：{message}"
+    _assert_no_git_command_leak(message)
 
 
 # ---------------------------------------------------------------------------

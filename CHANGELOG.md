@@ -7,8 +7,58 @@
 
 <!-- 下一版变更写在这里。 -->
 
+### Added
+
+- **`describe_proposal` MCP 工具**（#46）—— 返回单个提案相对基线的完整 unified
+  diff 与元数据（`branch` / `base` / `head` / `commits` / `files` / `diff`）。
+  只读：全程在隔离 clone 里跑 git，不读用户工作区、不写任何东西。注册在
+  `--allow-write` 分支，与其余三个提案工具同级——每次调用需 `spec:write`。
+  此前查看单提案的完整 diff 只能由人工 `git show`。
+
+### Fixed
+
+- **`describe_proposal` 的 diff 区间改用 merge-base 三点号**（#46）——
+  `A..B` 是两棵树的全量对比；提案从旧 master 分出后 master 又前进时，会把别人
+  已合并的改动**反向**显示成本提案删除的内容，`files` 里也混入别人的文件。
+  现在 `base` 是 merge-base 的 SHA，`diff` 与 `files` 都同源于它。
+- **`describe_proposal` 的 `base_ref` 走 `validate_base_ref()`**（#46）——
+  与 `propose_spec_change` 完全一致。修掉了三类问题：`HEAD` 曾解析成用户当前
+  checkout 的分支；合法 tag 曾报「找不到 base_ref」；`HEAD~0` 曾让裸
+  `CalledProcessError` 冒到客户端（暴露内部 git 命令）。
+- **`describe_proposal` 的 diff 加上限**（#46）—— 超过
+  `MAX_PROPOSAL_DIFF_BYTES`（256KB = 4 × 规格文本上限）直接报错，不截断。
+  归属标记设计上不校验 SHA，任何人都能让 diff 变大；静默截断会让审核人以为
+  看到了全部改动。
+- **`files[].status` 改用 `git diff --name-status -z` 解析**（#46）—— 改前从
+  diff 头切 `" b/"`，非 ASCII 路径会被解析成转义引号串且状态恒为 `M`，重命名
+  的旧路径丢失。现在 A/M/D/R/C 判对，重命名额外给出 `old_path`。
+- **`GitNotAllowed` 归入 `ToolError` 家族**（#46）—— 它携带的是已脱敏、可给
+  调用方看的原因。不继承时 MCP 出口把它当未预料异常，客户端只收到
+  `Error executing tool <name>`，真实原因被丢掉。
+
+
 ### Changed
 
+- **`order.amount` 由「元（float）」改为「分（int）」——存储语义变更，存量库必须迁移**
+  （**breaking**，#89，`879c2fb`）：`amount` 的值含义改变，此前 `12.34` 表示 12.34 元，
+  此后 `1234` 才表示 12.34 元；列类型相应由 `REAL` / `DOUBLE` / `double precision`
+  改为 `INT`。所有直接读写该字段的调用方、报表与外部对账脚本都要按「分」解释。
+
+  升级必须执行新迁移 `3_20261029063723_spec005_amount_cents`
+  （`migrations/models/` 与 `migrations/dialects/{sqlite,mysql,postgres}/` 各一份，
+  共 4 份），入口仍是 `python scripts/migrations/upgrade.py`。四个方言都是**整表重建**。
+
+  **升级前先查**：
+  `SELECT id, amount FROM orders WHERE ABS(amount*100 - ROUND(amount*100)) > 1e-3;`
+  这是迁移的同一判据。**有任何命中，迁移会原子失败、0 行写入**——只改写为 NULL
+  违反 `NOT NULL`，整条 `INSERT` 回滚。此时应人工确认这些行的真实金额再处理，
+  迁移不做四舍五入，也不做截断。
+
+  **严禁手工先把 `amount` ×100 再迁移**：迁移自身负责换算，手工换算会叠加成
+  **100 倍金额错误**，且**不会报错**——手工换算后的整值再乘 100 残差恰为 `0.0`，
+  判据会放行，迁移报告「全部成功」。
+
+  详见 v0.5.0 发布说明（发布时补齐）。
 - **`scripts/run_tests_safe.sh` 要求显式设置 `PYTHON_BIN`，不再回退 `.venv` / PATH**
   （#78，`f9d3e04`）：静默回退可能落到版本不符的解释器上，测试照跑、甚至全绿，
   但结论不可信。脚本现在还在启动时定位仓库根（不依赖调用目录），并逐包校验
