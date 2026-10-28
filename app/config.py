@@ -267,6 +267,12 @@ class DefaultConfig:
     # 登录是否要求二次验证（环境变量 REQUIRE_TWO_FACTOR=true 开启）
     REQUIRE_TWO_FACTOR = False
 
+    # 投递后端逃生阀（AUTH-13，环境变量 ALLOW_NOOP_DELIVERY=true 开启）。
+    # 语义是「本部署确认不依赖邮件投递」，**不是**「懒得配」。
+    # 只影响 production：非生产本来就是 warning，不读这个开关。
+    # 开启后生产仍会启动，但启动期打 warning，且所有消息只写日志、不送达。
+    ALLOW_NOOP_DELIVERY = False
+
     USE_CACHE = True
     ROUTE_CACHE_ENABLED = True
     ROUTE_CACHE_TIMEOUT = 60
@@ -451,6 +457,7 @@ def get_config(name: Optional[str] = None):
     cfg.MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", cfg.MAIL_DEFAULT_SENDER)
     cfg.ENABLE_API_DOCS = _bool_env("ENABLE_API_DOCS", cfg.ENABLE_API_DOCS)
     cfg.REQUIRE_TWO_FACTOR = _bool_env("REQUIRE_TWO_FACTOR", cfg.REQUIRE_TWO_FACTOR)
+    cfg.ALLOW_NOOP_DELIVERY = _bool_env("ALLOW_NOOP_DELIVERY", cfg.ALLOW_NOOP_DELIVERY)
     # 反向代理白名单：默认空（只信 socket 直连）。部署在代理后时必须显式配置，
     # 否则限流会把所有用户算成同一个来源。见类定义处的注释。
     #

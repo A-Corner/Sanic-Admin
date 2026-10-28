@@ -30,6 +30,7 @@
 | `SESSION_COOKIE_SECURE` | `False` | `False` | `True`（继承默认） |
 | `ROUTE_CACHE_ENABLED` | `False` | `False` | `True`（继承默认） |
 | `MAIL_SUPPRESS_SEND` | 未设置 | `True` | 未设置 |
+| `ALLOW_NOOP_DELIVERY` | `False`（仅 warning） | `False`（仅 warning） | `False`（未配置投递后端即拒绝启动，见 §2.4.1） |
 | 缺失密钥 | 自动生成临时值 + warning | 自动生成临时值 + warning | 抛 `ConfigError`，拒绝启动 |
 
 配置对象有两套入口，指向同一份数据：
@@ -123,6 +124,30 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 **【读码确认】** 当前代码库中**没有任何模块读取这些邮件配置**（`grep -rn "MAIL_" app/` 只命中
 `app/config.py` 自身）。项目尚未接入邮件投递渠道：`app/auth/routes.py:34-40` 的 `_delivery_code()`
 在非 DEBUG 环境直接返回 `None`，验证码不会出现在 API 响应里。
+
+### 2.4.1 投递后端（`ALLOW_NOOP_DELIVERY`）
+
+密码重置走 `app/services/delivery.py` 的投递抽象，默认后端 `LoggingBackend`
+**只写日志、不实际发送**。它的 `send()` 正常返回，所以「未配置后端」与「投递成功」
+在运行期完全同形（`deliver()` 返回 True、审计记 success、用户看到「已发送」）。
+
+`before_server_start` 监听器会检查后端是否已配置真实实现（判定标准：不是
+`LoggingBackend` 实例——显式 `set_backend(LoggingBackend())` 仍算未配置）：
+
+| 环境 | 行为 |
+|---|---|
+| development / testing | 启动期 **warning**，服务正常启动 |
+| production | **拒绝启动**（`DeliveryNotConfigured`） |
+| production + `ALLOW_NOOP_DELIVERY=1` | 启动期 **warning**，服务启动 |
+
+| 变量 | 说明 | 默认值 | 生产必填 |
+|---|---|---|---|
+| `ALLOW_NOOP_DELIVERY` | 生产环境是否允许「未配置投递后端也启动」。语义是**「本部署确认不依赖邮件投递」**，不是「懒得配」。解析走 `_bool_env()`，非法值抛 `ConfigError` | `False` | 否 |
+
+**注意：仓库内没有真实后端实现，也没有任何代码调用 `set_backend()`。** 也就是说
+当前部署若把 `SANIC_ENV` 设为 `production`，启动会被这项检查拒绝，必须显式设置
+`ALLOW_NOOP_DELIVERY=1`（或接入真实后端后调用 `set_backend()`）。这是**有意的**
+fail-closed：宁可起不来，也不要带着「看起来能用、实际发不出」的状态运行。
 
 ### 2.5 服务
 
@@ -345,6 +370,10 @@ development / testing 都把它关掉了，production 保持开启（默认超�
   当前无法完成**（客户端拿不到验证码），属于待补齐的功能缺口。
 
 配置好 SMTP 后还需要补齐代码侧的投递实现才能生效，配置本身不会触发发送。
+
+**注意**：密码重置不走 `MAIL_*`，而是走 §2.4.1 的投递抽象。两者是**独立的两套**
+——即使将来按 `MAIL_*` 实现了 SMTP 后端，也仍需调用 `set_backend()` 把它接进去，
+启动期检查不会读 `MAIL_*` 就认为「已配置」。
 
 ---
 

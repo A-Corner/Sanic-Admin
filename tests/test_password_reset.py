@@ -437,6 +437,262 @@ async def test_weak_password_does_not_burn_token(client, captured):
     assert account.verify_password(NEW_PASSWORD), "新口令应已生效"
 
 
+# ---------------------------------------------------------------------------
+# AUTH-13：投递后端未配置时的静默回退
+# ---------------------------------------------------------------------------
+#
+# 问题机制（与「后端抛异常」不同）：
+#   未 `set_backend()` → `get_backend()` 惰性造 `LoggingBackend`
+#   → 它的 `send()` **正常返回** → `deliver()` 返回 True
+#   → 审计记 success → 用户看到「已发送」，而消息从未离开进程。
+#
+# 所以运行期无法区分「未配置」与「投递成功」，唯一区分点是启动期检查。
+
+
+@pytest.fixture()
+def clean_backend():
+    """每个用例从「未配置」状态开始，结束后还原，避免模块级全局变量串味。"""
+    delivery.reset_backend()
+    yield
+    delivery.reset_backend()
+
+
+class _Real(delivery.Backend):
+    """一个「真实投递」替身：不是 LoggingBackend，因此算已配置。"""
+
+    async def send(self, to: str, subject: str, body: str) -> None:
+        pass
+
+
+def _delivery_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "app.services.delivery" and r.levelno >= 30
+    ]
+
+
+def test_unconfigured_backend_warns_on_non_production(clean_backend, caplog):
+    """
+    非生产未配置后端 → **有可见 warning**，且函数返回 False（不实际投递）。
+
+    这是本任务的核心正向对照：以前这里一条日志都没有，所以要断言告警**确实产生**
+    并含可检索的关键词，而不是只断言返回值。
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.services.delivery"):
+        configured = delivery.check_backend_configured(env="development")
+
+    assert configured is False, "未配置后端时不应声称投递可用"
+    messages = _delivery_warnings(caplog)
+    assert messages, "非生产环境未配置后端时必须有 startup warning，实际一条都没有"
+    assert any("LoggingBackend" in m for m in messages), f"告警里应指明退化到了 LoggingBackend：{messages}"
+
+
+def test_configured_backend_is_silent_and_reports_available(clean_backend, caplog):
+    """
+    正向对照的另一半：配好真实后端时，**任何环境都不告警**且返回 True。
+
+    没有这一条，「总是返回 False / 总是告警」的退化实现也能让上面的用例通过。
+    """
+    import logging
+
+    delivery.set_backend(_Real())
+
+    with caplog.at_level(logging.WARNING, logger="app.services.delivery"):
+        assert delivery.check_backend_configured(env="development") is True
+        assert delivery.check_backend_configured(env="production") is True
+
+    assert _delivery_warnings(caplog) == [], f"已配置后端时不应有任何告警：{_delivery_warnings(caplog)}"
+
+
+def test_explicit_logging_backend_counts_as_unconfigured(clean_backend, caplog):
+    """
+    显式 `set_backend(LoggingBackend())` 仍然等于没配——它不投递任何东西。
+
+    若判定用的是「是否调用过 set_backend」，这个用例会红：那种实现会认为
+    「配过了」，于是生产照常启动、消息照旧不发。
+    """
+    import logging
+
+    delivery.set_backend(delivery.LoggingBackend())
+    assert delivery.is_backend_configured() is False
+
+    with caplog.at_level(logging.WARNING, logger="app.services.delivery"):
+        assert delivery.check_backend_configured(env="development") is False
+    assert _delivery_warnings(caplog), "显式设置 LoggingBackend 也应告警"
+
+
+def test_production_without_backend_refuses_to_start(clean_backend):
+    """生产 + 未配置 + 未放行 → 抛 DeliveryNotConfigured，且信息里给出逃生阀名字。"""
+    with pytest.raises(delivery.DeliveryNotConfigured) as exc:
+        delivery.check_backend_configured(env="production")
+    assert "ALLOW_NOOP_DELIVERY" in str(exc.value), (
+        f"拒绝启动的信息必须告诉运维怎么显式放行，实际：{exc.value}"
+    )
+
+
+def test_production_allow_noop_delivery_warns_but_passes(clean_backend, caplog):
+    """
+    生产 + 未配置 + `ALLOW_NOOP_DELIVERY=1` → 不抛，但仍打 warning。
+
+    逃生阀的语义是「本部署确认不依赖投递」，不是「配好了」——所以返回值仍是
+    False，运维仍有告警可查。
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.services.delivery"):
+        configured = delivery.check_backend_configured(env="production", allow_noop=True)
+
+    assert configured is False
+    messages = _delivery_warnings(caplog)
+    assert any("ALLOW_NOOP_DELIVERY" in m for m in messages), f"放行时仍须告警并点明开关：{messages}"
+    assert any("不会送达" in m for m in messages), f"告警应说明消息不会送达：{messages}"
+
+
+# ---------------------------------------------------------------------------
+# AUTH-13：启动流程真的接上了检查（不是只测函数）
+# ---------------------------------------------------------------------------
+
+
+def _production_app(tmp_path, *, allow_noop: bool):
+    """
+    构造一个 ENV=production 的应用（sqlite 库，不依赖 MySQL/Redis）。
+
+    用 conftest 的 `_build_config` 再覆盖 ENV 与 `ALLOW_NOOP_DELIVERY`：
+    **环境判定维度是 `ENV`**（与 `create_app` / `config.get_config` 一致），
+    不看 `TESTING`/`DEBUG`——后者是测试便利开关，不该决定生产语义。
+    """
+    from app import create_app
+    from tests.conftest import _build_config, _unregister_previous_apps
+
+    db_path = tmp_path / "prod.sqlite3"
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = _build_config(db_path, upload_dir)
+    cfg["ENV"] = "production"
+    cfg["ALLOW_NOOP_DELIVERY"] = allow_noop
+
+    _unregister_previous_apps()
+    return create_app(cfg)
+
+
+async def test_startup_refuses_in_production_without_backend(tmp_path, clean_backend):
+    """
+    端到端：production 应用启动时，`before_server_start` 真的把启动挡下来。
+
+    破坏实验：把 `_register_listeners` 里那段 `check_backend_configured` 删掉，
+    本用例必须红（启动静默通过）。只测 `check_backend_configured` 本身做不到
+    这一点——函数正确但没人调用，功能等于没做。
+    """
+    import asyncio
+
+    from tests.conftest import _unregister_previous_apps
+
+    application = _production_app(tmp_path, allow_noop=False)
+    application.asgi = True
+    try:
+        await application._startup()
+        with pytest.raises(delivery.DeliveryNotConfigured):
+            await application._server_event("init", "before", asyncio.get_running_loop())
+    finally:
+        _unregister_previous_apps()
+
+
+async def _run_startup_capturing_delivery(application, caplog) -> list[str]:
+    """
+    跑一次 `before_server_start`，返回投递模块产生的 WARNING 文本。
+
+    production 启动在投递检查之后还有一道**无关**的门禁（缺 aerich 迁移账本会
+    抛 RuntimeError）。本文件只关心投递检查，所以：把 `DeliveryNotConfigured`
+    单独放行（由调用方断言「不该出现」），其余异常视为「投递检查已通过」。
+    """
+    import asyncio
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.services.delivery"):
+        try:
+            await application._server_event("init", "before", asyncio.get_running_loop())
+        except delivery.DeliveryNotConfigured:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 后续门禁（迁移账本等）与本次改动无关
+            assert "aerich" in str(exc) or "迁移" in str(exc), (
+                f"启动失败的并非投递检查、也不是已知的迁移门禁：{type(exc).__name__}: {exc}"
+            )
+    return _delivery_warnings(caplog)
+
+
+async def test_startup_passes_in_production_when_backend_configured(tmp_path, clean_backend, caplog):
+    """对照：production + 已配置后端 → 启动不因投递被挡，且不产生任何投递告警。"""
+    from tests.conftest import _unregister_previous_apps
+
+    delivery.set_backend(_Real())
+    application = _production_app(tmp_path, allow_noop=False)
+    application.asgi = True
+    try:
+        await application._startup()
+        assert await _run_startup_capturing_delivery(application, caplog) == []
+    finally:
+        from tortoise import Tortoise
+
+        await Tortoise.close_connections()
+        _unregister_previous_apps()
+
+
+async def test_startup_warns_in_production_when_noop_allowed(tmp_path, clean_backend, caplog):
+    """production + `ALLOW_NOOP_DELIVERY=True` → 启动不被挡，但告警必须出现。"""
+    from tests.conftest import _unregister_previous_apps
+
+    application = _production_app(tmp_path, allow_noop=True)
+    application.asgi = True
+    try:
+        await application._startup()
+        messages = await _run_startup_capturing_delivery(application, caplog)
+        assert any("ALLOW_NOOP_DELIVERY" in m for m in messages), f"放行后仍须告警：{messages}"
+    finally:
+        from tortoise import Tortoise
+
+        await Tortoise.close_connections()
+        _unregister_previous_apps()
+
+
+async def test_ordinary_startup_warns_but_does_not_block(tmp_path, clean_backend, caplog):
+    """
+    非生产（testing）走普通启动流程：告警出现，但**启动不被阻断**。
+
+    这条同时回答了两个边界问题：
+
+    1. 测试环境的 `ENV` 是 ``testing``（见 `tests/conftest.py`），所以 fail-fast
+       不会生效——否则整个测试套件会集体起不来；
+    2. 告警确实由**启动监听器**产生，而不只是 `check_backend_configured()` 能被
+       单独调用到。
+    """
+    from app import create_app
+    from tests.conftest import _build_config, _unregister_previous_apps
+
+    db_path = tmp_path / "testing.sqlite3"
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    _unregister_previous_apps()
+    application = create_app(_build_config(db_path, upload_dir))
+    assert application.config.ENV == "testing", (
+        f"测试环境应为 testing（fail-fast 不生效），实际 {application.config.ENV!r}"
+    )
+    application.asgi = True
+    try:
+        await application._startup()
+        messages = await _run_startup_capturing_delivery(application, caplog)
+        assert any("LoggingBackend" in m for m in messages), f"非生产启动应告警：{messages}"
+    finally:
+        from tortoise import Tortoise
+
+        await Tortoise.close_connections()
+        _unregister_previous_apps()
+
+
 async def test_save_failure_rolls_back_token_claim(client, captured, monkeypatch):
     """
     [AUTH-11] 认领令牌与保存口令必须同一事务：save 失败时令牌不得被烧掉。

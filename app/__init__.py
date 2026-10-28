@@ -232,6 +232,35 @@ def _register_listeners(app: Sanic) -> None:
     cache_pkg = importlib.import_module("app.cache")
 
     @app.listener('before_server_start')
+    async def check_delivery_backend(app):
+        """
+        投递后端必须在启动期可见（AUTH-13）。
+
+        `LoggingBackend.send()` 正常返回，因此**未配置后端**与**投递成功**在运行期
+        完全同形：`deliver()` 返回 True、审计记 success、用户看到「已发送」。这个
+        监听器是唯一能把两者区分开的地方——非生产打 warning，生产拒绝启动
+        （除非显式声明 `ALLOW_NOOP_DELIVERY=1`）。
+
+        **为什么是 `before_server_start` 而不是 `main_process_start`**：
+        `main_process_start` 只在主进程跑一次，而「哪个 worker 忘了配」恰恰需要
+        每个进程自己检查；Sanic 25.12 也没有公开 API 回答「我是第几个 worker」。
+        代价是多 worker 部署下每个 worker 各打一条相同的告警——重复告警比告警
+        位置错（主进程通过、worker 带病运行）好。
+
+        **为什么在 `setup_db` 之前注册**：Sanic 按注册顺序执行监听器，配置问题
+        应该在建库/建表之前就暴露，避免「连了库、建了表、然后才拒绝启动」。
+
+        Args:
+            app: 当前应用实例（Sanic 会把 app 传进来，覆盖外层同名变量）
+        """
+        from app.services.delivery import check_backend_configured
+
+        check_backend_configured(
+            env=app.config.get("ENV"),
+            allow_noop=bool(app.config.get("ALLOW_NOOP_DELIVERY", False)),
+        )
+
+    @app.listener('before_server_start')
     async def setup_db(app):
         await models.init_db(app)
         app.ctx.db_ready = True
