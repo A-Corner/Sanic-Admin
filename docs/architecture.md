@@ -20,8 +20,9 @@ graph TD
 
     subgraph Sanic["Sanic 23.6 应用进程"]
         subgraph MW["中间件链 app/middleware"]
-            MW1["注册1 响应: CORS 头<br/>security_middleware.py:20-35"]
-            MW2["注册2 请求: OPTIONS 预检短路<br/>security_middleware.py:37-41"]
+            MW1["注册1 响应: CORS 头<br/>security_middleware.py:73-88"]
+            MW2["注册2 请求: OPTIONS 预检短路<br/>security_middleware.py:90-94"]
+            MW2B["注册2b 请求: CSRF 校验（enforce_csrf）<br/>security_middleware.py:96-126"]
             MW3["注册3 请求: 日志<br/>app/middleware/__init__.py:24-27"]
             MW4["注册4 响应: 耗时日志<br/>app/middleware/__init__.py:29-33"]
             MW5["注册5 请求: 认证中间件<br/>auth_middleware.py:43-47"]
@@ -76,13 +77,13 @@ graph TD
 
 **【读码确认】** 关键点：
 
-- **中间件的实际注册顺序**（`app/middleware/__init__.py:36-51` 的 `register_all_middlewares`）：
-  1. `setup_error_handlers(app)`（`:43`）——注册异常处理器，不是中间件
-  2. `setup_security_middleware(app)`（`:44`）——注册 **CORS 响应中间件** + **OPTIONS 请求中间件**
-  3. `_setup_request_logging(app)`（`:45`）——注册 **请求日志** + **响应日志**中间件
-  4. `AuthMiddleware()`（`:46`）——注册认证请求中间件
+- **中间件的实际注册顺序**（`app/middleware/__init__.py:51-64` 的 `register_all_middlewares`）：
+  1. `setup_error_handlers(app)`（`:58`）——注册异常处理器，不是中间件
+  2. `setup_security_middleware(app)`（`:59`）——注册 **CORS 响应中间件** + **OPTIONS 请求中间件** + **`enforce_csrf` CSRF 请求中间件**
+  3. `_setup_request_logging(app)`（`:60`）——注册 **请求日志** + **响应日志**中间件
+  4. `AuthMiddleware()`（`:64`）——注册认证请求中间件
 
-  随后 `app/__init__.py:70-74` 再注册 gzip 响应压缩中间件（`configure_compression`）。
+  随后 `app/__init__.py:186` 再注册 gzip 响应压缩中间件（`configure_compression`）。
 
   **【已实测】** M1 已移除 `FileDownloadCounterMiddleware`（原 `:49-56`，包在 try/except 里
   做 development/testing 降级、production fail-closed）。上传目录不再静态托管，下载计数改由
@@ -301,7 +302,7 @@ production 下（`ENABLE_API_DOCS=False`，实测）：
 |---|---|
 | `app/middleware/__init__.py` | `register_all_middlewares(app)`——集中注册全部中间件 |
 | `app/middleware/error_handler.py` | 三级异常处理：`BaseError`（业务异常，返回 `exception.to_dict()`）→ `SanicException` → 兜底 `Exception`（DEBUG 时附 traceback） |
-| `app/middleware/security_middleware.py` | CORS 响应中间件、OPTIONS 预检短路、`csrf_protect()` 装饰器（**当前无路由使用**） |
+| `app/middleware/security_middleware.py` | CORS 响应中间件、OPTIONS 预检短路、`enforce_csrf` **全局 CSRF 请求中间件**（双提交 cookie，`:96-126`）、`issue_csrf_token` 下发 token——**不是**按路由挂的装饰器 |
 | `app/middleware/auth_middleware.py` | `AuthMiddleware`——从 `Authorization: Bearer` 或 Cookie 提取令牌，查有效会话并挂到 `request.ctx.authentication_session`；**失败不中断请求** |
 | `app/middleware/compression.py` | gzip 响应压缩：阈值 / 可压缩类型 / 排除路径 / 压缩统计 |
 | `app/middleware/_headers.py` | `append_vary(headers, value)`——Vary 头合并去重 |
@@ -588,7 +589,7 @@ Sanic-Admin/
 │   ├── middleware/               # ── 中间件 ──────────────────────────────
 │   │   ├── __init__.py           # register_all_middlewares()：集中注册
 │   │   ├── error_handler.py      # 三级异常处理
-│   │   ├── security_middleware.py# CORS / OPTIONS / csrf_protect
+│   │   ├── security_middleware.py# CORS / OPTIONS / enforce_csrf
 │   │   ├── auth_middleware.py    # AuthMiddleware
 │   │   ├── compression.py        # gzip 响应压缩 + 统计
 │   │   └── _headers.py           # append_vary()
@@ -991,7 +992,7 @@ M1 之前的基线上，`/api/v1/*` **全部不存在**，启动日志给出两�
 | 5 | `from app.api.resources.account import account_api` | `app/api/routes.py` | **已消除**：M1 删除了 `app/api/routes.py` 与 `app/api/example.py` |
 | 6 | `setup_docs()` 无调用点 | `app/docs/__init__.py:33` | **已修复**：已在 `app/__init__.py:81-83` 接线，由 `ENABLE_API_DOCS` 控制；development 下 `/swagger`（302→200）、`/swagger.json`、`/redoc` 均 200 |
 | 7 | `register_web_blueprints()` 无调用点 + `frontend/templates/` 不存在 | `app/web/routes.py:39` | **仍存在**：Web 渲染路由是死代码，前端主线已改用 AMIS 静态页 |
-| 8 | `csrf_protect()` 无路由使用 | `app/middleware/security_middleware.py:44` | **仍存在**：CSRF 保护未生效（目前靠 SameSite=Lax） |
+| 8 | `csrf_protect()` 无路由使用（`8750d51` 快照） | `app/middleware/security_middleware.py` | **已修复（v0.3.0）**：快照时 `csrf_protect()` 装饰器确实无人使用；v0.3.0 起改为 **`enforce_csrf` 全局请求中间件**（`:96-126`，由 `setup_security_middleware` 在 `app/middleware/__init__.py:59` 注册），对所有「非 GET/HEAD/OPTIONS + 带会话 cookie + 无 `Authorization` 头」的请求强制校验 `X-CSRF-Token` 与 `csrf_token` cookie，失败 403 `CSRF_TOKEN_INVALID`；旧装饰器已删除，`grep -rn csrf_protect` 仅剩 `security_middleware.py:7` 的模块 docstring 历史说明 |
 | 9 | 中间件读 Cookie `session_id`，实际下发的是 `session` | `app/middleware/auth_middleware.py:27` | **已修复**：改读 `AuthenticationSession.cookie_name`（即 `session`，`app/models/session.py:66`） |
 | 10 | 邮件配置无消费方 | `app/config.py:220-225` | **仍存在**：production 下验证码无处送达，注册验证 / 两步验证流程无法完成 |
 | 11 | `amis/index.html` 不存在；`site.json` 引用不存在的 `static/pages/` | `amis/` | **已修复**：M1 补齐 `index.html`，并把页面引用改成 `pages/xxx.json` 相对路径 |

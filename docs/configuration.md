@@ -483,10 +483,15 @@ payload 只有两个字段：
 5. **`/health` 无鉴权**且返回 `{"status":"ok","env":<ENV>}`（`app/__init__.py:83-85`）。
    生产环境会暴露运行环境信息，部署时应由反向代理限制访问。
 
-6. **CSRF 保护装饰器已实现但未启用**：`csrf_protect()`（`app/middleware/security_middleware.py:44-60`）
-   校验 `X-CSRF-Token` 头与 `csrf_token` Cookie 一致，但全代码库**没有任何路由使用它**
-   （`grep -rn "csrf_protect"` 只命中定义与导出）。会话 Cookie 是 `HttpOnly` + `SameSite=Lax`
-   （`app/models/session.py:144-150`），目前依赖 SameSite 做基础防护。
+6. **CSRF 保护是强制执行的全局中间件（v0.3.0 起）**：`enforce_csrf`
+   （`app/middleware/security_middleware.py:96-126`，装饰器 `@app.middleware('request')`）
+   由 `setup_security_middleware` 在 `app/middleware/__init__.py:59` 注册，**不是**按路由挂的装饰器。
+   它拦截「非 `GET`/`HEAD`/`OPTIONS` + 携带 `session` Cookie + 不带 `Authorization` 头」的请求，
+   要求 `X-CSRF-Token` 头与 `csrf_token` Cookie 一致（`secrets.compare_digest`），不一致返回
+   403 `CSRF_TOKEN_INVALID`；`/auth/login` 与 `/auth/register` 在 `CSRF_EXEMPT_PREFIXES` 中豁免。
+   token 由 `issue_csrf_token` 在登录成功时以双提交 cookie 方式下发。
+   会话 Cookie 另有 `HttpOnly` + `SameSite=Lax`（`app/models/session.py:147-149`），是纵深防御的另一层，
+   不是 CSRF 的唯一防线。
 
 7. **`SECRET_KEY` 与 `PASSWORD_SALT` 曾经是「必填但没人用」**：这会造成一种虚假的安全感——
    运维以为配了就安全，实际上口令哈希由 argon2id 的随机盐保护，会话签名由 RSA 密钥保护，
