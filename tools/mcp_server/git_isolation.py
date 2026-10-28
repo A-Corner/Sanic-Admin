@@ -570,6 +570,128 @@ def list_proposal_branches(repo_root: Path) -> List[dict]:
     return branches
 
 
+def describe_proposal(repo_root: Path, branch: str, *, base_ref: str = DEFAULT_BASE_REF) -> dict:
+    """
+    返回一个提案相对基线的完整 unified diff 与元数据。**只读**。
+
+    归属校验与 :func:`discard_proposal` **同源**——必须同时满足：
+
+    1. 分支名是 ``proposal/`` 前缀且形态合法
+    2. 存在归属标记 ``refs/specgen/proposals/<name>``（证明是本工具创建的）
+
+    与 ``discard`` 的区别：不要求「标记 SHA == 分支当前 SHA」。那条是为了防
+    **删除**时被人偷换内容；这里只**读**，内容变了反而应该如实返回——读者
+    看到的正是分支现在的样子。标记只用来证明「这是本工具建的提案」，不是证明
+    「没被改过」。
+
+    全程在**隔离 clone** 里执行 ``git diff``：不读用户工作区、不写任何东西、
+    不碰工作区的 index。
+
+    Args:
+        repo_root: 用户仓库根目录
+        branch: 提案分支名
+        base_ref: 对比的基线，默认 ``master``
+
+    Returns:
+        ``{"branch", "base", "head", "commits", "files", "diff"}``
+
+    Raises:
+        GitNotAllowed: 前缀/形态不合法、分支不存在、无归属标记、基线不可达
+    """
+    if not branch.startswith(PROPOSAL_PREFIX):
+        raise GitNotAllowed(
+            f"只能描述 {PROPOSAL_PREFIX!r} 前缀的分支，实际 {branch!r}"
+        )
+    # 形态校验放在最前：拼 `refs/heads/<b>` 全名之前先确认名字合法。
+    if not _BRANCH_RE.fullmatch(branch):
+        raise GitNotAllowed(f"分支名不合法：{branch!r}")
+
+    repo_root = repo_root.resolve()
+    if not branch_exists(repo_root, branch):
+        raise GitNotAllowed(f"分支不存在：{branch!r}")
+
+    # 归属校验：与 discard 同一判据（只到「标记存在」这一条，不比对 SHA）
+    ref = proposal_ref(branch)
+    try:
+        _git(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo_root)
+    except subprocess.CalledProcessError:
+        raise GitNotAllowed(
+            f"拒绝描述 {branch!r}：没有归属标记（{ref}）。"
+            "本工具只描述自己创建的提案分支——手工建立的同名分支不在此列。"
+        ) from None
+
+    # 全名解析，避免与同名 tag 混淆
+    head = _git(["rev-parse", f"refs/heads/{branch}^{{commit}}"], cwd=repo_root).strip()
+
+    tmp_root = make_workspace()
+    clone_dir = tmp_root / "repo"
+    try:
+        _git(
+            ["clone", "--no-hardlinks", "--local", str(repo_root), str(clone_dir)],
+            cwd=repo_root,
+        )
+        _pin_base_ref(clone_dir, base_ref)
+        _harden_clone(clone_dir)
+
+        # 基线必须在 clone 里可达——否则 diff 无从算起。单独给出错误，
+        # 不让它表现成「空 diff」。
+        try:
+            base = _git(["rev-parse", f"{base_ref}^{{commit}}"], cwd=clone_dir).strip()
+        except subprocess.CalledProcessError:
+            raise GitNotAllowed(
+                f"基线分支不可达：{base_ref!r}"
+            ) from None
+
+        commits_out = _git(
+            ["log", "--format=%H%x1f%an%x1f%aI%x1f%s", f"{base}..{head}"],
+            cwd=clone_dir,
+        ).strip()
+        commits = []
+        for line in commits_out.split("\n"):
+            if not line.strip():
+                continue
+            sha, author, iso, subject = line.split("\x1f", 3)
+            commits.append(
+                {"sha": sha, "author": author, "date": iso, "subject": subject}
+            )
+
+        # 只取路径清单；状态从 diff 头解析（`new file mode` / `deleted file mode`），
+        # 因为 `_git` 的参数白名单只放行 `--name-only`，不放行 `--name-status`。
+        name_only = _git(
+            ["diff", "--name-only", f"{base}..{head}"], cwd=clone_dir
+        ).strip()
+        paths = [p for p in name_only.split("\n") if p.strip()]
+
+        diff = _git(["diff", f"{base}..{head}"], cwd=clone_dir)
+
+        # 逐文件从 diff 头判状态：A=新增 D=删除 M=修改（与 --name-status 同义）
+        statuses = {}
+        current = None
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                # `diff --git a/<path> b/<path>` —— 取 b 侧路径
+                parts = line.split(" b/", 1)
+                current = parts[1] if len(parts) > 1 else None
+                statuses.setdefault(current, "M")
+            elif line.startswith("new file mode") and current:
+                statuses[current] = "A"
+            elif line.startswith("deleted file mode") and current:
+                statuses[current] = "D"
+
+        files = [{"status": statuses.get(p, "M"), "path": p} for p in paths]
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    return {
+        "branch": branch,
+        "base": base,
+        "head": head,
+        "commits": commits,
+        "files": files,
+        "diff": diff,
+    }
+
+
 def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> None:
     """
     删除提案分支。**必须同时满足三条**才允许删：
