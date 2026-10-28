@@ -119,9 +119,14 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-实测结果：exit code 0。安装的关键版本：`sanic==23.6.0`、`sanic-ext==23.6.0`、
-`tortoise-orm==0.20.0`、`pytest==8.4.2`、`pytest-asyncio==0.23.8`、`ruff==0.17.1`、
-`pydantic==2.14.1`、`cryptography==50.0.2`、`redis==5.3.1`。
+实测结果：exit code 0。安装的关键版本：`sanic==25.12.1`、`sanic-routing==23.12.0`、
+`sanic-ext==25.12.0`、`tortoise-orm==0.20.0`、`pytest==8.4.2`、`pytest-asyncio==0.23.8`、
+`ruff==0.17.3`、`pydantic==2.14.1`、`cryptography==50.0.2`、`redis==5.3.1`。
+
+> **不要用 `sanic-ext 23.6.0` 的环境验证测试结果**：该版本携带的 `sanic-routing 23.6.0`
+> 会在 `Router.resolve` 中把「方法不允许」转成 `404 NotFound`，使断言「这里应返回 404」
+> 的测试**假绿**（`sanic-routing` 23.12 起改为保留 `NoMethod` 异常、正确返回 405）。
+> `requirements.txt` 已固定 `sanic-routing==23.12.0`。
 
 > `.gitignore` 已忽略 `.venv`（第 124 行）。**若你用了别的 venv 名字（如 `.venv-agent`），
 > 它不会被忽略，提交前必须 `rm -rf`。**
