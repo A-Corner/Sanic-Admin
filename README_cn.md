@@ -8,7 +8,7 @@
 ## 三个核心点
 
 - **规格即代码**。一个模块一份 YAML；生成器确定性地产出模型、CRUD API、权限点、AMIS 页面、测试与 SQLite/MySQL/PostgreSQL 迁移。同样规格产出逐字节相同的结果——变更以 diff 评审，而不是对比两次数据库状态。证据：[v0.4.0 发布](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.0)与[十分钟演示](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/demo/ai-module-in-10-minutes.md)。
-- **AI 出提案，人来做合并**。MCP 服务提供五个只读工具，写入路径**默认关闭**：提案落在 `proposal/` 分支，四层独立机制保证 AI 不能 push、不能合并——合并永远是人的动作。见 [docs/mcp.md](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp.md) 与[四层机制论证](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp-write-path.md)。
+- **AI 出提案，人来做合并**。MCP 服务提供五个只读工具，写入路径**默认关闭**；开启后也只能建 `proposal/` 分支与归属 ref——不改工作区、不 push、不合并，四层独立机制保证这一点，合并永远是人的动作。见 [docs/mcp.md](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp.md) 与[四层机制论证](https://github.com/A-Corner/Sanic-Admin/blob/master/docs/mcp-write-path.md)。
 - **门禁真跑**。v0.4.0 发布树全量 **640 passed / 0 failed**；真实浏览器跑 **22 条 E2E 断言**；CI 起 MySQL 8 与 PostgreSQL 16 实跑迁移并对着 `information_schema` 断言列类型；Docker 验收真起容器——每道门禁都被设计成能够失败。证据：[v0.4.0 发布说明](https://github.com/A-Corner/Sanic-Admin/blob/v0.4.0/docs/release/v0.4.0-release-notes.md)。
 
 ## 与 Directus / NocoBase 的对比
@@ -82,14 +82,14 @@ python -m tools.specgen check      # OK: 生成物与规格一致
 ## 已知限制
 
 - 生成器只处理**新增**：删列、改类型等破坏性迁移刻意要求手写。
-- MCP 写入路径是**原型**（默认关闭）；账户级 `spec:write` 权限正在 v0.4.2 落地。
-- 管理界面为 **AMIS 3.4.0**，6.x 升级评估在后。
+- MCP 写入路径是**原型**（默认关闭）；账户级 `spec:write` 权限已在 v0.4.2 发布。
+- 管理界面为 **AMIS 6.13.0**（v0.4.1 从 3.4.0 升级）。
 - **单一维护者**，尚无外部贡献者。
 - 尚不可用于生产环境——见下方项目状态。
 
 ---
 
-> **项目状态**：最新版本为 **[v0.3.4](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.4)**（2026-10-24，鉴权加固），其前依次为 [v0.3.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.3)（控制台热修）与 v0.3.2；原始重构版本为 v0.2.0。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供；自 v0.3.4 起该值若强度不足，**生产环境拒绝启动**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+> **项目状态**：最新版本为 **[v0.4.2](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.2)**（2026-10-27，MCP 写入路径接入账户级 `spec:write` 权限），其前依次为 [v0.4.1](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.1)（时间字段 ISO 8601、AMIS 6.13.0）与 v0.4.0（规格生成器）；原始重构版本为 v0.2.0。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供；自 v0.3.4 起该值若强度不足，**生产环境拒绝启动**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
 >
 > **从 v0.3.1 及更早版本升级**需先运行 [v0.3.2 发布说明](docs/release/v0.3.2-release-notes.md) 中的迁移脚本（新增 `account.must_change_password`）；全新安装无需迁移。
 >
@@ -313,6 +313,9 @@ python main.py
 | [docs/release/v0.3.2-release-notes.md](docs/release/v0.3.2-release-notes.md) | v0.3.2：首登强制改密、2FA 修复；**从 v0.3.1 及更早升级需跑迁移** |
 | [docs/release/v0.3.3-release-notes.md](docs/release/v0.3.3-release-notes.md) | v0.3.3：控制台角色弹窗热修、E2E 门禁修复、新增 `amis-e2e` CI |
 | [docs/release/v0.3.4-release-notes.md](docs/release/v0.3.4-release-notes.md) | v0.3.4：鉴权加固——审计日志、改密限速、口令强度、会话轮换（含两处 breaking） |
+| [docs/release/v0.4.0-release-notes.md](docs/release/v0.4.0-release-notes.md) | v0.4.0：规格即代码——一份 YAML 生成模型、CRUD API、AMIS 页面与三方言迁移；生产环境要求 `aerich` 账本（breaking） |
+| [docs/release/v0.4.1-release-notes.md](docs/release/v0.4.1-release-notes.md) | v0.4.1：时间字段改 ISO 8601、AMIS 升级 6.13.0、`discard_proposal` 归属校验（含一处 breaking） |
+| [docs/release/v0.4.2-release-notes.md](docs/release/v0.4.2-release-notes.md) | v0.4.2：账户级 `spec:write`、`GET /auth/whoami`、生成资源 CRUD 审计日志（含一处 breaking） |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南与 PR 流程 |
 | [SECURITY.md](SECURITY.md) | 安全漏洞私下报告渠道 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
