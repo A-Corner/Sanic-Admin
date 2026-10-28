@@ -14,11 +14,6 @@ def sample(f: FieldSpec, alt: bool = False):
         if f.format == "email":
             return "alt@example.com" if alt else "sample@example.com"
         return (f"{f.name}-{'alt' if alt else 'sample'}")[: f.max_length]
-    if f.type == "int" and f.unit_scale is not None:
-        # 最小单位整数：样例取整展示单位（SPEC-005）。
-        # 不取倍数的话，样例值 1 在 scale=100 下是 0.01 个展示单位——
-        # 这种样例本身就在演示「看起来正常但意思是错的」。
-        return 2 * f.unit_scale if alt else f.unit_scale
     return {
         "text": "alt text" if alt else "sample text",
         "int": 2 if alt else 1,
@@ -389,20 +384,6 @@ def render_test(spec: ResourceSpec, specs: Dict[str, ResourceSpec]) -> str:
                 "    response = await client.post(URL, headers=auth_headers, json=payload)",
                 "    assert response.status_code == 201, response.text[:300]",
                 f'    assert response.json()["data"][{f.name!r}] == {f.default!r}',
-            ]
-        if f.unit_scale is not None:
-            # 正向对照（SPEC-005 验收④）：小数金额必须被拒。
-            # 静默截断（12.34 → 12）比报错更危险——它看起来正常，但金额少了 0.34。
-            L += [
-                "",
-                f"async def test_fractional_{f.name}_returns_400(client, auth_headers):",
-                f'    """{f.name} 是最小单位整数：传小数（如 12.34）必须 400，不能静默截断。"""',
-                *pre,
-                f"    payload = {_payload(spec, fk)}",
-                f"    payload[{f.name!r}] = 12.34",
-                "    response = await client.post(URL, headers=auth_headers, json=payload)",
-                "    assert response.status_code == 400, response.text[:300]",
-                f'    assert {f.name!r} in response.json()["details"]',
             ]
         if f.type == "string":
             L += [

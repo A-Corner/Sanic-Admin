@@ -20,6 +20,24 @@ must_change_password=True（交付口令未换，必须走强制改密）。脚�
 被禁用的管理员与非管理员账户即使口令仍是默认值也不比对、不置标志——
 禁用账户无法登录，非管理员不经此流程管理。
 
+**这个边界留下一个未覆盖的分支，运维必须知道**：
+被跳过的禁用管理员，其 ``must_change_password`` 保持 False（补列 DDL 的默认值），
+口令也仍是**从未更换过的历史默认口令**。项目当前**没有「重新启用账号」的代码路径**
+（``app/models/account.py:178`` 只有 ``disable()``，全仓无 ``enable()``；
+``app/api/resources/account.py`` 的 ``ACCOUNT_UPDATE_FIELDS`` 也不含 ``disabled``），
+所以应用层不会自动发生；但运维直接改库
+（``UPDATE account SET disabled=0 ...``）恢复一个禁用管理员后，该账号会
+**带着默认口令、以 must_change_password=False 直接可登录，并跳过强制改密**，
+且 ``is_admin=True`` 意味着全量权限。
+
+``must_change_password`` 唯一的清零点是本人改密（``app/auth/routes.py`` 里
+改密成功后 save 该字段），重新启用路径上没有任何重置逻辑。
+
+**恢复被禁用管理员时的正确做法**：恢复后**手动复跑一次本脚本**
+（脚本每次运行都会重新比对，发现口令仍是默认值就会重新置标志）；
+或恢复时同时把该账号的 ``must_change_password`` 直接置为 1。
+**本脚本是升级期一次性步骤，常规流程不会自动复跑——这条不能靠脚本自己兜住。**
+
 支持方言：SQLite / MySQL / PostgreSQL（生产默认 MySQL，见 app/config.py）。
 用法（在仓库根目录、已配置数据库环境变量的环境下）：
     python scripts/migrate_v0_3_2_must_change_password.py [--create-initial-admin]
