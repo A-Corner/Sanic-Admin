@@ -1403,7 +1403,7 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 9. **提交前自检**：
    ```bash
    .venv/bin/ruff check .          # 期望 All checks passed!
-   .venv/bin/pytest --collect-only -q   # 期望数字与 §3.2 一致或更好
+   .venv/bin/pytest --collect-only -q   # 记下数字，改动前后对比（见 §0.1）
    git status --short              # 期望只有你有意改动的文件
    ```
 10. **清理临时产物**：venv、`node_modules`、`package-lock.json`（未被跟踪）、
