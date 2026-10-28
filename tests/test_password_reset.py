@@ -166,14 +166,27 @@ async def test_confirm_token_is_single_use(client, captured):
     assert match, "投递正文里没有令牌"
     token_value = match.group(1)
 
+    # 库里存的是 sha256 哈希（见 verification._hash_reset_token），
+    # 拿明文 token_value 去查 token 列**永远查不到**，断言会恒为真、零覆盖。
+    # 必须先把明文哈希成与库中相同的形态再查。
+    import hashlib
+
+    hashed = hashlib.sha256(token_value.encode("utf-8")).hexdigest()
+
+    # 正向对照（用前）：按哈希必须能查到未使用的这一行。
+    # 若这里查不到，说明下面的「用后查不到」毫无判别力，测试应立刻失败。
+    assert await VerificationToken.filter(token=hashed, used=False).exists(), (
+        "正向对照失败：用前按哈希查不到令牌，后续断言没有判别力"
+    )
+
     first = await client.post(
         "/auth/password-reset/confirm",
         json={"token": token_value, "new_password": NEW_PASSWORD},
     )
     assert first.status_code == 200, f"首次使用应成功：{first.text}"
 
-    # 令牌应已从库里删除
-    assert not await VerificationToken.filter(token=token_value).exists(), "用后应即焚，令牌仍存在"
+    # 令牌应已从库里删除（reset_password 成功路径确实 verification_token.delete()）
+    assert not await VerificationToken.filter(token=hashed).exists(), "用后应即焚，令牌仍存在"
 
     second = await client.post(
         "/auth/password-reset/confirm",
@@ -291,13 +304,52 @@ async def test_old_token_invalidated_before_new_one_created(client, captured, mo
     """
     [低2] 旧令牌必须先作废，再建新令牌。
 
-    验证方式：在「作废旧」与「建新」之间不留下两个有效令牌的窗口。
-    做法：请求两次，然后断言库里对该账户只有 1 条 used=False。
+    **为什么不能只断言终态**：只数「最终 used=False 的条数 == 1」，无法区分
+    「先作废再建新」与「先建新再作废（作废时排除新建的那条）」——两种实现
+    的终态都是 1。顺序本身才是要验证的性质，必须直接观测调用顺序。
+
+    做法：在 `VerificationToken` 的 `create` 与 `QuerySet.update(used=True)`
+    上各包一层，按实际发生顺序记录，断言「作废」先于「建新」。
+
+    破坏实验：把 `request_password_reset()` 里「先作废旧」与「再建新」两段
+    对调，本测试必须红（记录顺序变成 create → update）。
     """
+    from tortoise.queryset import QuerySet
+
+    order: list[str] = []
+    orig_update = QuerySet.update
+    orig_create = VerificationToken.create
+
+    def spy_update(self, **kwargs):
+        # 只关心「把 password_reset 令牌标记为已使用」这一种写
+        if self.model is VerificationToken and kwargs.get("used") is True:
+            order.append("update")
+        return orig_update(self, **kwargs)
+
+    async def spy_create(*args, **kwargs):
+        if kwargs.get("token_type") == "password_reset":
+            order.append("create")
+        return await orig_create(*args, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "update", spy_update)
+    monkeypatch.setattr(VerificationToken, "create", spy_create)
+
     email = await _admin_email()
+    # 第一次申请：库里还没有旧令牌，只建一条
     await client.post("/auth/password-reset/request", json={"email": email})
+    assert "create" in order, "第一次申请应创建令牌"
+
+    # 第二次申请：此时库里已有一条有效令牌，应「先作废它、再建新的」
+    order.clear()
     await client.post("/auth/password-reset/request", json={"email": email})
 
+    assert "update" in order, f"再次申请应先作废旧令牌，实际调用顺序 {order}"
+    assert "create" in order, f"再次申请应创建新令牌，实际调用顺序 {order}"
+    assert order.index("update") < order.index("create"), (
+        f"顺序错误：必须先作废旧令牌再建新令牌，实际 {order}"
+    )
+
+    # 终态检查作为次要断言（保留，但它无法单独区分顺序）
     active = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).count()
     assert active == 1, f"两次申请后应只剩 1 个有效令牌，实际 {active}"
 
