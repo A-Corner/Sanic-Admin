@@ -400,6 +400,51 @@ async def test_reset_rate_limit_key_is_independent_from_login(client):
     assert login.status_code == 200, f"多次重置请求后登录被锁：{login.status_code} {login.text}"
 
 
+async def test_reset_rate_limit_blocks_after_limit(client, app):
+    """
+    AUTH-14 正向对照：重置限流**确实在工作**。
+
+    逐次发起重置请求，直到被拒；断言**拦截发生在准确的边界**——
+    第 ``limit + 1`` 次（``limit`` 取应用配置 ``LOGIN_RATELIMIT_MAX_ATTEMPTS``）。
+    判定为 ``len(recent) >= limit`` 且判定时不含本次请求，故前 ``limit`` 次
+    放行、第 ``limit + 1`` 次被拦。
+
+    为什么需要这条：``test_reset_rate_limit_key_is_independent_from_login``
+    只断言「重置不会误伤登录」—— 把 ``_enforce_reset_rate_limit`` 改成 no-op，
+    那条测试照样绿。**它证明的是「不误伤」，不是「在工作」。**
+
+    本条与上条构成一对：
+    - 上条：重置限流不污染登录计数（隔离性）
+    - 本条：重置限流本身会拦（有效性）
+
+    不硬编码上限：``limit`` 从 app 配置读取（``LoginRateLimiter.from_request``
+    读的就是 ``request.app.config["LOGIN_RATELIMIT_MAX_ATTEMPTS"]``）。
+    断言精确边界还顺带锁住了「判据是 ``>=`` 而非 ``>``」。
+    """
+    limit = int(app.config["LOGIN_RATELIMIT_MAX_ATTEMPTS"])
+    assert limit >= 1, f"配置的限流上限不合理：{limit}"
+
+    email = await _admin_email()
+    blocked_at = None
+    # 余量给足：若限流是 no-op，循环跑完也不会出现 429。
+    for attempt in range(1, limit + 10):
+        response = await client.post("/auth/password-reset/request", json={"email": email})
+        if response.status_code == 429:
+            blocked_at = attempt
+            assert response.json()["error"] == "RATE_LIMIT_EXCEEDED", response.json()
+            break
+        assert response.status_code == 200, (
+            f"第 {attempt} 次不应被拒（上限 {limit}）：{response.status_code} {response.text[:200]}"
+        )
+
+    assert blocked_at is not None, (
+        f"连续 {limit + 9} 次重置请求都没被限流 —— 限流未生效"
+    )
+    assert blocked_at == limit + 1, (
+        f"应在第 {limit + 1} 次开始拦截，实际第 {blocked_at} 次"
+    )
+
+
 async def test_weak_password_does_not_burn_token(client, captured):
     """
     [中] 口令不达标时**不得消耗令牌**：用户换一个合规口令，同一个令牌仍可重试。
