@@ -809,7 +809,8 @@ async def test_reset_password_rejects_weak_password():
     vt = await generate_verification_token(account, "password_reset")
 
     with pytest.raises(ValidationError):
-        await reset_password(vt.token, "SAdmin@123")
+        # password_reset 令牌在库里存哈希，传给 reset_password 的必须是明文
+        await reset_password(vt.plain_token, "SAdmin@123")
 
 
 async def test_change_password_429_is_audited(client, app):

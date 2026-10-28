@@ -12,6 +12,7 @@
 """
 
 import functools
+import hashlib
 import secrets
 from sanic.request import Request
 from app.models import (
@@ -143,27 +144,62 @@ async def generate_verification_token(account: Account, token_type: str, expiry_
         expiry_hours: 令牌过期时间（小时）
 
     Returns:
-        VerificationToken: 生成的验证令牌实例
+        VerificationToken: 生成的验证令牌实例。**注意 `token` 字段的语义**：
+        对 ``password_reset`` 类型，库里存的是 sha256 哈希，明文放在
+        ``vt.plain_token`` 上（见下）；其余类型仍存明文，行为不变。
     """
     await VerificationToken.filter(account_id=account.id, token_type=token_type).delete()
 
-    return await VerificationToken.create(
+    raw = secrets.token_urlsafe(32)
+    stored = _hash_reset_token(raw) if token_type == "password_reset" else raw
+    vt = await VerificationToken.create(
         account=account,
-        token=secrets.token_urlsafe(32),
+        token=stored,
         token_type=token_type,
         expires_at=get_expiration_date(expiry_hours * 3600),
     )
+    # 明文只存在于内存对象上，供调用方投递；不落库。
+    # 非 password_reset 类型两者相同，赋值不影响既有行为。
+    vt.plain_token = raw
+    return vt
 
 
-async def validate_token(token: str, token_type: str):
+async def validate_token(token: str, token_type: str, *, consume: bool = False):
     """
-    验证令牌有效性
+    验证令牌有效性。
+
+    Args:
+        token: 令牌原文
+        token_type: 令牌类型
+        consume: 为 True 时**原子地**把令牌标记为已使用。用于「单次有效」必须
+            杜绝并发重放的场景（密码重置）。实现是 `UPDATE ... WHERE used=False`
+            并检查影响行数——两个并发调用只有一个能拿到 1，另一个拿到 0 并抛
+            `TokenInvalidError`。**不要用「先查后改」**：那两步之间没有锁，
+            两个并发请求会双双重置成功。
 
     Raises:
-        TokenInvalidError: 令牌无效
+        TokenInvalidError: 令牌无效 / 已被使用
         TokenExpiredError: 令牌已过期
     """
-    verification_token = await VerificationToken.filter(token=token, token_type=token_type, used=False).first()
+    # password_reset 的令牌在库里存的是 sha256 哈希，查询前先转换。
+    # 其余类型（activation 等）仍是明文，保持既有行为不变。
+    lookup = _hash_reset_token(token) if token_type == "password_reset" else token
+
+    if consume:
+        # 原子认领：先按条件更新，再回读。顺序反了就回到「先查后改」的竞态。
+        affected = await VerificationToken.filter(token=lookup, token_type=token_type, used=False).update(used=True)
+        if not affected:
+            raise TokenInvalidError("无效的验证令牌（或已被使用）")
+        verification_token = await VerificationToken.filter(token=lookup, token_type=token_type).first()
+        if verification_token is None:  # pragma: no cover - 认领成功后不可能查不到
+            raise TokenInvalidError("无效的验证令牌")
+        if verification_token.is_expired:
+            # 过期令牌已无价值，删掉并明确报过期（用户需要重新申请）
+            await verification_token.delete()
+            raise TokenExpiredError("验证令牌已过期")
+        return verification_token
+
+    verification_token = await VerificationToken.filter(token=lookup, token_type=token_type, used=False).first()
     if not verification_token:
         raise TokenInvalidError("无效的验证令牌")
 
@@ -202,7 +238,8 @@ async def reset_password(token: str, new_password: str):
     Raises:
         TokenInvalidError / TokenExpiredError: 令牌无效或过期
     """
-    verification_token = await validate_token(token, "password_reset")
+    # consume=True：原子认领。并发 confirm 只有一个能成功，另一个拿 TokenInvalidError。
+    verification_token = await validate_token(token, "password_reset", consume=True)
     account = await verification_token.account.get()
 
     account.set_password(new_password)
@@ -219,7 +256,23 @@ async def reset_password(token: str, new_password: str):
 PASSWORD_RESET_TTL_SECONDS = 30 * 60
 
 
-async def request_password_reset(email: str) -> None:
+def _hash_reset_token(raw: str) -> str:
+    """
+    重置令牌的存储形态：sha256 hex。
+
+    **为什么存哈希而不是明文**：`VerificationToken.token` 若是明文，一次数据库
+    备份泄露或只读注入就足以接管 30 分钟内任意账户——token 与口令不同，它不可逆
+    的成本为零。sha256 对 256bit 随机输入足够（无需加盐：输入本身熵极高，
+    不存在字典攻击面）。
+
+    比对用 `secrets.compare_digest` 防时序侧信道。
+
+    返回 64 字符 hex，适配 `token` 字段的 `max_length=128`。
+    """
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def request_password_reset(email: str) -> bool:
     """
     发起密码重置：邮箱存在则生成一次性令牌并通过投递后端送出。
 
@@ -247,29 +300,31 @@ async def request_password_reset(email: str) -> None:
     if account is None:
         # 刻意「什么都不做」并正常返回：与命中分支的唯一差别是下面这段不执行。
         # 时间差异见函数 docstring 的声明。
-        return
+        # 返回 True：对调用方（审计）而言「无需投递」不是失败。
+        return True
 
-    # 复用既有令牌生成：同账户同类型旧令牌会被作废（单次有效的前提之一）
+    # **先作废旧令牌，再建新的**（顺序关键）：
+    # 反过来的话，在「建新」与「作废旧」之间存在一个窗口，账户同时持有两个
+    # 有效令牌；若此时两次并发 request 交错，还会互相把对方的新令牌标记 used，
+    # 用户两张全失效。
+    await VerificationToken.filter(account_id=account.id, token_type="password_reset", used=False).update(used=True)
+
+    raw_token = secrets.token_urlsafe(32)
+    # 存哈希：库泄露不直接等于账户接管（见 _hash_reset_token 的说明）
     token = await VerificationToken.create(
         account=account,
-        token=secrets.token_urlsafe(32),
+        token=_hash_reset_token(raw_token),
         token_type="password_reset",
         expires_at=get_expiration_date(PASSWORD_RESET_TTL_SECONDS),
     )
 
-    await deliver(
+    delivered = await deliver(
         to=email,
         subject="重置你的口令",
         body=(
-            f"你的口令重置令牌是：{token.token}\n"
+            f"你的口令重置令牌是：{raw_token}\n"
             f"请在 {PASSWORD_RESET_TTL_SECONDS // 60} 分钟内使用，令牌仅可使用一次。\n"
             "如果这不是你发起的，请忽略本消息。"
         ),
     )
-    # 旧令牌清理：generate 语义是「同账户同类型唯一」，这里用 create 直接建，
-    # 因此手动作废该账户其他未用的重置令牌，保持「只有最新一个有效」。
-    await (
-        VerificationToken.filter(account_id=account.id, token_type="password_reset", used=False)
-        .exclude(id=token.id)
-        .update(used=True)
-    )
+    return delivered

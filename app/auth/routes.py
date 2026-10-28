@@ -234,6 +234,43 @@ async def on_login(request):
 
 
 # 密码重置（AUTH-03）
+
+#: 重置请求的限流前缀。**刻意与 `login_rl_*` 分开**——共用会让重置拖累登录。
+RESET_RL_PREFIX = "pwreset_rl"
+
+
+def _enforce_reset_rate_limit(request, email: str) -> None:
+    """
+    重置请求的限流：按（账户键 + IP）计数，**完全独立于登录限流**。
+
+    复用 `LoginRateLimiter` 的 cache / 窗口参数，但键前缀自建，不走它的
+    `_keys()`（那个方法无条件带 IP 键，跨动作耦合）。
+
+    Raises:
+        RateLimitExceededError: 窗口内重置请求次数已达上限
+    """
+    import time
+
+    limiter = LoginRateLimiter.from_request(request)
+    cache = limiter.cache
+    window = limiter.window_seconds
+    limit = limiter.max_attempts
+    ip = limiter._client_ip(request)
+    keys = [f"{RESET_RL_PREFIX}:acct:{email.strip().lower()}", f"{RESET_RL_PREFIX}:ip:{ip}"]
+
+    now = time.time()
+    cutoff = now - window
+    for key in keys:
+        recent = [ts for ts in (cache.get(key) or []) if ts > cutoff]
+        if len(recent) >= limit:
+            raise RateLimitExceededError(f"重置请求次数过多，请约 {max(window // 60, 1)} 分钟后再试")
+    # 未被拦下才记一次（与登录语义一致：被拦的尝试不额外延长封锁）
+    for key in keys:
+        recent = [ts for ts in (cache.get(key) or []) if ts > cutoff]
+        recent.append(now)
+        cache.set(key, recent, timeout=window)
+
+
 @auth_bp.post("/password-reset/request")
 async def on_password_reset_request(request):
     """
@@ -251,17 +288,21 @@ async def on_password_reset_request(request):
     if not email:
         return json("如果该邮箱已注册，重置说明将发送到该地址。")
 
-    # 限流口径与登录一致：这里的「失败」是「不该被允许的探测频率」
-    limiter = LoginRateLimiter.from_request(request)
-    try:
-        await limiter.raise_if_blocked(email, request)
-    except RateLimitExceededError:
-        await record_auth_event(request, "password_reset_request", status="failure", detail="限流拦截")
-        raise
-    await limiter.record_failure(email, request)
+    # **独立限流**：不能复用 `LoginRateLimiter`——它的 `_keys()` 无条件追加
+    # `login_rl_ip:<ip>` 这个 IP 维度键（与 identity 无关），用户连试几次重置
+    # 就会把同一出口 IP 下的登录计数一并打满，把两个不相干的动作耦合在一起。
+    # 这里用独立前缀自建计数，只按 (重置, 账户键, IP) 计。
+    _enforce_reset_rate_limit(request, email)
 
-    await request_password_reset(email)
-    await record_auth_event(request, "password_reset_request", status="success")
+    delivered = await request_password_reset(email)
+    # 投递失败要如实记 failure：真后端故障时用户看到「已发送」却永远收不到，
+    # 审计若还写 success，事后无从排查。（deliver() 永不抛，只返回 bool。）
+    await record_auth_event(
+        request,
+        "password_reset_request",
+        status="failure" if delivered is False else "success",
+        detail="投递失败" if delivered is False else None,
+    )
     return json("如果该邮箱已注册，重置说明将发送到该地址。")
 
 

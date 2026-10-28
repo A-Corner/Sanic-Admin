@@ -73,10 +73,22 @@ async def test_request_existing_email_delivers_token(client, captured):
     message = captured[0]
     assert message["to"] == email
 
-    # 正文里必须含一个真实的、库里存在的 password_reset 令牌
-    token = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
-    assert token is not None, "投递了消息但没有对应的令牌"
-    assert token.token in message["body"], "正文里没有令牌，用户无法完成重置"
+    # 正文里必须含一个真实的、能完成重置的令牌。
+    # 库里存的是 sha256 哈希（见 _hash_reset_token），所以断言「正文中的串
+    # 哈希后等于库里的值」——这同时验证了「存的是哈希」与「发出去的是原文」。
+    import hashlib
+    import re
+
+    token_row = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
+    assert token_row is not None, "投递了消息但没有对应的令牌"
+
+    match = re.search(r"令牌是：([A-Za-z0-9_-]+)", message["body"])
+    assert match, f"正文里找不到令牌：{message['body']!r}"
+    raw_in_body = match.group(1)
+    assert hashlib.sha256(raw_in_body.encode()).hexdigest() == token_row.token, (
+        "正文中的令牌哈希后与库里的值不一致——要么发出去的不是这句，要么库里存的不是它的哈希"
+    )
+    assert raw_in_body != token_row.token, "库里的 token 字段不应等于明文（应存哈希）"
 
 
 # ---------------------------------------------------------------------------
@@ -114,16 +126,20 @@ async def test_confirm_rejects_expired_token(client, captured):
     email = await _admin_email()
     await client.post("/auth/password-reset/request", json={"email": email})
 
-    token = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
-    assert token is not None
+    import re
+
+    token_row = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
+    assert token_row is not None
 
     # 把过期时间推到过去
-    token.expires_at = token.expires_at - timedelta(days=1)
-    await token.save(update_fields=["expires_at"])
+    token_row.expires_at = token_row.expires_at - timedelta(days=1)
+    await token_row.save(update_fields=["expires_at"])
 
+    match = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"])
+    assert match
     response = await client.post(
         "/auth/password-reset/confirm",
-        json={"token": token.token, "new_password": NEW_PASSWORD},
+        json={"token": match.group(1), "new_password": NEW_PASSWORD},
     )
     assert response.status_code >= 400, "过期令牌必须被拒绝"
 
@@ -141,9 +157,14 @@ async def test_confirm_token_is_single_use(client, captured):
     email = await _admin_email()
     await client.post("/auth/password-reset/request", json={"email": email})
 
-    token = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
-    assert token is not None
-    token_value = token.token
+    import re
+
+    token_row = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
+    assert token_row is not None
+    # 库里存哈希，真正可用于请求的是投递正文里的原文
+    match = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"])
+    assert match, "投递正文里没有令牌"
+    token_value = match.group(1)
 
     first = await client.post(
         "/auth/password-reset/confirm",
@@ -173,8 +194,11 @@ async def test_confirm_token_is_single_use(client, captured):
 async def test_new_request_invalidates_previous_token(client, captured):
     email = await _admin_email()
     await client.post("/auth/password-reset/request", json={"email": email})
+    import re
+
     first = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
     assert first is not None
+    first_raw = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"]).group(1)
 
     await client.post("/auth/password-reset/request", json={"email": email})
     first_after = await VerificationToken.filter(id=first.id).first()
@@ -183,7 +207,7 @@ async def test_new_request_invalidates_previous_token(client, captured):
 
     response = await client.post(
         "/auth/password-reset/confirm",
-        json={"token": first.token, "new_password": NEW_PASSWORD},
+        json={"token": first_raw, "new_password": NEW_PASSWORD},
     )
     assert response.status_code >= 400, "旧令牌不应还能用"
 
@@ -234,3 +258,87 @@ async def test_deliver_never_raises():
         assert ok is False
     finally:
         delivery.reset_backend()
+
+
+# ---------------------------------------------------------------------------
+# 复审整改（ChangesRequested）的针对性验证
+# ---------------------------------------------------------------------------
+
+
+async def test_token_stored_as_hash_not_plaintext(client, captured):
+    """
+    [中] 令牌在库里必须是 sha256 哈希，不是明文。
+
+    破坏实验：把 `_hash_reset_token` 改成恒等函数（返回原文），本测试必须红。
+    """
+    import hashlib
+
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+
+    row = await VerificationToken.filter(account__email=email, token_type="password_reset").first()
+    assert row is not None
+    # 明文 token_urlsafe(32) 长度约 43；sha256 hex 是 64 位
+    assert len(row.token) == 64 and all(c in "0123456789abcdef" for c in row.token), f"库里存的不是 sha256 hex：{row.token!r}"
+    # 且确实等于正文中原文的哈希
+    import re
+
+    raw = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"]).group(1)
+    assert row.token == hashlib.sha256(raw.encode()).hexdigest()
+
+
+async def test_old_token_invalidated_before_new_one_created(client, captured, monkeypatch):
+    """
+    [低2] 旧令牌必须先作废，再建新令牌。
+
+    验证方式：在「作废旧」与「建新」之间不留下两个有效令牌的窗口。
+    做法：请求两次，然后断言库里对该账户只有 1 条 used=False。
+    """
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+    await client.post("/auth/password-reset/request", json={"email": email})
+
+    active = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).count()
+    assert active == 1, f"两次申请后应只剩 1 个有效令牌，实际 {active}"
+
+
+async def test_confirm_consumes_token_atomically(client, captured):
+    """
+    [低1] 单次有效是原子认领：连续两次 confirm，第二次必须失败。
+
+    这不是真正的并发测试（无法在 pytest 里稳定编排两个并发事务），
+    但能验证「第一次已把 used 置位」这个前提——真正的竞态防护由
+    `UPDATE ... WHERE used=False` 的影响行数保证（见 validate_token 的注释）。
+    """
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+
+    import re
+
+    raw = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"]).group(1)
+
+    first = await client.post("/auth/password-reset/confirm", json={"token": raw, "new_password": NEW_PASSWORD})
+    assert first.status_code == 200
+
+    second = await client.post(
+        "/auth/password-reset/confirm",
+        json={"token": raw, "new_password": "SecondPass789!"},
+    )
+    assert second.status_code >= 400
+
+
+async def test_reset_rate_limit_key_is_independent_from_login(client):
+    """
+    [低4] 重置限流用独立键，不与登录的 (email, IP) 共用。
+
+    验证方式：连续多次重置请求后，同一账户仍能正常登录。
+    若共用键，这里会因登录被锁而失败。
+    """
+    from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD
+
+    email = await _admin_email()
+    for _ in range(6):
+        await client.post("/auth/password-reset/request", json={"email": email})
+
+    login = await client.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    assert login.status_code == 200, f"多次重置请求后登录被锁：{login.status_code} {login.text}"

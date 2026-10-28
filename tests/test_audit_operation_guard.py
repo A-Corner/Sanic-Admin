@@ -178,10 +178,15 @@ def test_all_call_sites_use_whitelisted_operations():
     )
 
     assert not violations, (
-        "发现未登记的审计操作名：\n  "
-        + "\n  ".join(violations)
-        + f"\n\n请把它们加进 app/services/audit.py 的 OPERATIONS。"
-        + (f"\n另有 {total_unresolved} 处调用使用了非字面量操作名，无法静态验证。" if total_unresolved else "")
+        "发现未登记的审计操作名：\n  " + "\n  ".join(violations) + f"\n\n请把它们加进 app/services/audit.py 的 OPERATIONS。"
+    )
+
+    # 非字面量操作名（变量传参）无法静态验证 —— 单独断言，而不是只在失败消息里提一句。
+    # 否则将来有人把某处 "login_success" 改成 op_name 变量，该调用点会静默退出
+    # 守卫覆盖，测试依旧全绿。
+    assert total_unresolved == 0, (
+        f"有 {total_unresolved} 处 record_auth_event() 调用的操作名不是字面量，"
+        "守卫无法静态验证它们。请改为字面量，或在此显式登记为已审查的例外。"
     )
 
 
