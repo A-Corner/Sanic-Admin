@@ -1,27 +1,66 @@
 # AGENTS.md — 供 AI 代理参与本仓库维护
 
-本文件是 AI 代理（如 Codex、Claude Code）在本仓库工作时的**唯一操作契约**。
-人类贡献者请看 [CONTRIBUTING.md](CONTRIBUTING.md)；本文件只覆盖 AI 代理需要额外知道的
-部分（当前基线的真实状态、可验证命令、硬性禁区）。
+本文件是 AI 代理（如 Codex、Claude Code）的**唯一操作契约**。人类贡献者见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-**所有命令与数字都来自发布候选 `release/v0.2.0`（M1 候选 `8750d51`）的实测**，不是从文档推断。
-未在本文件出现的命令，请先自己跑一遍再写进 PR 描述。
+> **本文件 1400 行、50 多个小节，不可能被完整读完。** 下面 §0 读完就能开始工作，其余按需查阅。
 
 ---
 
-## 0. 一句话现状（务必先读）
+## 0. 必读（做任何事之前）
 
-本仓库正处于**重构中段**，`README.md` 明确写了"尚不可用于生产环境"。
-后端骨架（配置 / 中间件 / 模型 / 认证 / 缓存 / 文档装饰器）已可运行，
-**API v1 资源层已挂载并可用**，测试**全绿（171 passed）**。
+### 0.1 本文件不写死任何会随代码漂移的数字
 
-因此：
+用例数、覆盖率、耗时都会变。**写死的数字一旦过期就会变成假判据** —— 读者拿它当基线，
+正常的代码演进会被误判成「我改坏了」。需要数字时自己跑：
 
-- 你的第一个 PR 很可能很小。**先读 §10 已知问题**，别把"跑通全量测试"当成自己的锅。
-- **不要**为了"让 CI 变绿"去改 `tests/` 或 `app/` 的既有实现来迎合断言——除非那个任务
-  本身就是修它（那属于 §9 的上游任务）。
-- **不要**把"当前失败"写成"应该通过"。报告测试状态时贴真实数字。
+```bash
+pytest tests/ --collect-only -q | tail -1     # 用例数
+pytest -q                                      # 通过数
+pytest --cov=app --cov-report=term -q          # 覆盖率
+```
 
+**报数字必须带四样**：`HEAD=<sha>` + 解释器路径 + 日期 + 口径（这个数问的是什么）。
+历史数字属于特定 tag，**不可当基线**，见 `docs/release/v*-release-notes.md`。
+
+### 0.2 在哪棵树读（否则你读的都是旧代码）
+
+**主仓工作区不保证最新**（无自动更新，实测曾落后 9 个提交）；**worktree 更不可信**
+（实测 34 个，最落后 61 个提交）。**读代码/文档用 `git show origin/master:<file>`**，
+**查行号用 `... | grep -n '<pat>'`**。只有要改这个工作区时才用工作区里的文件。
+
+### 0.3 报数字四样齐，写判据前先破坏它
+
+**报数字**：实测 + 口径 + 可复现命令 + 措辞指向哪一步。**写判据**：任何「检查」都要先
+证明「该失败时会失败」——**没有正向对照的「0 个问题」不算通过**（详见 §3.6）。
+
+### 0.4 扫描命令必须自证覆盖度
+
+**同一次输出里给出「对象总数」与「实际覆盖数」**，两者不等说明扫描器漏了对象，
+先修命令再报结论：
+
+```bash
+TOTAL=$(git worktree list --porcelain | grep -c '^worktree ')
+HIT=$(你的扫描命令 | wc -l | tr -d ' ')
+echo "总数=$TOTAL 命中=$HIT $([ "$TOTAL" = "$HIT" ] && echo OK || echo 不等)"
+```
+
+不等时先查漏了什么形态（detached HEAD？路径含空格？），修完再跑。
+
+### 0.5 判断分支是否已合入：本项目用 squash merge
+
+`git merge-base --is-ancestor` 在 squash 合并下**必然假阴性**（合并产生新 SHA，
+原提交永远不是祖先）。**用 `gh pr view <n> --json state`**（详见 §3.6「第 5 层的失败样本」）。
+
+### 0.6 其余按需查；开任务前先读 §10 已知问题
+
+§1 结构 / §2 环境启动 / §3 测试与判据 / §4 代码规范 / **§10 已知问题（必读）**。
+
+项目处于**重构中段**，`README.md` 写明「尚不可用于生产环境」，但后端骨架与 API v1
+资源层已可用。**当前测试状态自己跑（见 §0.1），本文件不写死。**
+
+- 你的第一个 PR 很可能很小。别把「跑通全量测试」当成自己的锅。
+- **不要**为了让 CI 变绿去改既有实现迎合断言——除非任务本身就是修它（属 §9）。
+- **不要**把「当前失败」写成「应该通过」。
 ---
 
 ## 1. 项目结构
@@ -223,42 +262,51 @@ npm start                           # 实测：服务起来，GET / → 200（se
 .venv/bin/pytest --cov=app tests/ --cov-report=xml
 ```
 
-### 3.2 基线真实数字（`8750d51`，不要改这些数字，改了就说明你动了代码）
+### 3.2 基线数字（不写死 —— 跑出来才算）
 
-| 命令 | 真实结果 |
-|---|---|
-| `pytest --collect-only -q` | **95 tests collected** |
-| `pytest -q` | **171 passed, 136 warnings**（约 65 秒，exit 0） |
-| `pytest --cov=app --cov-report=term -q` | **171 passed**，覆盖率 **52%**（5667 语句 / 2726 未覆盖）；加 `--cov` 约 80 秒 |
-| `ruff check . --select E9,F63,F7,F82` | **All checks passed!**（exit 0） |
+**本节不列具体数字。** 原因见 §0.1：用例数、覆盖率、耗时都会随代码漂移，
+**写死的数字一旦过期，就会变成假判据** —— 读者拿它当基线，正常的代码演进会被
+误判成「我改坏了」。
 
-按文件的用例数：
+> **历史教训（2026-10-28）**：本节此前列的是 `95 tests collected` / `171 passed` /
+> `52%` 覆盖率。实测追查发现，这组数字来自 **v0.2.0 的发布候选 `8750d51`**，
+> 而当时 `origin/master` 已前进 62 个提交、跨 6 个版本。这组数字被当作「当前基线」
+> 用了很久，任何正常演进都会触发「改了就说明你动了代码」的假警报。
+> 教训详见 §3.6「第 5 层的失败样本」。
 
-| 文件 | 用例数 | 覆盖什么 |
-|---|---|---|
-| `tests/test_account_crud.py` | 14 | 账户 CRUD、字段白名单、权限判定 |
-| `tests/test_auth.py` | 16 | 注册、登录、注销、验证码、二次验证、会话 |
-| `tests/test_authorization.py` | 12 | RBAC 角色与权限合并 |
-| `tests/test_production_failclosed.py` | 6 | production 下缺失必需密钥必须拒绝启动 |
-| `tests/test_role_crud.py` | 12 | 角色 CRUD、成员管理 |
-| `tests/test_sql_readonly.py` | 23 | SQL 分析接口的只读约束 |
-| `tests/test_upload_security.py` | 12 | 上传路径穿越防护 |
+**要看当前数字**：
 
-88 条警告全部是 `websockets.connection` 改名与 Sanic `ode.py` 的 `event.s` 属性弃用，无业务告警。
+```bash
+echo "HEAD=$(git rev-parse --short HEAD)" && \
+  pytest tests/ --collect-only -q | tail -1
+```
 
-**覆盖率洼地**（改动这些模块时请留意）：`app/web/routes.py` 0%，`app/middleware/_headers.py` 11%，
-`app/docs/decorators.py` 13%，`app/database/connection_pool.py` 20%，`app/database/query_optimizer.py` 20%，
-`app/cache/redis.py` 21%，`app/cache/memory.py` 25%，`app/cache/decorators.py` 27%。
+**要判断「我有没有改坏代码」**：
+
+**在改动前后各跑一次同一条命令，比对两次结果** —— 不比对任何写死的数字。
+「改动前是多少、改动后是多少」才是判据；「应该等于多少」不是。
+
+**覆盖率洼地**（改动这些模块时请留意，这些是结构性的，不随代码演进快速变化）：
+
+`app/web/routes.py`、`app/middleware/_headers.py`、`app/docs/decorators.py`、
+`app/database/connection_pool.py`、`app/database/query_optimizer.py`、
+`app/cache/redis.py`、`app/cache/memory.py`、`app/cache/decorators.py`
+
+**具体百分比请自己跑** `pytest --cov=app --cov-report=term -q`。上面这份清单只说明
+「哪些模块历来覆盖不足」，不给出数字 —— 数字会变，清单相对稳定。
 
 > 改代码后请重跑 `pytest -q` 与 `ruff check . --select E9,F63,F7,F82`，两者都是 CI 硬门禁。
-> 新增功能请一并补用例——当前 50% 的覆盖率是本版本已知的短板，不是可以长期维持的状态。
+> 新增功能请一并补用例——覆盖不足是本仓库已知的短板，不是可以长期维持的状态。
 
 ### 3.3 覆盖率报告
 
 ```bash
 .venv/bin/python tests/generate_coverage_report.py
 ```
-已实测：总覆盖率 52%（5667 语句 / 2726 未覆盖），详见 §3.2。
+
+**覆盖率数字请自行运行上面这条命令。** 本节不列具体百分比 —— 原因同 §3.2：
+覆盖率随代码漂移，写死会变成假判据。历次版本的实测数字见各
+`docs/release/v*-release-notes.md`。
 
 ### 3.4 CI 现状
 
@@ -669,6 +717,87 @@ SHA，用「全量实测于 `<A>`（回填前的树）；本版最终发布树�
 
 **为什么会逐层失守**：每层数对了，就不再问它量的是什么；量对了，就不再问这句话说的是哪一步；
 结论对了，就不再问判断结论的工具对不对。**默认信任上一层结论是必然倾向，不是疏忽。**
+
+#### 第 5 层的失败样本：`is-ancestor` 判「分支是否已合入」
+
+上面那张表第 5 行只写了「`is-ancestor` 是祖先还是相等」，**那说的是判等**（判断
+SHA 是否指同一个提交）。**同一个命令还有另一个用途 —— 判断分支是否已合入 ——
+那儿的失效方式完全不同，而且是必然失效，不是偶发。**
+
+**实测样本（2026-10-28，PR #60）**：
+
+```
+$ git log -1 --format=%s e12c648
+docs(readme): 中文版已知限制同步 OPS-08 的 TRUSTED_PROXIES 接线
+
+$ git merge-base --is-ancestor e12c648 origin/master
+（无输出，退出码 1）                    ← 判据说「没合入」
+
+$ gh pr view 60 --json state
+MERGED                                  ← 事实是「已合入」
+```
+
+**原因**：本项目用 squash merge。合并时 Git 把整条分支压成一个**新提交**
+（`18c3c23`）放到 master 上，原提交 `e12c648` **不在 master 的祖先链里，永远也不会在**。
+
+**这不是 `is-ancestor` 的实现缺陷，是它的语义与 squash 工作流不匹配**：
+「祖先」问的是「这个**提交对象**在不在链上」，我们想问的是「这个**提交的内容**
+在不在树上」。squash 恰好使这两个问题的答案永远相反。
+
+**替代判据，以及它们各自的失效边界**（这一点很重要——**没有一个判据在所有情况下都对**）：
+
+| 判据 | 命令 | 同一实测下的结果 |
+|---|---|---|
+| **PR 状态** | `gh pr view <n> --json state` | ✅ `MERGED`，**唯一正确的** |
+| `git cherry` | `git cherry origin/master <branch>` | ❌ 输出 `+ e12c648...`（判为未包含） |
+| 精确行匹配 | `git show origin/master:<file> \| grep -cF '<新增行>'` | ❌ 命中 `0` |
+| 祖先判断 | `git merge-base --is-ancestor` | ❌ 退出码 `1` |
+
+**后两条为什么也错，值得单独记**：
+
+- **`git cherry` 按「补丁内容」比对，本应对 squash 友好**，但它的实现是「对每个
+  commit 计算 patch-id，看上游有没有同 patch-id 的提交」。squash 后的新提交是
+  多个 commit 合并的结果，**patch-id 与任何一个原 commit 都不相同**，所以仍判为未包含。
+- **精确行匹配**失败的原因更隐蔽：该行**确实合入了**，但**后来又被另一个 PR
+  （#66 `6ba599d`）改过**。于是「拿原提交里的那一行去 master 上精确匹配」得到 0 ——
+  **不是没合入，是合入后被后续改动覆盖了**。这种失效只在「目标行之后又被修改」
+  时出现，比前两种更难察觉。
+
+**可用的判据，按可靠性排序**：
+
+1. **`gh pr view <n> --json state`** —— 直接问「这次合并没有」，不涉及 Git 内部语义。
+   **有 PR 时优先用它。**
+2. **内容存活检查**（当没有 PR、或需要确认「内容仍在」时）—— 不要拿整行精确匹配，
+   **用该改动引入的、后续不太可能被改的特征片段**（函数名、常量名、错误码字符串），
+   而不是整行：
+   ```bash
+   # 差：整行精确匹配，后续任何编辑都会让它失效
+   git show origin/master:README_cn.md | grep -cF '<完整那一行>'
+   # 好：只取该改动引入的稳定标识
+   git show origin/master:app/config.py | grep -c '_parse_trusted_proxies'
+   ```
+3. **`git diff <merge-base> <branch>` 逐文件比 blob**（判断整条分支是否已合入时用）——
+   这是「内容是否在树上」的直接回答：
+   ```bash
+   MB=$(git merge-base origin/master "$BRANCH")
+   for f in $(git diff --name-only "$MB" "$BRANCH"); do
+     [ "$(git rev-parse "$BRANCH:$f")" != "$(git rev-parse "origin/master:$f")" ] && echo "未合: $f"
+   done
+   ```
+   **失效边界**：分支内容合入后又**被后续提交改过**，同样会报「未合」。这与上面
+   精确行匹配的失效同源 —— **「内容现在在不在」和「这次改动合没合」是两个问题**，
+   前者的判据回答不了后者。
+
+**所以这条的一般形式是**：
+
+> **问题「这次改动合入了吗」只能由「记录了这次合并的东西」回答**（PR 状态、合并
+> 记录、reflog）。**一旦换成「内容现在长什么样」的判据，就会把「合入后被改动」
+> 误报成「没合入」。**
+
+**什么时候必须造这个样本**：改动 `AGENTS.md` 的判据段落、或写清理脚本、或回答
+「这条分支能不能删」之前。**用一条已知已合并、但后续被改动过的提交试一次** ——
+如果判据说「未合」，那判据不能用于这个用途。
+
 
 ##### 最低效的做法：重新发现已经写过的东西
 
@@ -1182,8 +1311,8 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 
 ## 10. 已知问题速查（写 PR 描述时可直接引用）
 
-- **pytest 全绿**：`171 passed`，0 失败 0 错误（§3.2）。
-- **覆盖率 52%**（§3.2）——本版本已知的短板。
+**本节不列会漂移的数字**（通过数、覆盖率）—— 那些自己跑（见 §0.1）。
+
 - **`ruff check .` 通过**（exit 0）。
 - **`/api/v1` 已挂载**，OpenAPI 规范 66 条 path。注意 `/api/v1/health` 这个路由**在代码中从未存在**，
   它返回 404 不代表 API 蓝图没挂载。
@@ -1191,13 +1320,24 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 - **`/docs` 是 302 跳转到 `/swagger`**，规范在 `/swagger.json`，**不在** `/docs/openapi.json`（后者 404）。
 - **管理界面在 `/amis/login.html`**（`/amis/` 带尾斜杠显示登录页，`/amis` 不带尾斜杠返回 404）。
 - **`/uploads/*` 返回 404** —— 上传目录不做静态托管，下载走需鉴权的 `GET /api/v1/files/<id>/download`。
-- **部分动态路由的方法不匹配返回 404 而非 405**（例如 `DELETE /api/v1/settings/key/<key>`）——
-  M1 的 405 兜底只覆盖 account / role / profile 三个模块。
 - **`frontend/npm run lint` 失败**（exit 1，8 Parsing error，§9 #9）——Vue 实验线，不维护。
 - **production 缺 `JWT_PRIVATE_KEY` 或 `INITIAL_ADMIN_PASSWORD` 会拒绝启动**；
   `SECRET_KEY` 与 `PASSWORD_SALT` 不参与门禁（§5.1）。
 - **真实 `docker compose up` 未在本机执行**（§9 #13）——Docker daemon 需 sudo 授权才能启动，
   容器路径由 CI 承接。
+
+> **已撤销的错误陈述（2026-10-28 实测）**：本节此前写着
+> 「部分动态路由的方法不匹配返回 404 而非 405（例如 `DELETE /api/v1/settings/key/<key>`）
+> —— M1 的 405 兜底只覆盖 account / role / profile 三个模块」。
+>
+> **实测两条都不成立**：
+> ```
+> DELETE /api/v1/settings/key/testkey  -> 405  Allow=GET, HEAD, PUT
+> PATCH  /api/v1/settings/key/testkey  -> 405  Allow=GET, HEAD, PUT
+> PATCH  /api/v1/roles/1               -> 405  Allow=GET, HEAD, PUT, DELETE
+> ```
+> `register_view` 的 405 兜底已覆盖全部注册视图，不只三个模块。
+> **这条错误陈述会让人以为「settings 缺 405 兜底」而去「修」一个不存在的问题。**
 
 ---
 
