@@ -421,13 +421,14 @@ async def test_reset_rate_limit_blocks_after_limit(client, app):
     读的就是 ``request.app.config["LOGIN_RATELIMIT_MAX_ATTEMPTS"]``）。
     断言精确边界还顺带锁住了「判据是 ``>=`` 而非 ``>``」。
     """
-    # 用 `[]` 而**不是** `.get(..., 5)`：配置缺键时这条应当红，而不是静默取默认值。
-    # `app.config` 由 `config_to_dict` 从 `settings` 类属性生成
-    # （`app/config.py`，用 `dir(cfg)` 遍历大写属性），只要 `settings` 上定义了
-    # `LOGIN_RATELIMIT_MAX_ATTEMPTS` 就一定在 —— 若这里 `KeyError`，说明有人删了
-    # 那个配置属性，那本身就是该报警的信号。
-    # ⚠️ 不要为了「与实现一致」把它改成 `.get(..., 5)`：实现用宽松取值是为了
-    # 缺键时仍能工作，测试用严格取值是为了让缺键可见，两者刻意不对称。
+    # ⚠️ **不要**为了「与实现一致」把它改成 `.get(..., 5)`。
+    # 原因：实现用宽松取值是为了缺键时仍能工作，测试用严格取值是为了让缺键
+    # 可见 —— 两者目的不同，刻意不对称。配置缺键时这条应当红，而不是静默取
+    # 默认值继续跑。
+    # （`app.config` 由 `config_to_dict` 从 `settings` 类属性生成，用 `dir(cfg)`
+    #   遍历大写属性，只要 `settings` 上定义了 `LOGIN_RATELIMIT_MAX_ATTEMPTS`
+    #   就一定在 —— 若这里 `KeyError`，说明有人删了那个配置属性，那本身就是
+    #   该报警的信号。）
     limit = int(app.config["LOGIN_RATELIMIT_MAX_ATTEMPTS"])
     assert limit >= 1, f"配置的限流上限不合理：{limit}"
 
