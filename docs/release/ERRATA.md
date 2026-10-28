@@ -9,6 +9,43 @@
 
 ---
 
+## v0.4.2（2026-10-27）
+
+**位置**：[`docs/release/v0.4.2-release-notes.md`](v0.4.2-release-notes.md) 的「已知限制（本版）」表，
+以及同内容的 [GitHub Release 正文](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.2)。
+
+**原文**：
+
+> | 写入路径仍是原型 | `discard_proposal` 只按 `proposal/` 前缀判定；`describe_proposal` 未实现 |
+
+**问题**：发布说明原文**低估了**实现。`discard_proposal` 不是只按前缀判定，而是三重条件同时成立。
+
+**事实**（`tools/mcp_server/git_isolation.py:573-637`，`discard_proposal` 全函数）：
+
+| 项 | 值 |
+|---|---|
+| 条件 ① | 分支名是 `proposal/` 前缀 |
+| 条件 ② | 存在归属标记 `refs/specgen/proposals/<name>`（证明是本工具创建的） |
+| 条件 ③ | 标记指向的 SHA == 分支当前 SHA（证明分支未被人改动） |
+| 删除方式 | 带期望值的原子 `update-ref -d refs/heads/<branch> <marked>`——「比对 SHA」与「实际删除」之间分支若被改动，git 自身拒绝，TOCTOU 窗口由原子性封住 |
+| 标记清理 | 同样带期望值 `update-ref -d <ref> <marked>`；失败只记 warning，方向安全（下次 discard 会因 SHA 不一致拒绝，不会误删） |
+| 与原文同版正文 | 同版「新增」节已有「`discard_proposal` 的删除条件」小节写对了三重条件，与上表一致 |
+
+**影响**：读者会低估该工具的安全性——以为任何人手工建一个 `proposal/xxx` 就能被本工具删掉，
+实际上没有归属标记与 SHA 一致性的分支会被拒绝。功能行为本身无误，仅说明文字与实现不符。
+
+**正确表述应为**：
+
+> `discard_proposal` 删除提案分支必须三重条件同时成立：`proposal/` 前缀、存在归属标记
+> `refs/specgen/proposals/<name>`、标记 SHA 等于分支当前 SHA；删除用带期望值的原子
+> `update-ref -d`，TOCTOU 窗口由 git 自身封住。
+
+**为什么不在正文里改**：Release 正文已发布；改动它会让仓库副本与 Release 页内容不一致。
+（本版正文的「已知限制」表已在 `809e940` 中另行修正，本文件记录的是**已发布正文**的错——
+两者并存时以本文件为准。）
+
+---
+
 ## v0.4.1（2026-10-27）
 
 **位置**：[`docs/release/v0.4.1-release-notes.md`](v0.4.1-release-notes.md) 的「验证」节，
