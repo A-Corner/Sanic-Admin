@@ -339,6 +339,72 @@ def _int_env(var: str, default: int) -> int:
         raise ConfigError(f"环境变量 {var} 必须为整数，当前值: {raw!r}")
 
 
+def _parse_trusted_proxies(raw: str, env: str, var: str = "TRUSTED_PROXIES") -> str:
+    """
+    逐条校验 ``TRUSTED_PROXIES`` 的每个 IP / CIDR 条目，返回规范化的逗号分隔串。
+
+    为什么必须在配置层校验（EVT-20261028-023-REVIEW finding 1）
+    ========================================================
+    消费方 ``LoginRateLimiter._addr_trusted`` 对每条 entry 是
+    ``except ValueError: continue``——非法条目被**静默跳过**。于是运维把
+    ``TRUSTED_PROXIES`` 写成 ``"10.0.0.0 255.0.0.0"``（空格而非斜杠）或
+    ``"10.0.0.0/33"``（超出范围）时：
+
+    * 启动无任何提示
+    * 白名单实际为空
+    * 「直连对端命中白名单才采信 XFF」恒不成立
+    * 本项要修的缺陷（全站共用一个限流桶 + 审计 IP 全为代理地址）**以完全
+      无感知的方式复现**
+
+    方向是 fail-closed（不会造成绕过），但**安全配置的静默 no-op 本身就是缺陷**：
+    运维以为配了，实际没配。所以：
+
+    * **production：抛 ``ConfigError`` 拒绝启动**，报错写明是哪一条、原值是什么
+    * **非 production：warning 后跳过非法条目**，保留合法条目继续运行
+      （本地开发不该因为一条写错就起不来）
+
+    合法的条目会被规范化（``ipaddress`` 解析后回写标准形式），
+    例如 ``10.0.0.1/8`` → ``10.0.0.0/8``。
+    """
+    if not raw or not raw.strip():
+        return ""
+
+    import ipaddress
+
+    valid: list = []
+    invalid: list = []
+    for index, entry in enumerate(raw.split(","), start=1):
+        item = entry.strip()
+        if not item:
+            # 空条目（如 "a,,b" 或尾部逗号）不是错误，直接跳过——
+            # 但它在 production 下也算「配置里有东西但解析不出」，一并记为非法更安全
+            invalid.append((index, entry, "空条目"))
+            continue
+        try:
+            if "/" in item:
+                valid.append(str(ipaddress.ip_network(item, strict=False)))
+            else:
+                valid.append(str(ipaddress.ip_address(item)))
+        except ValueError as exc:
+            invalid.append((index, entry, f"{type(exc).__name__}: {exc}"))
+
+    if invalid:
+        detail = "; ".join(
+            f"第 {i} 条 {orig!r}（{reason}）" for i, orig, reason in invalid
+        )
+        message = (
+            f"{var} 含无法解析的条目，白名单会静默失效，"
+            f"导致限流退回「全站共用一个桶」：{detail}。"
+            f"每一条必须是用逗号分隔的 IP（如 127.0.0.1）或 CIDR（如 10.0.0.0/8）。"
+            f"完整原值: {raw!r}"
+        )
+        if env == "production":
+            raise ConfigError(message)
+        logger.warning("%s（非 production，已跳过非法条目继续启动）", message)
+
+    return ",".join(valid)
+
+
 def get_config(name: Optional[str] = None):
     """
     构造并返回指定环境的配置对象。
@@ -387,7 +453,13 @@ def get_config(name: Optional[str] = None):
     cfg.REQUIRE_TWO_FACTOR = _bool_env("REQUIRE_TWO_FACTOR", cfg.REQUIRE_TWO_FACTOR)
     # 反向代理白名单：默认空（只信 socket 直连）。部署在代理后时必须显式配置，
     # 否则限流会把所有用户算成同一个来源。见类定义处的注释。
-    cfg.TRUSTED_PROXIES = os.getenv("TRUSTED_PROXIES", cfg.TRUSTED_PROXIES)
+    #
+    # 这里做逐条校验而不是裸透传：消费方对非法条目是静默 skip，
+    # 配置层若不拦，写错的条目会让白名单悄悄变空、原缺陷无感知复现。
+    # production 遇非法直接拒绝启动；非 production warning 后跳过。
+    cfg.TRUSTED_PROXIES = _parse_trusted_proxies(
+        os.getenv("TRUSTED_PROXIES", cfg.TRUSTED_PROXIES) or "", env
+    )
     origins = os.getenv("CORS_ALLOWED_ORIGINS")
     if origins:
         cfg.CORS_ALLOWED_ORIGINS = [o.strip() for o in origins.split(",") if o.strip()]

@@ -446,7 +446,11 @@ export TRUSTED_PROXIES='10.0.0.0/8'     # a private network of proxies
 export TRUSTED_PROXIES='10.0.0.1,10.0.0.0/8'   # comma-separated, IPs and CIDR mixed
 ```
 
-With the gate open, the leftmost-untrusted entry of `X-Forwarded-For` is used, walking the chain from right to left and skipping trusted hops.
+With the gate open, the **rightmost** entry of `X-Forwarded-For` that is *not* in `TRUSTED_PROXIES` is used as the client IP — the chain is walked from right to left, skipping trusted hops.
+
+**Why rightmost and not leftmost:** every proxy *appends* to `X-Forwarded-For`, so the rightmost entries are the ones written by infrastructure you control. Anything to the left of them was sent by the client and can be fabricated freely — a client can prepend any address it likes to make the limiter see a fresh IP on each request. Reading from the right is what makes the value unspoofable.
+
+Invalid entries are rejected at startup in production (the process exits and names the offending entry); in development and testing they are logged as a warning and skipped, and valid entries still apply.
 
 **The default is empty on purpose, in every environment.** Setting it to `0.0.0.0/0` would trust `X-Forwarded-For` from anyone — which lets any client send a fresh fake IP per request and bypass the IP dimension of the limiter entirely. Configure the narrowest range that covers your proxies.
 
