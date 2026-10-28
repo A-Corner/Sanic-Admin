@@ -14,7 +14,10 @@
 import functools
 import hashlib
 import secrets
+
 from sanic.request import Request
+from tortoise.transactions import in_transaction
+
 from app.models import (
     Account,
     AuthenticationSession,
@@ -265,8 +268,6 @@ async def reset_password(token: str, new_password: str):
     #    包进 in_transaction()：任一步失败整体回滚，令牌回到 used=False，
     #    用户可原样重试。认领仍靠 `UPDATE ... WHERE used=False` 的影响行数保证
     #    并发下只有一个能成功。
-    from tortoise.transactions import in_transaction
-
     async with in_transaction():
         verification_token = await validate_token(token, "password_reset", consume=True)
         await account.save(update_fields=["password"])

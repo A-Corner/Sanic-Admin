@@ -441,10 +441,11 @@ async def test_save_failure_rolls_back_token_claim(client, captured, monkeypatch
     `account.save()` 因 DB 错误/约束冲突失败。若无事务，令牌已被消耗、口令
     却没改——用户拿着一个作废的令牌，且不能用同一令牌重试。
 
-    断言（三层）：
+    断言（四层）：
     1. 异常向上传播（不吞掉，调用方仍能看到失败）；
     2. 令牌回滚到 `used=False`（正向对照：失败前它确实是 False）；
-    3. 账户旧口令仍然有效，新口令未落库。
+    3. 账户旧口令仍然有效，新口令未落库；
+    4. 回滚后同一令牌可原样重试成功，且新口令确实落库生效。
 
     破坏实验：去掉 `reset_password()` 里的 `in_transaction()`，第 2 条断言变红。
     """
@@ -503,4 +504,115 @@ async def test_save_failure_rolls_back_token_claim(client, captured, monkeypatch
     # 回滚后令牌可原样重试——这是事务保护的实际价值。
     ok = await client.post("/auth/password-reset/confirm", json={"token": raw, "new_password": NEW_PASSWORD})
     assert ok.status_code == 200, f"回滚后同一令牌应仍可完成重置：{ok.status_code} {ok.text}"
+
+    # ④ 重试不只是返回 200：新口令必须真的落库生效（否则「成功」可能是空转）。
+    account = await Account.filter(email=email).first()
+    assert account.verify_password(NEW_PASSWORD), "回滚后重试返回 200，但新口令未落库生效"
+
+
+async def test_delete_failure_rolls_back_token_claim(client, captured, monkeypatch):
+    """
+    [AUTH-11] 事务边界必须覆盖 `verification_token.delete()`：删令牌失败时令牌不得被烧掉。
+
+    故障场景：认领已置 used，口令已在同一事务里保存，随后
+    `verification_token.delete()` 失败。若 delete 在事务外，令牌已被消耗、
+    口令却已改变，用户拿着一个作废的令牌。
+
+    断言与 save 失败用例同构：异常传播 + 令牌回滚为 used=False +
+    旧口令仍有效且新口令未落库。
+
+    破坏实验：把 `verification_token.delete()` 移到 `async with in_transaction()` 之外，
+    本测试第 2 条断言变红。
+    """
+    import hashlib
+    import os
+    import re
+
+    from app.auth.verification import reset_password
+
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+    raw = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"]).group(1)
+    hashed = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    # 正向对照：失败前令牌确实是未使用状态，回滚断言才有判别力。
+    assert await VerificationToken.filter(token=hashed, used=False).exists(), (
+        "正向对照失败：发起重置后令牌本应为未使用"
+    )
+
+    orig_delete = VerificationToken.delete
+
+    async def boom_delete(self, *args, **kwargs):
+        raise RuntimeError("模拟 delete 失败")
+
+    monkeypatch.setattr(VerificationToken, "delete", boom_delete)
+    try:
+        with pytest.raises(RuntimeError, match="模拟 delete 失败"):
+            await reset_password(raw, NEW_PASSWORD)
+    finally:
+        monkeypatch.setattr(VerificationToken, "delete", orig_delete)
+
+    # delete 失败必须整体回滚：认领作废、口令未改。
+    row = await VerificationToken.filter(token=hashed, used=False).first()
+    assert row is not None, "delete 失败后令牌仍被标记 used —— 事务未覆盖 delete"
+
+    admin_password = os.environ["INITIAL_ADMIN_PASSWORD"]
+    account = await Account.filter(email=email).first()
+    assert account.verify_password(admin_password), "delete 失败后旧口令应仍然有效"
+    assert not account.verify_password(NEW_PASSWORD), "delete 失败但新口令已落库"
+
+
+async def test_session_disable_failure_rolls_back_token_claim(client, captured, monkeypatch):
+    """
+    [AUTH-11] 事务边界必须覆盖「作废既有登录会话」这一次写。
+
+    故障场景：认领、存口令、删令牌都成功，最后
+    `AuthenticationSession.filter(...).update(disabled=True)` 失败。
+    若这一步在事务外，令牌已被消耗、口令已改，而旧会话仍然有效。
+
+    断言：异常传播 + 令牌回滚为 used=False + 新口令未落库。
+
+    破坏实验：把该 update 移到 `async with in_transaction()` 之外，第 2 条断言变红。
+    """
+    import hashlib
+    import os
+    import re
+
+    from tortoise.queryset import QuerySet
+
+    from app.auth.verification import reset_password
+    from app.models import AuthenticationSession
+
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+    raw = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"]).group(1)
+    hashed = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    assert await VerificationToken.filter(token=hashed, used=False).exists(), (
+        "正向对照失败：发起重置后令牌本应为未使用"
+    )
+
+    orig_update = QuerySet.update
+
+    def boom_update(self, **kwargs):
+        # 只让「禁用会话」这一步失败；认领用的
+        # VerificationToken...update(used=True) 必须照常执行。
+        if self.model is AuthenticationSession and kwargs.get("disabled") is True:
+            raise RuntimeError("模拟会话作废失败")
+        return orig_update(self, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "update", boom_update)
+    try:
+        with pytest.raises(RuntimeError, match="模拟会话作废失败"):
+            await reset_password(raw, NEW_PASSWORD)
+    finally:
+        monkeypatch.setattr(QuerySet, "update", orig_update)
+
+    row = await VerificationToken.filter(token=hashed, used=False).first()
+    assert row is not None, "会话作废失败后令牌仍被标记 used —— 事务未覆盖该步"
+
+    account = await Account.filter(email=email).first()
+    admin_password = os.environ["INITIAL_ADMIN_PASSWORD"]
+    assert account.verify_password(admin_password), "会话作废失败后旧口令应仍然有效"
+    assert not account.verify_password(NEW_PASSWORD), "会话作废失败但新口令已落库"
 
