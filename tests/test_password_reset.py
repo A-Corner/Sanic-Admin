@@ -141,7 +141,8 @@ async def test_confirm_rejects_expired_token(client, captured):
         "/auth/password-reset/confirm",
         json={"token": match.group(1), "new_password": NEW_PASSWORD},
     )
-    assert response.status_code >= 400, "过期令牌必须被拒绝"
+    assert response.status_code == 400, (response.status_code, response.text[:300])
+    assert response.json()["error"] == "TOKEN_EXPIRED", response.json()
 
     # 过期令牌在 validate_token 里会被删除；无论如何不能改成新口令
     account = await Account.filter(email=email).first()
@@ -192,7 +193,8 @@ async def test_confirm_token_is_single_use(client, captured):
         "/auth/password-reset/confirm",
         json={"token": token_value, "new_password": "AnotherPass789!"},
     )
-    assert second.status_code >= 400, "同一令牌不应能第二次使用"
+    assert second.status_code == 400, (second.status_code, second.text[:300])
+    assert second.json()["error"] == "TOKEN_INVALID", second.json()
 
     # 第二次不应改掉口令（第一次设的那个仍然有效）
     account = await Account.filter(email=email).first()
@@ -222,7 +224,8 @@ async def test_new_request_invalidates_previous_token(client, captured):
         "/auth/password-reset/confirm",
         json={"token": first_raw, "new_password": NEW_PASSWORD},
     )
-    assert response.status_code >= 400, "旧令牌不应还能用"
+    assert response.status_code == 400, (response.status_code, response.text[:300])
+    assert response.json()["error"] == "TOKEN_INVALID", response.json()
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +379,8 @@ async def test_confirm_consumes_token_atomically(client, captured):
         "/auth/password-reset/confirm",
         json={"token": raw, "new_password": "SecondPass789!"},
     )
-    assert second.status_code >= 400
+    assert second.status_code == 400, (second.status_code, second.text[:300])
+    assert second.json()["error"] == "TOKEN_INVALID", second.json()
 
 
 async def test_reset_rate_limit_key_is_independent_from_login(client):
@@ -615,4 +619,170 @@ async def test_session_disable_failure_rolls_back_token_claim(client, captured, 
     admin_password = os.environ["INITIAL_ADMIN_PASSWORD"]
     assert account.verify_password(admin_password), "会话作废失败后旧口令应仍然有效"
     assert not account.verify_password(NEW_PASSWORD), "会话作废失败但新口令已落库"
+
+
+# ---------------------------------------------------------------------------
+# AUTH-12：弱口令在 HTTP 层必须精确渲染为 400 + VALIDATION_ERROR
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "weak_password",
+    [
+        "short",  # 5 字符，触发「长度不足」（app/models/account.py set_password）
+        "alllowercase",  # 12 字符但只有 1 类字符，触发「至少 2 类字符」
+    ],
+    ids=["too-short", "single-class"],
+)
+async def test_confirm_weak_password_returns_400_validation_error(client, captured, weak_password):
+    """
+    端点 ``POST /auth/password-reset/confirm`` 收到「有效令牌 + 弱口令」时，
+    必须是 **400 + error=VALIDATION_ERROR**，而不是 500（未捕获异常）或 400+TOKEN_*。
+
+    为什么必须带正向对照
+    --------------------
+    ``TokenInvalidError`` / ``TokenExpiredError`` / ``ValidationError`` 三者
+    都是 400（app/services/exceptions.py），所以「弱口令 → 400」本身零判别力。
+    必须在**同一令牌**上换一个合规口令拿到 200，才能证明 400 来自
+    ``set_password()`` 的强度校验。
+
+    为什么不用 auth_headers
+    ----------------------
+    登录会带 session cookie，而本端点不在 CSRF 豁免前缀里
+    （app/middleware/security_middleware.py），请求会被 403 挡在路由前。
+    重置的真实场景本来就是未登录。
+
+    破坏实验：把 ``ValidationError.status_code`` 从 400 改成 500
+    （app/services/exceptions.py），本用例必须 FAILED（assert 500 == 400）。
+    """
+    import re
+
+    email = await _admin_email()
+    requested = await client.post("/auth/password-reset/request", json={"email": email})
+    assert requested.status_code == 200, requested.text
+    assert captured, "投递后端没有收到任何消息，无法取令牌"
+    match = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"])
+    assert match, f"投递正文里找不到令牌：{captured[-1]['body']!r}"
+    raw = match.group(1)
+
+    # ---- 主断言：精确 400 + 精确 error code（不是 >= 400） ----
+    weak = await client.post(
+        "/auth/password-reset/confirm",
+        json={"token": raw, "new_password": weak_password},
+    )
+    assert weak.status_code == 400, f"弱口令 {weak_password!r} 应得 400，实际 {weak.status_code}: {weak.text[:300]}"
+    body = weak.json()
+    assert body["error"] == "VALIDATION_ERROR", body
+    assert body.get("success") is False, body
+
+    # ---- 正向对照：同一令牌 + 合规口令 → 200，且新口令真的生效 ----
+    ok = await client.post(
+        "/auth/password-reset/confirm",
+        json={"token": raw, "new_password": NEW_PASSWORD},
+    )
+    assert ok.status_code == 200, (
+        f"正向对照失败：同一令牌换合规口令应 200，实际 {ok.status_code}: {ok.text[:300]}"
+        f"（若这里不是 200，则上面的 400 不能归因于口令强度校验）"
+    )
+    account = await Account.filter(email=email).first()
+    assert account is not None
+    assert account.verify_password(NEW_PASSWORD), "正向对照：合规口令应已落库"
+
+
+async def test_weak_password_http_does_not_consume_token(client, captured):
+    """
+    AUTH-12 / T2：弱口令在 **HTTP 层**被拒后，令牌必须仍未认领，
+    且可原样再用一次成功（``used`` 不得被烧掉）。
+
+    与既有 ``test_weak_password_does_not_burn_token`` 的区别：那条前半段是
+    ``reset_password()`` 直调，绕过了路由与错误渲染。本条全程走 HTTP，
+    验证「路由 → 服务」整条链上的顺序性质。
+
+    破坏实验：把 ``verification.py`` 里 ``account.set_password()`` 挪到
+    ``validate_token(..., consume=True)`` 之后。此时弱口令 400 仍成立（T1 仍绿），
+    但本条的 ``used`` 断言会红 —— 这就是 T2 相对 T1 的独立价值。
+    """
+    import hashlib
+    import re
+
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+    assert captured, "投递后端没有收到任何消息，无法取令牌"
+    match = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"])
+    assert match, f"投递正文里找不到令牌：{captured[-1]['body']!r}"
+    raw = match.group(1)
+    hashed = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    # 正向对照（提交前）：令牌确实存在且未认领，否则下面的「仍未认领」恒真、零判别力。
+    assert await VerificationToken.filter(token=hashed, used=False).exists(), "正向对照失败：申请重置后令牌本应为未使用"
+
+    weak = await client.post("/auth/password-reset/confirm", json={"token": raw, "new_password": "short"})
+    assert weak.status_code == 400, (weak.status_code, weak.text[:300])
+    assert weak.json()["error"] == "VALIDATION_ERROR", weak.json()
+
+    # 主断言：令牌未被认领
+    row = await VerificationToken.filter(token=hashed, used=False).first()
+    assert row is not None, "弱口令被拒后令牌仍被标记 used —— 校验顺序反了（先认领后校验）"
+
+    # 主断言：同一令牌仍可完成一次成功重置
+    ok = await client.post("/auth/password-reset/confirm", json={"token": raw, "new_password": NEW_PASSWORD})
+    assert ok.status_code == 200, f"弱口令失败后同一令牌应仍可用：{ok.status_code} {ok.text[:300]}"
+    account = await Account.filter(email=email).first()
+    assert account.verify_password(NEW_PASSWORD), "新口令应已生效"
+
+
+async def test_weak_password_writes_failure_audit(client, captured):
+    """
+    AUTH-12 / T3：弱口令被拒必须在 ``OperationLog`` 留痕
+    （operation='password_reset_confirm', status='failure'），且 detail 能看出是
+    口令校验失败类型。
+
+    **本用例依赖 routes.py 的改动**（把 ValidationError 纳入 except 元组）。
+
+    正向对照：同一操作的 success 分支必须能被数到（下面最后一段），
+    否则「failure 恰好 1 条」的计数方式本身不可信。
+
+    破坏实验：把 routes.py 的 ValidationError 从 except 元组里去掉 → 本用例红。
+    """
+    import re
+
+    from app.models import OperationLog
+
+    async def _rows(status):
+        return await OperationLog.filter(operation="password_reset_confirm", status=status).order_by("id").all()
+
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+    assert captured, "投递后端没有收到任何消息，无法取令牌"
+    match = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"])
+    assert match, f"投递正文里找不到令牌：{captured[-1]['body']!r}"
+    raw = match.group(1)
+
+    # 前置状态：request 端点写的是 password_reset_request，不会污染本 filter；仍显式断言一下。
+    assert not await _rows("failure"), "前置状态：此时不应已有 confirm 失败审计"
+
+    # 用一个「够长但只有一类字符」的弱口令：走字符类别分支，又便于断言未泄漏原文。
+    leak_probe = "leakprobe"
+    weak = await client.post("/auth/password-reset/confirm", json={"token": raw, "new_password": leak_probe})
+    assert weak.status_code == 400, (weak.status_code, weak.text[:300])
+    assert weak.json()["error"] == "VALIDATION_ERROR", weak.json()
+
+    failures = await _rows("failure")
+    assert len(failures) == 1, f"弱口令应写 1 条 failure 审计，实际 {len(failures)}"
+    row = failures[0]
+    assert row.detail and "ValidationError" in row.detail, (
+        f"detail 应能看出是口令校验失败（reason 类型），实际 {row.detail!r}"
+    )
+    assert row.operation_type == "auth", row.operation_type
+    assert leak_probe not in f"{row.detail} {row.account_name} {row.user_agent}", "审计里出现了口令原文"
+
+    # ---- 正向对照：同一 operation 的 success 分支确实可被数到 ----
+    ok = await client.post("/auth/password-reset/confirm", json={"token": raw, "new_password": NEW_PASSWORD})
+    assert ok.status_code == 200, (ok.status_code, ok.text[:300])
+    successes = await _rows("success")
+    assert len(successes) == 1, (
+        f"正向对照失败：成功重置应有 1 条 success 审计，实际 {len(successes)}"
+        "（若为 0，上面「failure 恰好 1 条」的计数方式本身不可信）"
+    )
+    assert successes[0].account_name, "success 审计应带账户名快照（失败分支 account=None，别断言它）"
 

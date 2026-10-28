@@ -319,11 +319,13 @@ async def on_password_reset_confirm(request):
     token = str(get_request_value(request, "token") or "").strip()
     new_password = get_request_value(request, "new_password") or ""
     if not token or not new_password:
+        # 空 token / 空口令不记审计：这是请求格式错误，不含凭据尝试；
+        # 且对空输入记审计会让攻击者能无限刷审计表。
         raise ValidationError("令牌与新口令均为必填")
 
     try:
         account = await reset_password(token, new_password)
-    except (TokenInvalidError, TokenExpiredError) as exc:
+    except (TokenInvalidError, TokenExpiredError, ValidationError) as exc:
         await record_auth_event(request, "password_reset_confirm", status="failure", detail=type(exc).__name__)
         raise
 
