@@ -43,6 +43,13 @@
   补写判据自测、报告数字的纪律、五层递进与「报缺口前先查现状」、观察点必须是
   「破坏时一定会变」的那个。协作者指南，不影响运行时行为。
 
+### Environment
+
+- **运行测试需要 `sanic-routing>=23.12.0`**。低于该版本时，Sanic 会把「方法不允许」
+  静默转换为 `404 NotFound`，使断言「这里应返回 404」的测试**假绿**。
+  `requirements.txt` 已固定 `sanic-routing==23.12.0`；用旧环境（如 `sanic-ext 23.6.0`
+  携带的 venv）验证测试结果不可信。
+
 详见 [docs/release/v0.4.3-release-notes.md](docs/release/v0.4.3-release-notes.md)。
 
 ## [0.4.2] — 2026-10-27
