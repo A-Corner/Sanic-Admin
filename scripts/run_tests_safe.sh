@@ -26,7 +26,9 @@
 # 输出：
 #   pytest 的完整输出（stdout + stderr）写入日志文件，终端只显示摘要：
 #   失败 → 打印完整输出；成功 → 打印末尾 20 行。
-#   日志路径默认 ${PYTEST_BASETEMP}/pytest.log，可用环境变量 PYTEST_LOG 覆盖。
+#   日志路径默认 ${PYTEST_BASETEMP}.log（与 basetemp 同级，**不能放在 basetemp 内**——
+#   pytest 会用 tmp_path 触发 basetemp 整体删除重建，目录内的日志会静默丢失），
+#   可用环境变量 PYTEST_LOG 覆盖。
 #   日志与 basetemp 同受「必须落在外挂盘」的约束——日志是本次运行最大的产物，
 #   指向内盘等于绕过脚本的立身之本。
 #   注意：重定向后测试运行期间终端不再实时滚动输出（结果在结束后统一给出）。
@@ -244,11 +246,17 @@ echo "✅            python=${PY}  (${PY_VERSION})"
 #     141，pipefail 下管道状态就变成 141，pytest 真实的失败码反而被掩盖。
 # 这里分两步：先重定向落盘并立刻取退出码，再按结果决定打印全量还是末尾 20 行。
 #
-# 日志路径：默认 ${PYTEST_BASETEMP}/pytest.log，可用 PYTEST_LOG 覆盖。
-# （已实测：当前钉版 pytest 用 --basetemp 时不清空该目录的既有文件，
-# 日志放在目录内是安全的；若未来 pytest 行为变化清空了目录，
-# 下面的「日志不可读」分支会显式报出来，不会静默丢失。）
-LOG="${PYTEST_LOG:-${PYTEST_BASETEMP}/pytest.log}"
+# 日志路径：默认与 basetemp **同级**（${PYTEST_BASETEMP}.log），可用 PYTEST_LOG 覆盖。
+#
+# **不要**把默认日志放进 ${PYTEST_BASETEMP} 目录内（本脚本早期版本那样做，实测会丢日志）：
+# pytest 在 `--basetemp` 目录存在时的首次 `getbasetemp()` 调用会 `rm_rf(basetemp)`
+# 整个删掉再重建（_pytest/tmpdir.py:148-152）。只要有任何测试用了 `tmp_path` /
+# `tmp_path_factory` 就会触发——本项目 `tests/conftest.py:157` 的 app fixture 正是如此。
+# 而本脚本的日志重定向在 pytest **启动前**就已打开句柄，指向被删除的旧 inode，
+# 脚本退出后按路径去读只剩新目录里不存在的文件 ⇒ 日志静默丢失。
+# 破坏实验（2026-10-29，SPEC-005 期间发现）：同一命令，测试里有 tmp_path → 日志消失；
+# 去掉 tmp_path → 日志正常。放在 basetemp 之外即不受影响。
+LOG="${PYTEST_LOG:-${PYTEST_BASETEMP}.log}"
 LOG_DIR="$(dirname "$LOG")"
 mkdir -p "$LOG_DIR" 2>/dev/null || fail "无法创建日志目录 ${LOG_DIR}"
 [ -w "$LOG_DIR" ] || fail "日志目录不可写：${LOG_DIR}"

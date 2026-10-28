@@ -13,9 +13,13 @@ fields:
     list: true
     searchable: true
   - name: amount
-    type: float
+    type: int
+    # 最小单位整数（SPEC-005）：以「分」存储，1 元 = 100 分。
+    # 不用 float：二进制浮点无法精确表示十进制小数，金额运算会累积误差。
+    # 单位名称在 label（人看），倍数在本属性（程序看：校验 + 生成样例 + 拒绝小数）。
+    unit_scale: 100
     required: true
-    label: 金额
+    label: 金额（分）
     list: true
   - name: quantity
     type: int
