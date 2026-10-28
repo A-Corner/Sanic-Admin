@@ -235,14 +235,26 @@ async def reset_password(token: str, new_password: str):
     """
     重置密码
 
+    **校验顺序**：先做口令校验（纯内存、无副作用），再认领令牌。
+    反过来的话，用户提交弱口令时令牌已被标记 used，抛错后必须重新申请一次重置——
+    令牌被一个必然失败的输入白白烧掉。
+
     Raises:
         TokenInvalidError / TokenExpiredError: 令牌无效或过期
+        ValidationError: 新口令不达标（**不消耗令牌**，可用同一令牌重试）
     """
-    # consume=True：原子认领。并发 confirm 只有一个能成功，另一个拿 TokenInvalidError。
-    verification_token = await validate_token(token, "password_reset", consume=True)
-    account = await verification_token.account.get()
+    # 1. 只读校验：确认令牌有效并取到账户，但不置 used。
+    peeked = await validate_token(token, "password_reset", consume=False)
+    account = await peeked.account.get()
 
+    # 2. 口令校验 + 哈希（仅改内存字段，不落库）。set_password 抛 ValidationError 时
+    #    令牌仍未被认领，用户可以拿同一个令牌换一个合规口令重试。
     account.set_password(new_password)
+
+    # 3. 原子认领。并发 confirm 只有一个能成功，另一个拿 TokenInvalidError；
+    #    口令在上面已校验通过，此处失败不会让任何一次合法提交被锁在门外。
+    verification_token = await validate_token(token, "password_reset", consume=True)
+
     await account.save(update_fields=["password"])
     await verification_token.delete()
     # 口令已变更：作废该账户全部既有登录会话
@@ -265,7 +277,10 @@ def _hash_reset_token(raw: str) -> str:
     的成本为零。sha256 对 256bit 随机输入足够（无需加盐：输入本身熵极高，
     不存在字典攻击面）。
 
-    比对用 `secrets.compare_digest` 防时序侧信道。
+    查询走数据库等值匹配（`token` 列有索引），不做内存字符串比较，因此这里
+    **不适用** `secrets.compare_digest`（它是给内存中的密文/摘要比较用的）。
+    令牌本身是 `secrets.token_urlsafe(32)` 的 256bit 随机值，时序信道既无法
+    缩小搜索空间也无法命中，故不额外做常量时间比较。
 
     返回 64 字符 hex，适配 `token` 字段的 `max_length=128`。
     """

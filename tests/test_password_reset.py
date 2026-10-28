@@ -342,3 +342,40 @@ async def test_reset_rate_limit_key_is_independent_from_login(client):
 
     login = await client.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
     assert login.status_code == 200, f"多次重置请求后登录被锁：{login.status_code} {login.text}"
+
+
+async def test_weak_password_does_not_burn_token(client, captured):
+    """
+    [中] 口令不达标时**不得消耗令牌**：用户换一个合规口令，同一个令牌仍可重试。
+
+    破坏实验：把 `reset_password()` 里的 `set_password()`（口令校验）挪回
+    `validate_token(..., consume=True)` 之后，本测试必须红——令牌会被标记
+    used，第二次用同一令牌将得到 400。
+
+    两层断言：
+    1. 直接调 `reset_password()`，弱口令抛 `ValidationError`；
+    2. 再通过 HTTP 用**同一个令牌**提交合规口令，必须 200，且新口令生效。
+    """
+    import re
+
+    from app.auth.verification import reset_password
+    from app.services.exceptions import ValidationError
+
+    email = await _admin_email()
+    await client.post("/auth/password-reset/request", json={"email": email})
+    raw = re.search(r"令牌是：([A-Za-z0-9_-]+)", captured[-1]["body"]).group(1)
+
+    # "short" —— 长度不足（MIN_PASSWORD_LENGTH=8），确定被 set_password 拒绝
+    with pytest.raises(ValidationError):
+        await reset_password(raw, "short")
+
+    # 令牌必须仍然未被消耗
+    row = await VerificationToken.filter(account__email=email, token_type="password_reset", used=False).first()
+    assert row is not None, "弱口令失败后令牌不应被认领"
+
+    # 同一个令牌仍可用于一次成功的重置
+    ok = await client.post("/auth/password-reset/confirm", json={"token": raw, "new_password": NEW_PASSWORD})
+    assert ok.status_code == 200, f"弱口令失败后同一令牌应仍可用：{ok.status_code} {ok.text}"
+
+    account = await Account.filter(email=email).first()
+    assert account.verify_password(NEW_PASSWORD), "新口令应已生效"

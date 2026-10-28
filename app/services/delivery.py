@@ -17,9 +17,9 @@
 
 用法：
 
-    from app.services.delivery import Backend, LoggingBackend, set_backend, deliver
+    from app.services.delivery import LoggingBackend, set_backend, deliver
 
-    deliver(Backend)   # 默认已被 set_backend(LoggingBackend()) 初始化
+    set_backend(LoggingBackend())  # 未调用时 get_backend() 会惰性初始化同一个默认后端
     await deliver(to="user@example.com", subject="重置口令", body="...")
 
 替换为真实后端（部署侧）：
