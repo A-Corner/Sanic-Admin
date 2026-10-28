@@ -273,6 +273,11 @@ class DefaultConfig:
     # 开启后生产仍会启动，但启动期打 warning，且所有消息只写日志、不送达。
     ALLOW_NOOP_DELIVERY = False
 
+    # 自助注册开关（AUTH-02②，环境变量 ALLOW_SELF_REGISTRATION=true 开启）。
+    # 默认关闭：只允许管理员通过 POST /api/v1/accounts 建号，建号时可直接设
+    # verified=True（建号即可登录）。开启后 /auth/register 行为与改动前一致。
+    ALLOW_SELF_REGISTRATION = False
+
     USE_CACHE = True
     ROUTE_CACHE_ENABLED = True
     ROUTE_CACHE_TIMEOUT = 60
@@ -458,6 +463,9 @@ def get_config(name: Optional[str] = None):
     cfg.ENABLE_API_DOCS = _bool_env("ENABLE_API_DOCS", cfg.ENABLE_API_DOCS)
     cfg.REQUIRE_TWO_FACTOR = _bool_env("REQUIRE_TWO_FACTOR", cfg.REQUIRE_TWO_FACTOR)
     cfg.ALLOW_NOOP_DELIVERY = _bool_env("ALLOW_NOOP_DELIVERY", cfg.ALLOW_NOOP_DELIVERY)
+    cfg.ALLOW_SELF_REGISTRATION = _bool_env(
+        "ALLOW_SELF_REGISTRATION", cfg.ALLOW_SELF_REGISTRATION
+    )
     # 反向代理白名单：默认空（只信 socket 直连）。部署在代理后时必须显式配置，
     # 否则限流会把所有用户算成同一个来源。见类定义处的注释。
     #

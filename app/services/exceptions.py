@@ -164,6 +164,18 @@ class InsufficientPermissionsError(AuthorizationError):
     message = "权限不足，无法执行此操作"
 
 
+class RegistrationDisabledError(SecurityError):
+    """自助注册被关闭（``ALLOW_SELF_REGISTRATION`` 默认 False）。
+
+    语义是「本站不开放自助注册」，不是「你没有权限」——因此直接继承
+    ``SecurityError`` 而不是 ``AuthorizationError``：客户端据此应引导用户
+    联系管理员，而不是提示重新登录或申请权限。
+    """
+    status_code = 403
+    error_code = "REGISTRATION_DISABLED"
+    message = "本站未开放自助注册，请联系管理员创建账户"
+
+
 # 验证相关异常
 class VerificationError(SecurityError):
     """验证错误的基类"""

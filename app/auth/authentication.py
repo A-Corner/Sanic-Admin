@@ -19,6 +19,7 @@ from app.services.exceptions import (
     AuthenticationError,
     CredentialsError,
     NotFoundError,
+    RegistrationDisabledError,
     ResourceAlreadyExistsError,
     SessionNotFoundError,
     ValidationError,
@@ -141,6 +142,12 @@ async def register(request: Request):
     """
     注册新账户（新账户总是未验证、未禁用，状态由服务端决定，不接受客户端指定）
 
+    AUTH-02②：自助注册默认关闭（``ALLOW_SELF_REGISTRATION=False``），只允许
+    管理员通过 ``POST /api/v1/accounts`` 建号。开关从 ``request.app.config`` 读取
+    而不是全局 ``settings``：配置是按应用实例 resolve 的（``create_app`` 会把
+    配置字典写进 ``app.config``），读应用级配置才能让同一个进程里的不同实例
+    （测试、多环境工厂）各自拥有独立的开关值。
+
     Args:
         request: Sanic请求对象，包含表单或JSON数据
 
@@ -148,9 +155,13 @@ async def register(request: Request):
         Account: 新创建的账户实例
 
     Raises:
+        RegistrationDisabledError: 自助注册已被关闭
         ValidationError: 如果提供的凭据不完整
         ResourceAlreadyExistsError: 如果邮箱/用户名/手机号已被注册
     """
+    if not request.app.config.get("ALLOW_SELF_REGISTRATION", False):
+        raise RegistrationDisabledError()
+
     username = _text_field(get_request_value(request, "username"), "用户名", 32)
     email = _text_field(get_request_value(request, "email"), "电子邮件", 255)
     password = _text_field(get_request_value(request, "password"), "口令",
