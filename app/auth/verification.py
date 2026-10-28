@@ -258,14 +258,21 @@ async def reset_password(token: str, new_password: str):
     #    令牌仍未被认领，用户可以拿同一个令牌换一个合规口令重试。
     account.set_password(new_password)
 
-    # 3. 原子认领。并发 confirm 只有一个能成功，另一个拿 TokenInvalidError；
-    #    口令在上面已校验通过，此处失败不会让任何一次合法提交被锁在门外。
-    verification_token = await validate_token(token, "password_reset", consume=True)
+    # 3. 认领 + 落库必须在同一个事务里。
+    #    `validate_token(consume=True)` 会把令牌原子置为 used；若随后的
+    #    `account.save()` 失败（DB 错误、约束冲突等），令牌已被烧掉、口令却没改，
+    #    用户拿着一个已作废的令牌，且无法用同一令牌重试——只能重新走一次申请。
+    #    包进 in_transaction()：任一步失败整体回滚，令牌回到 used=False，
+    #    用户可原样重试。认领仍靠 `UPDATE ... WHERE used=False` 的影响行数保证
+    #    并发下只有一个能成功。
+    from tortoise.transactions import in_transaction
 
-    await account.save(update_fields=["password"])
-    await verification_token.delete()
-    # 口令已变更：作废该账户全部既有登录会话
-    await AuthenticationSession.filter(bearer=account, disabled=False).update(disabled=True)
+    async with in_transaction():
+        verification_token = await validate_token(token, "password_reset", consume=True)
+        await account.save(update_fields=["password"])
+        await verification_token.delete()
+        # 口令已变更：作废该账户全部既有登录会话
+        await AuthenticationSession.filter(bearer=account, disabled=False).update(disabled=True)
     return account
 
 
