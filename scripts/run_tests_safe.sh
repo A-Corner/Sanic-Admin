@@ -11,10 +11,24 @@
 #   source .git/info/exclude.d/test-env.sh   # 设置 TMPDIR / PYTEST_BASETEMP
 #   scripts/run_tests_safe.sh [pytest 参数...]
 #
+# 解释器来源优先级：
+#   1) 显式设置的 PYTHON_BIN
+#   2) 仓库内 .venv/bin/python
+#   3) PATH 上的 python3，其次 python
+#
+# 注意：PYTHON_BIN **显式设置了但不可执行**时会 fail（退出码 2），
+# 不会静默回退到 2)/3)。静默回退会让人以为跑的是 A、实际跑的是 B，
+# 从而得出错误结论——宁可停下报错。
+#
+# 启动时始终打印解释器的**实际路径与实际版本**：路径对但版本错时本脚本
+# 仍能正常执行、测试甚至可能通过，但结论无效（与 requirements 不一致的
+# 环境不能用来判定代码正确）。所以「用的是哪个」必须永远可见。
+#
 # 退出码：
 #   0  测试通过
 #   1  测试失败
-#   2  环境不合规（外挂盘未挂载 / 路径指向内盘 / 变量未设置）——测试未运行
+#   2  环境不合规（外挂盘未挂载 / 路径指向内盘 / 变量未设置 /
+#      解释器不可执行）——测试未运行
 
 set -euo pipefail
 
@@ -72,7 +86,16 @@ MOUNT_POINT="$(check_external "$PYTEST_BASETEMP" PYTEST_BASETEMP)"
 TMP_MOUNT="$(check_external "$TMPDIR" TMPDIR)"
 
 # --- 6. Python 解释器：优先用环境变量，其次仓库内 venv，最后 PATH -------------
+#
+# PYTHON_BIN 是「可执行文件路径」。显式设置后若不可执行，直接 fail 而不是
+# 回落——见文件头注释：静默回退会让人以为跑的是 A、实际跑的是 B。
 if [ -n "${PYTHON_BIN:-}" ]; then
+    if [ ! -x "$PYTHON_BIN" ]; then
+        fail "PYTHON_BIN 指向的路径不可执行：${PYTHON_BIN}
+     （该值来自环境变量 PYTHON_BIN，本脚本不会回退到其它解释器）
+     请检查 .git/info/exclude.d/test-env.sh 里的配置是否指向了已删除的 venv，
+     或把 PYTHON_BIN 改成现有的解释器路径。"
+    fi
     PY="$PYTHON_BIN"
 elif [ -x ".venv/bin/python" ]; then
     PY=".venv/bin/python"
@@ -80,9 +103,16 @@ else
     PY="$(command -v python3 || command -v python)" || fail "找不到 python 解释器"
 fi
 
+# 实际版本：路径对但版本错时脚本照跑、测试甚至可能过，结论却无效。
+# 所以不只打印路径，必须把实际版本一并暴露出来。
+PY_VERSION="$(
+    "$PY" -c 'import sys; print("Python " + sys.version.split()[0])' 2>&1
+)" || fail "解释器存在但无法运行：${PY}
+     输出：${PY_VERSION}"
+
 echo "✅ 环境合规：TMPDIR=${TMPDIR}（挂载点 ${TMP_MOUNT}）"
 echo "✅            basetemp=${PYTEST_BASETEMP}（挂载点 ${MOUNT_POINT}）"
-echo "✅            python=${PY}"
+echo "✅            python=${PY}  (${PY_VERSION})"
 
 # --- 7. 执行 ----------------------------------------------------------------
 exec "$PY" -m pytest --basetemp="$PYTEST_BASETEMP" "$@"
