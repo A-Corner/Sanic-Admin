@@ -98,8 +98,8 @@ The five tools are read-only: `list_resources`, `describe_resource`, `validate_s
 ## Limitations
 
 - The generator only **adds**: column drops, type changes and other destructive migrations are handwritten on purpose.
-- The MCP write path is a **prototype** (off by default); account-level `spec:write` permission is landing in v0.4.2.
-- The admin console is **AMIS 3.4.0**; the 6.x upgrade is evaluated for a later release.
+- The MCP write path is a **prototype** (off by default); account-level `spec:write` permission shipped in v0.4.2.
+- The admin console is **AMIS 6.13.0** (upgraded from 3.4.0 in v0.4.1).
 - **Single maintainer**, no external contributors yet.
 - Not production-ready yet — see the status notes below.
 
@@ -107,7 +107,7 @@ The five tools are read-only: `list_resources`, `describe_resource`, `validate_s
 
 > **Project status — read this first**
 >
-> - The latest release is **[v0.3.4](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.4)** (2026-10-24), an authentication-hardening patch on top of [v0.3.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.3.3) (console hotfix) and v0.3.2. The original rebuild landed in **v0.2.0**. Everything below was verified by running it, and anything that could not be verified is listed under *Known limitations* in the per-release [release notes](docs/release/).
+> - The latest release is **[v0.4.2](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.2)** (2026-10-27), which puts the MCP write path behind account-level `spec:write` permission, on top of [v0.4.1](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.1) (ISO 8601 time fields, AMIS 6.13.0) and v0.4.0 (the spec generator). The original rebuild landed in **v0.2.0**. Everything below was verified by running it, and anything that could not be verified is listed under *Known limitations* in the per-release [release notes](docs/release/).
 > - **Upgrading from v0.3.1 or earlier** requires running the migration script described in the [v0.3.2 release notes](docs/release/v0.3.2-release-notes.md) — it adds `account.must_change_password`. Fresh installations need no migration.
 > - **Not production-ready yet.** Do not deploy this to a public environment.
 > - **No credentials are baked into the repository.** There is no default administrator password. The first-run administrator password is generated at startup (development only) or must be supplied via `INITIAL_ADMIN_PASSWORD`. Since v0.3.4 that value is held to the password strength rule and **production refuses to start** if it is too weak.
@@ -431,9 +431,11 @@ This project is built around **specs as code**: a resource is declared once in
 `specs/<resource>.yaml`, and the model, CRUD API, permissions, AMIS page, tests and
 three-dialect migrations are all generated from it.
 
-An AI can drive this loop through the MCP read-only layer (`tools/mcp_server`): it lists
-and describes existing specs, validates a new one, and previews the exact diff — but it
-**cannot write to the repository**. Writing is always a human action, followed by a PR.
+An AI can drive this loop through MCP (`tools/mcp_server`). Read-only tools list and
+describe existing specs, validate a new one, and preview the exact diff. The write path is
+**off by default**; when enabled it can only create a `proposal/*` branch plus an
+ownership ref — it **never touches your working tree, never pushes, never merges**. Landing
+the change is always a human action, via PR.
 
 See **[docs/demo/ai-module-in-10-minutes.md](docs/demo/ai-module-in-10-minutes.md)** for a
 real, reproducible walkthrough: adding a "ticket" module with every command, its actual
