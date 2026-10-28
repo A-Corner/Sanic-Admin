@@ -82,7 +82,9 @@ AI 通过 MCP 提交规格变更，系统产出：
 
 ### 2.3 `discard_proposal`
 
-删除指定提案分支。只允许删除 `proposal/` 前缀的分支——防止误删用户分支。分支上有未合并 commit 时，需要 `force=true` 才删，否则报错要求确认。
+删除指定提案分支。删除需同时满足三重条件（见 §9.1）：`proposal/` 前缀、存在归属标记 `refs/specgen/proposals/<name>`、标记 SHA 等于分支当前 SHA。删除用原子的 `update-ref -d refs/heads/<branch> <expected>`。
+
+> `force` 形参**保留但当前无效果**：`discard_proposal(..., force=False)`（`git_isolation.py:573`）的签名后到函数结尾没有任何 `force` / `merged` / `merge-base` 引用，是否「已合并」不参与判定——安全边界完全由上面三重条件把住。
 
 
 ## 3. 权限与令牌范围
@@ -91,7 +93,7 @@ AI 通过 MCP 提交规格变更，系统产出：
 
 | 层 | 内容 | 谁控制 |
 |---|---|---|
-| MCP 工具层 | **未实现**。设计上是「调用方以绑定账户身份经过与 HTTP API 相同的鉴权栈，`spec:write` 权限点」，但 MCP 是 stdio 本地进程、没有账户体系，当前实际的控制手段是 `--allow-write` 进程级开关（见 §9.2） | 项目 RBAC（待实现） |
+| MCP 工具层 | **已实现（v0.4.2）**：`--allow-write` 是**注册门槛**（不加则三个写入工具不出现在 `tools/list`），`spec:write` 是**调用门槛**（每次调用前 `require_spec_write()` 实时调 `GET /auth/whoami` 校验），两者是 **AND** 关系。权限点注册于 `app/auth/permissions.py:60`（`"spec": ["write"]`），校验入口 `tools/mcp_server/identity.py:219`，三个写入工具首行调用（`write_tools.py:128,205,224`） | 项目 RBAC（`spec:write`） |
 | 操作系统层 | 工具进程以**运行它的用户**身份执行 git 命令，不额外提权、不调用 `sudo` | 部署方 |
 
 ### 3.2 令牌范围
@@ -114,7 +116,8 @@ proposal/<resource>-<timestamp>
 
 例：`proposal/ticket-20261024-193012`
 
-- 前缀 `proposal/` 是硬性的：`discard_proposal` 与 `list_proposals` 都靠它识别自己的产物，且只操作这个前缀
+- 前缀 `proposal/` 是**硬性的命名约束**：`discard_proposal` 与 `list_proposals` 只操作这个前缀的分支
+- **归属不由前缀判定**，而由 ref 标记判定：`refs/specgen/proposals/<name>`（`git_isolation.py:594` `ref = proposal_ref(branch)`，`:596` `rev-parse --verify <ref>^{commit}`）。`discard_proposal` 要求「前缀 + 归属标记存在 + 标记 SHA 一致」三重条件同时成立，见 §9.1
 - `resource` 已经过白名单校验（`^[a-z][a-z0-9_]*$`），不含 `/`、`..`、`-` 开头
 - timestamp 由服务端生成，不接受调用方提供——避免并发覆盖
 
@@ -283,11 +286,11 @@ exit 1
 | clone 创建失败 | 删除临时目录，返回错误 |
 | 生成失败（pydantic / 模板） | 删除临时 clone，不产生任何分支，返回错误 |
 | 迁移生成失败 | 同上传，确保不留下半成品的分支 |
-| commit 失败 | 保留临时 clone 并返回其路径供人工检查，**不静默删除** |
+| commit 失败 | 失败也清理临时 clone（`finally` 里 `shutil.rmtree(tmp_root, ignore_errors=True)`，`git_isolation.py:461`），错误经返回值给出；**不保留路径** |
 | 审计写入失败 | **不回滚**——提案已成功。返回值 `audit_written: false` |
 | 中途进程被杀 | 临时 clone 残留在系统临时目录；用户仓库不受影响（分支尚未 fetch 回来）。下次运行时清理超过 24h 的残留 |
 
-**回滚原则**：失败时尽量回到「什么都没发生」的状态；做不到时（进程被杀）**保留现场并让人可见**，而不是静默清理。
+**回滚原则**：失败时一律回到「什么都没发生」的状态——临时 clone 在 `finally` 里删除，即使失败也不留下；错误经返回值给出。**唯一的例外是进程被 kill**（`finally` 来不及执行），残留目录由启动时 `cleanup_stale_workspaces()`（`proposal_registry.py:161`，仅 `--allow-write` 时执行）按 24h 规则回收：只扫 tempdir 一层、名字匹配 `sanic-specgen-*`、必须有标记文件、mtime 超 24h、pid 非当前进程。
 
 ## 8. 与只读层（#15）的关系
 
@@ -338,7 +341,7 @@ exit 1
 |---|---|
 | 「不能 push」的机制强度 | 四层：无 remote + pre-push hook + 命令白名单 + 无合并路径。另有四项正向对照 |
 | `base_ref` 默认值 | **`master`**，不取 HEAD（用户可能停在功能分支）。显式传入时校验形态与存在性 |
-| MCP 写入工具默认状态 | **默认不注册**，必须 `--allow-write`。MCP 是 stdio 本地进程、无账户体系，默认暴露写能力等于「谁能拉起进程谁就能写」 |
+| MCP 写入工具默认状态 | **默认不注册**，必须 `--allow-write`。默认暴露写能力等于「谁能拉起进程谁就能写」；v0.4.2 起再叠加账户级 `spec:write` 调用门槛（两者 AND，见 §10） |
 | 审计落点 | stderr 结构化 JSON。`OperationLog` 依赖数据库，MCP 侧不强制依赖运行中的服务 |
 
 ### 9.4 与设计初稿的偏差（已按审核意见修正）
@@ -352,7 +355,7 @@ exit 1
 
 ## 10. 账户级权限（`spec:write`）
 
-> 本节是 **SA-v042-SPECWRITE 的设计**（CPL 已裁定：五项全认可 + 4 条附加约束，2026-10-24，见 §10.9）。它补上 §3.1 里「MCP 工具层权限：未实现」那一格：让写入工具不再只靠进程开关 `--allow-write`，而是接入项目 RBAC 的 `spec:write` 权限点。
+> 本节是 **SA-v042-SPECWRITE 的设计**（CPL 已裁定：五项全认可 + 4 条附加约束，2026-10-24，见 §10.9）。**已在 v0.4.2 实现**，补上了 §3.1「MCP 工具层」那一格：写入工具不再只靠进程开关 `--allow-write`，而是接入项目 RBAC 的 `spec:write` 权限点（`--allow-write` 注册门槛 AND `spec:write` 调用门槛）。
 > 事实基础（均已核对 master `fef4dd3` 代码）：会话令牌是 RS256 JWT，payload 只含 `session_id` + `session_type`，有效性以服务端会话表为准（`app/models/session.py` `Session.decode`）；鉴权链 `get_session_token`（cookie `session` 或 `Authorization: Bearer`）→ `authenticate_request` → `has_permission(account, resource, action)`（`app/auth/authorization.py`，admin 直通）；权限注册表 `ALL_PERMISSIONS` 在 `app/auth/permissions.py`；现有 `POST /auth/`（`on_authenticate`）带 `@requires_authentication()` 但只返回账户 JSON、**不含权限**。
 
 ### 10.1 目标与非目标
