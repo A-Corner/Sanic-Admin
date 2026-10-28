@@ -22,12 +22,16 @@ from app.auth.verification import (
     request_two_step_verification,
     verify_account,
     request_captcha,
+    request_password_reset,
+    reset_password,
 )
 from app.middleware.security_middleware import issue_csrf_token
 from app.services.exceptions import (
     CredentialsError,
     PasswordChangeRequiredError,
     RateLimitExceededError,
+    TokenExpiredError,
+    TokenInvalidError,
     ValidationError,
 )
 
@@ -229,6 +233,64 @@ async def on_login(request):
     return response
 
 
+# 密码重置（AUTH-03）
+@auth_bp.post("/password-reset/request")
+async def on_password_reset_request(request):
+    """
+    发起密码重置。
+
+    **无论邮箱是否存在，一律返回 200 且响应体完全一致**——这是防账户枚举的
+    最低要求。时间侧信道见 `request_password_reset()` 的 docstring：本端点
+    防的是响应差异，不防时序分析，不声称完全不可枚举。
+
+    限流：复用登录限流器按（标识 + IP）计数，避免被用作邮箱探测或投递滥用。
+    """
+    from app.services.audit import record_auth_event
+
+    email = str(get_request_value(request, "email") or "").strip()
+    if not email:
+        return json("如果该邮箱已注册，重置说明将发送到该地址。")
+
+    # 限流口径与登录一致：这里的「失败」是「不该被允许的探测频率」
+    limiter = LoginRateLimiter.from_request(request)
+    try:
+        await limiter.raise_if_blocked(email, request)
+    except RateLimitExceededError:
+        await record_auth_event(request, "password_reset_request", status="failure", detail="限流拦截")
+        raise
+    await limiter.record_failure(email, request)
+
+    await request_password_reset(email)
+    await record_auth_event(request, "password_reset_request", status="success")
+    return json("如果该邮箱已注册，重置说明将发送到该地址。")
+
+
+@auth_bp.post("/password-reset/confirm")
+async def on_password_reset_confirm(request):
+    """
+    用令牌重置口令。令牌单次有效、TTL 30 分钟、用后即焚。
+
+    失败一律 400 且不区分「令牌不存在」与「令牌已过期」之外的细节——
+    前者泄露不了什么（令牌是随机的），后者对用户有实际意义（需要重新申请）。
+    """
+    from app.services.audit import record_auth_event
+
+    token = str(get_request_value(request, "token") or "").strip()
+    new_password = get_request_value(request, "new_password") or ""
+    if not token or not new_password:
+        raise ValidationError("令牌与新口令均为必填")
+
+    try:
+        account = await reset_password(token, new_password)
+    except (TokenInvalidError, TokenExpiredError) as exc:
+        await record_auth_event(request, "password_reset_confirm", status="failure", detail=type(exc).__name__)
+        raise
+
+    await record_auth_event(request, "password_reset_confirm", account=account, status="success")
+    return json("口令已重置，请用新口令登录。")
+
+
+# 修改密码路由
 @auth_bp.post("/change-password")
 async def on_change_password(request):
     """
