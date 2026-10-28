@@ -26,7 +26,9 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     `quantity` INT NOT NULL  COMMENT '数量' DEFAULT 1,
     `status` VARCHAR(16) NOT NULL  COMMENT '状态' DEFAULT 'pending',
     `customer_id` INT NOT NULL,
-    CONSTRAINT `fk_orders_customer_6fed6e80` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE RESTRICT
+    -- FK 约束名在 MySQL 是 schema 级唯一：RENAME 后 orders_old 仍占用原名（1826 实测），
+    --   新表必须换名；upgrade/downgrade 各用不同后缀避免互相冲突
+    CONSTRAINT `fk_orders_customer_spec005up` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE RESTRICT
 ) CHARACTER SET utf8mb4 COMMENT='订单。客户订单';
         INSERT INTO `orders` (`id`, `created_at`, `updated_at`, `deleted`, `title`, `amount`, `quantity`, `status`, `customer_id`)
         SELECT `id`, `created_at`, `updated_at`, `deleted`, `title`,
@@ -58,7 +60,7 @@ async def downgrade(db: BaseDBAsyncClient) -> str:
     `quantity` INT NOT NULL  COMMENT '数量' DEFAULT 1,
     `status` VARCHAR(16) NOT NULL  COMMENT '状态' DEFAULT 'pending',
     `customer_id` INT NOT NULL,
-    CONSTRAINT `fk_orders_customer_6fed6e80` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE RESTRICT
+    CONSTRAINT `fk_orders_customer_spec005dn` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE RESTRICT
 ) CHARACTER SET utf8mb4 COMMENT='订单。客户订单';
         INSERT INTO `orders` (`id`, `created_at`, `updated_at`, `deleted`, `title`, `amount`, `quantity`, `status`, `customer_id`)
         SELECT `id`, `created_at`, `updated_at`, `deleted`, `title`,
