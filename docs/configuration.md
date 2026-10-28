@@ -138,7 +138,7 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 |---|---|
 | development / testing | 启动期 **warning**，服务正常启动 |
 | production | **拒绝启动**（`DeliveryNotConfigured`） |
-| production + `ALLOW_NOOP_DELIVERY=1` | 启动期 **warning**，服务启动 |
+| production + `ALLOW_NOOP_DELIVERY=1` | 投递检查放行（启动期 **warning**）；能否启动还取决于其他门禁，如缺 aerich 迁移账本表会拒绝启动（见 docs/migrations.md） |
 
 | 变量 | 说明 | 默认值 | 生产必填 |
 |---|---|---|---|
