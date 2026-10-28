@@ -399,11 +399,19 @@ jobs:
           YAML
 
           echo "--- fail-closed 启动（预期非零退出）---"
-          set +e
-          "${CLI[@]}" -p ci-failclosed -f failclosed/docker-compose.yml \
-               up --abort-on-container-exit --exit-code-from app app
-          RC=$?
-          set -e
+          # 用 if 直接接住退出码，而不是 `set +e` … `RC=$?` … `set -e`。
+          #
+          # 原写法靠「RC=$? 紧贴 up」保证正确：$? 必须紧接在 up 命令之后读，
+          # 中间插任何命令（哪怕一句 echo 排查）都会让 $? 变成那条命令的退出码，
+          # 于是 RC 恒为 0，下面的 if [ "$RC" -eq 0 ] 立刻报「容器却以 0 退出」——
+          # 一条脚手架噪音会被误读成产品 fail-closed 失效。
+          # if 形式把「取退出码」和「判退出码」合成一个语法结构，中间无法插入命令。
+          if "${CLI[@]}" -p ci-failclosed -f failclosed/docker-compose.yml \
+               up --abort-on-container-exit --exit-code-from app app; then
+            RC=0
+          else
+            RC=$?
+          fi
           echo "容器退出码 = ${RC}"
 
           echo "--- fail-closed 容器日志 ---"
