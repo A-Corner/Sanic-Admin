@@ -68,19 +68,56 @@ def _check_exit(repo_root: Path) -> int:
     return _run([str(script), str(repo_root / "migrations")], repo_root).returncode
 
 
+#: `amis` 下这些子目录是纯静态资源，测试只读：
+#: 相关用例（test_amis_static_and_allow、test_amis_raw_path_bypass）只拼请求 URL
+#: 字符串，没有 `open(..., "w")` / `unlink` / `write`。
+_AMIS_READONLY = ("sdk", "fonts", "vendor", "css", "images")
+#: `amis` 下唯一会被写的位置：generate.py 会生成 `amis/pages/*-list.json`
+#: 并原地改写 `amis/pages/site.json`（见 tools/specgen/generate.py 的 SITE / OWNED_GLOBS）。
+_AMIS_WRITABLE = "pages"
+
+
 @pytest.fixture()
 def sandbox(tmp_path):
     """
     把生成器与迁移链复制到临时仓库根，测试只改副本。
 
-    只复制必需部分：`tools/specgen`、`scripts/`、`specs/`、`migrations/`，
-    以及 `app/`（check_migrations 要导入 app.models 与生成的模型）。
+    真实复制：`tools/specgen`、`scripts/`、`specs/`、`migrations/`、`app/`，
+    以及 `amis/pages/`（生成器会写 `amis/pages/*-list.json` 与 `site.json`）。
+
+    `amis` 的其余子目录（sdk/fonts/vendor/css/images，约 40 MB）是纯静态资源，
+    测试只读不写，用**符号链接**指向源仓库以省掉每个用例 40 MB 的复制。
+
+    **不要把这些只读目录也改成真复制之外的可写手段**，也**不要把 `pages` 换成
+    symlink**：生成器会原地改写 `amis/pages/*.json`，symlink 会把改动直接落到
+    仓库源码（这也是不用整树 symlink / hardlink 的原因）。
     """
-    for rel in ("tools", "scripts", "specs", "migrations", "app", "amis"):
+    for rel in ("tools", "scripts", "specs", "migrations", "app"):
         src = REPO / rel
         if src.exists():
             shutil.copytree(src, tmp_path / rel,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+
+    # amis：只真实复制会被写的 pages，其余只读子目录用 symlink
+    amis_src = REPO / "amis"
+    if amis_src.exists():
+        dst_amis = tmp_path / "amis"
+        dst_amis.mkdir(parents=True, exist_ok=True)
+        pages_src = amis_src / _AMIS_WRITABLE
+        if pages_src.exists():
+            shutil.copytree(pages_src, dst_amis / _AMIS_WRITABLE,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for name in _AMIS_READONLY:
+            src_sub = amis_src / name
+            if src_sub.exists():
+                (dst_amis / name).symlink_to(src_sub, target_is_directory=True)
+        # 其余未分类子目录/散文件（js、public、*.html、*.js…）：一律 symlink。
+        # 生成器不写这些路径；symlink 保证它们也不会成为误写的目标。
+        for entry in amis_src.iterdir():
+            if entry.name in (_AMIS_WRITABLE,) + _AMIS_READONLY:
+                continue
+            (dst_amis / entry.name).symlink_to(
+                entry, target_is_directory=entry.is_dir())
     # 干净起点：不带上跑测试残留的 __pycache__
     return tmp_path
 
