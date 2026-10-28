@@ -29,6 +29,7 @@ from app.api.responses import APIError
 from app.auth.authorization import check_permissions
 from app.cache import get_cache
 from app.cache.decorators import clear_route_cache
+from app.services.audit import record_resource_event
 
 #: 缓存键列表分页上限
 MAX_LIMIT = 1000
@@ -126,9 +127,124 @@ class CacheResource(HTTPMethodView):
 
     @check_permissions("system", "admin")
     async def delete(self, request: Request):
-        """清理缓存（``type=route`` 只清路由缓存，``type=all`` 清全部）。"""
+        """
+        清理缓存。**必须显式指定 ``type``**，没有默认行为。
+
+        ``type`` 的三个合法值（**三个都写审计**）：
+
+        =========== ==================================== ==================
+        type        行为                                 审计 ``object_id``
+        =========== ==================================== ==================
+        ``route``   只清路由缓存（``pattern`` 生效）      ``route:<pattern>``
+        ``pattern`` 按 ``pattern`` 删除匹配的键            ``pattern:<pattern>``
+        ``all``     全量清空（**破坏性**）                ``all``
+        =========== ==================================== ==================
+
+        为什么取消默认值（EVT-20261028-041）
+        ===================================
+        此前 ``type`` 默认 ``"all"`` —— 一个**不带参数的 DELETE 就会清空整个缓存**。
+        实测：``DELETE /api/v1/cache`` 不带任何 query 直接全清。
+
+        这与 HTTP 语义相悖（DELETE 通常针对**指定资源**），且**审计后置**：
+        全量清空是三个分支里唯一不可逆的，却是唯一有默认值的。
+
+        改为必填后，误操作需要显式写 ``?type=all`` —— 从「默认危险」变成
+        「显式危险」。
+
+        为什么三个分支都写审计（不是只有 ``all``）
+        ==========================================
+        最初只让 ``all`` 写。复审发现这留下了一条**不留痕的全清路径**：
+        ``?type=pattern&pattern=*`` 与 ``type=all`` 效果完全相同（``*`` 匹配全部键）
+        却因为是 ``pattern`` 分支而不写审计。
+
+        尝试过「先判断这次 pattern 是否等效全清，等于才拒绝/才审计」，
+        但这条路要求穷举「所有等效于 ``*`` 的 glob 写法」（``*`` / ``**`` / ``*?`` /
+        ``[a-w]*`` …），集合无法穷举；而且两个缓存后端（``fnmatch`` 与 redis
+        ``KEYS``）的 glob 语义还不一致。
+
+        改成「凡删除必审计」后问题消失：**审计记录的内容是「删了什么范围」，
+        而「这个范围是否等于全部」是派生问题，不需要在审计时回答。**
+
+        为什么 pattern 不能含空格或 ``fields=``
+        ======================================
+        ``pattern`` 会被拼进审计 ``detail``（``id=pattern:<pattern>``），而 detail
+        是空格分隔的 ``key=value`` 格式。两类字符会破坏它，且都能让操作者伪造
+        审计内容 —— 详见 ``delete`` 方法体内的注释与 ``EVT-20261028-043``。
+        """
+        cache_type = request.args.get("type")
+        if cache_type not in ("route", "pattern", "all"):
+            return _bad_request(
+                "必须显式指定 type 参数，可选值：route（只清路由缓存）/ "
+                "pattern（按 pattern 删除匹配键）/ all（全量清空，会写审计）"
+            )
+
         pattern = request.args.get("pattern", "*")
-        cache_type = request.args.get("type", "all")
+
+        # pattern 会被拼进审计的 detail（``id=pattern:<pattern>``），而 detail 是
+        # **空格分隔的 key=value 格式**（audit.py:152-159）：
+        #
+        #     parts = [f"id={object_id}"]; detail = " ".join(parts)
+        #
+        # 而官方解析器（docs/audit-log-format.md）按 ``detail[3:].split(" ", 1)[0]``
+        # 取 id、按 ``detail.find("fields=")`` 取字段名。两类内容会破坏它：
+        #
+        # 1. **空格** → ``split(" ", 1)[0]`` 截断 id：
+        #      pattern="a b" → detail="id=pattern:a b" → 解析出 id="pattern:a"
+        # 2. **子串 "fields="** → ``find("fields=")`` 命中的是 pattern 里那个：
+        #      pattern="fields=y" → detail="id=pattern:fields=y"
+        #      → 解析出 fields=["y"]（id 段看起来正常，但 fields 被伪造）
+        #
+        # 第 2 条比第 1 条更隐蔽：**id 没被截断，整条记录看起来格式合法**，
+        # 而伪造的 fields 语义是「被操作的字段名」——攻击者可以让审计看起来
+        # 像「只动了 title」。
+        #
+        # 另外拦 ``\\r`` / ``\\n`` / ``\\t``（复审 SF-2）：
+        # - **对 detail 解析无影响** —— ``split(" ", 1)`` 只认 ASCII 空格，
+        #   这三种字符实测不会截断 id（见 ``test_benign_patterns_are_not_rejected``
+        #   的历史用例，已随 SF-2 改为拒绝）。
+        # - **但对下游日志系统有影响** —— Syslog / Loki / ELK 按行收集，
+        #   ``\\n`` 会把一条审计拆成两行（**日志伪造**）；消费方若用无参
+        #   ``detail.split()``（不传参数时按任意空白切），``\\t`` 同样截断。
+        # - **误拒面≈0**：现实缓存键不含这些字符。
+        #
+        # 根本修法是让 ``record_resource_event`` 约束 ``object_id`` 的字符集或
+        # 改用结构化 detail —— 那要动解析契约与所有消费方，不在本 PR 范围
+        # （已记 EVT-20261028-043）。
+        # 防御性检查：``?pattern=``（空值）在 Sanic 下**到不了这里** ——
+        # query 解析用 ``keep_blank_values=False``（urllib 默认），空值被当作
+        # 「不存在」，于是 ``args.get("pattern", "*")`` 返回默认 ``"*"``。
+        # 实测 ``?type=pattern&pattern=`` 与不传 pattern 行为完全一致。
+        #
+        # 保留这条的理由：若将来换成别的 WSGI/ASGI 适配器、或调整解析配置，
+        # 空串就可能到达。它是**防御性死代码，不是已修复的缺陷**——
+        # PR 描述里不要把它列为「修了空 pattern」。
+        if not pattern:
+            return _bad_request("pattern 不能为空；要清空全部请用 type=all（会写审计）")
+        for _ch, _name in (
+            (" ", "空格"),
+            ("\r", "回车"),
+            ("\n", "换行"),
+            ("\t", "制表符"),
+        ):
+            if _ch in pattern:
+                return _bad_request(
+                    f"pattern 不能包含{_name}（会破坏审计记录结构或下游日志按行解析）"
+                )
+        if "fields=" in pattern:
+            return _bad_request("pattern 不能包含 'fields=' 子串（会伪造审计记录中的字段名）")
+
+        # object_id 的取值按分支填，让 detail 能读出删除范围：
+        #   type=all     -> id=all
+        #   type=route   -> id=route:<pattern>
+        #   type=pattern -> id=pattern:<pattern>
+        #
+        # 先算出 object_id 再进 try —— 因为 except 分支写失败审计时也要用它。
+        if cache_type == "all":
+            object_id = "all"
+        elif cache_type == "route":
+            object_id = f"route:{pattern}"
+        else:
+            object_id = f"pattern:{pattern}"
 
         try:
             if cache_type == "route":
@@ -144,7 +260,57 @@ class CacheResource(HTTPMethodView):
                     count = cache.delete_many(keys)
                     message = f"已清除 {count} 个缓存键"
         except Exception:
+            # 失败也写审计（复审 SF-1）—— 这是本项「凡删除必审计」的最后一环。
+            #
+            # 为什么必须在 except 里写：删除可能**部分完成后**才抛错（例如
+            # ``delete_many`` 删到一半缓存后端断了），此时缓存已经变了，
+            # 但没有记录。加上这条之后，「删除已发生/部分发生却无痕」
+            # 这最后一条口子被封死。
+            #
+            # ``status="failure"`` 让消费方能区分「确实删了」与「尝试了但失败」。
+            # record_resource_event 永不抛出，所以这里不会因为审计再引发异常。
+            await record_resource_event(
+                request,
+                resource="cache",
+                action="delete",
+                object_id=object_id,
+                account=request.ctx.authentication_session.bearer,
+                status="failure",
+            )
             return _server_error("清理缓存失败")
+
+        # 三个分支都写审计 —— 不是只有 all。
+        #
+        # 为什么改（EVT-20261028-041 复审发现）：此前只有 ``type=all`` 写审计，
+        # 于是 ``?type=pattern&pattern=*`` 能达成与 ``type=all`` 完全相同的效果
+        # （pattern="*" 匹配全部键）却不留任何记录 —— 一条**不留痕的全清路径**。
+        #
+        # 尝试过「检测 pattern 是否等于全清再决定是否审计」，但那条路要求穷举
+        # 「所有等效于 * 的 glob 写法」（``*`` / ``**`` / ``*?`` / ``[a-w]*`` …），
+        # 集合无法穷举，且两个缓存后端（fnmatch / redis KEYS）语义还不同。
+        #
+        # 改成「凡删除必审计」后，这个问题不存在了：审计的内容是「删了什么范围」，
+        # 而「这个范围是否等于全部」是一个派生问题，不需要在审计时回答。
+
+        # 审计是旁路：record_resource_event 永不抛出（audit.py:144），
+        # 所以这里不需要 try/except，也不该因为它影响主请求的结果。
+        #
+        # account 直接取 ctx.authentication_session.bearer，不加 getattr 兜底：
+        # 本方法有 @check_permissions，而 check_permissions 内部必走
+        # authenticate_request，后者**无条件**写
+        # ``request.ctx.authentication_session``（authentication.py:389）。
+        # 仓库里 8 处同类调用（order/ticket/customer 各 2-3 处）也都是直接取。
+        #
+        # 注意：``object_id="all"`` 与 ``object_id="route:*"`` 挤在同一个契约里
+        # 是拉伸 —— 该参数的语义是「被操作记录的 id」，而批量操作没有单一对象。
+        # 已记 EVT-20261028-043。
+        await record_resource_event(
+            request,
+            resource="cache",
+            action="delete",
+            object_id=object_id,
+            account=request.ctx.authentication_session.bearer,
+        )
 
         return APIResponse.success(message=message)
 

@@ -118,8 +118,15 @@ async def test_undeclared_methods_still_405(
 # ----------------------------------------------------------------------
 
 async def test_delete_all_cache_is_registered(client, auth_headers):
-    """``DELETE /cache`` 不再是 405 —— 这是本项要修的核心缺陷。"""
-    resp = await client.delete("/api/v1/cache", headers=auth_headers)
+    """
+    ``DELETE /cache`` 不再是 405 —— 这是本项要修的核心缺陷。
+
+    **必须带 ``?type=all``**：``type`` 自 EVT-20261028-041 起变为必填
+    （不带参数会 400，见 ``test_cache_delete_type_audit.py``）。
+    本用例测的是「路由注册」，所以显式给出合法参数，
+    否则会把「参数校验生效」误测成「路由没注册」。
+    """
+    resp = await client.delete("/api/v1/cache?type=all", headers=auth_headers)
     assert resp.status_code != 405, (
         "DELETE /api/v1/cache 仍是 405：注册没生效"
     )
