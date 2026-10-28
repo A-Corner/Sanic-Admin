@@ -153,6 +153,41 @@ echo "总数=$TOTAL 命中=$HIT $([ "$TOTAL" = "$HIT" ] && echo OK || echo 不�
 
 ### 2.2 安装后端依赖（实测通过）
 
+> **关于下文所有 `.venv/bin/...` 命令**
+>
+> 本文档统一用 `.venv` 表示「你为本项目创建的 Python 虚拟环境」，**不约定它放在哪里**。
+> 它可以建在仓库根（`.venv/`，见本节末尾，已被 `.gitignore` 忽略），也可以建在项目外的
+> lane 目录——后者是多人 / 多分支并行时的推荐做法（见 §4.6）。
+>
+> **唯一硬性要求**：该 venv 的依赖版本必须与 `requirements.txt` 的一致。
+> **版本不符的环境会让测试结论不可信**——`sanic-ext 23.6.0` 带的老 `sanic-routing`
+> 会把 405 变成 404，使该红的地方假绿，详见本节下文
+> 「不要用 `sanic-ext 23.6.0` 的环境验证测试结果」。
+>
+> 校验方法（在仓库根执行，**用你自己的 venv 的 python**）：
+>
+> ````bash
+> <你的 venv>/bin/python -c "
+> from importlib.metadata import version, PackageNotFoundError
+> import re
+> want = dict(re.findall(r'^([A-Za-z0-9_.-]+)==(\S+)', open('requirements.txt').read(), re.M))
+> assert want, 'requirements.txt 里没有任何 == 钉版，无法校验'
+> bad = []
+> for k, exp in want.items():
+>     try: got = version(k)
+>     except PackageNotFoundError: got = '未安装'
+>     if got != exp: bad.append((k, exp, got))
+> print('不符:', bad or '无')
+> "
+> ````
+>
+> 输出 `不符: 无` 才可用。三种结果的含义：
+> - `不符: 无` —— 全部匹配
+> - `('sanic', '25.12.1', '未安装')` —— 该包没装
+> - `('sanic', '25.12.1', '25.11.0')` —— 装了但版本不对
+>
+> **下文所有 `.venv/bin/xxx` 都应替换成你自己 venv 的路径。**
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
@@ -924,7 +959,7 @@ docs: SECURITY 去掉"已作废"表述，改为必须更换 (SA-OSS-B2)
 |---|---|---|
 | 测试/构建报告、日志、测量输出 | 项目外的持久目录（如 `$PROJECT_WORKSPACE/reports/YYYY-MM/`） | 30 天 |
 | 浏览器自动化输出（`.playwright-mcp/` 等） | 同上，或直接丢弃 | — |
-| venv / `node_modules` / 编译产物 | 项目外的 lane 目录（见 §4.4 与构建纪律） | 按需 |
+| venv / `node_modules` / 编译产物 | 项目外的 lane 目录 | 按需 |
 
 - **不得写入仓库内**：报告、日志、截图、临时数据库都会污染 diff，且来不及在提交前发现。
 - 已加入 `.gitignore` 的目录（如 `.playwright-mcp/`）不代表可以随便生成——**仍应指向仓库外**。
