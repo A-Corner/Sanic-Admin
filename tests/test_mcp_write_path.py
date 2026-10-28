@@ -741,3 +741,113 @@ def test_branch_must_use_proposal_prefix(user_repo: Path) -> None:
     with pytest.raises(GitNotAllowed):
         make_proposal(user_repo, "master", "x", lambda d: None)
     assert PROPOSAL_PREFIX == "proposal/"
+
+
+# ---------------------------------------------------------------------------
+# 进程组 kill 的专项验证（BL-11）
+# ---------------------------------------------------------------------------
+
+
+def test_isolated_push_kills_grandchild_on_timeout(tmp_path: Path) -> None:
+    """
+    超时时必须杀掉**整个进程组**，孙进程不能变成孤儿。
+
+    为什么需要这条：`_run_git_push_isolated` 的 `killpg` 只在**超时分支**执行。
+    其余 36 条测试都跑不到超时，所以把 `killpg` 换成 `proc.kill()` 时它们全绿
+    ——那条修复等于没有覆盖。
+
+    构造：pre-push hook 先把自己的 `$$` 写进文件，再 `sleep 120`（远超 timeout），
+    然后 `exit 1`。用 ``timeout=1`` 触发超时分支（不用等 30 秒）。
+
+    断言两件事：
+    1. 确实抛 ``TimeoutExpired``（说明走的是超时分支）
+    2. **hook 进程在超时后消失**（killpg 生效；若只 kill 直接子进程，hook 会活着）
+    """
+    import os
+    import time
+
+    repo = tmp_path / "repo"
+    bare = tmp_path / "bare.git"
+    hook_pid_file = tmp_path / "hook.pid"
+
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.invalid"], cwd=str(repo), check=True
+    )
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True
+    )
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(bare)], cwd=str(tmp_path), check=True
+    )
+    subprocess.run(
+        ["git", "remote", "add", "evil", str(bare)], cwd=str(repo), check=True
+    )
+
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(
+        "#!/bin/sh\n"
+        # 关键：先把 stdout/stderr 重定向到 /dev/null。
+        # 否则孙进程会继承 `git push` 的 pipe，导致父进程的
+        # `proc.communicate()` 在超时分支里一直等到 EOF——那会掩盖真实耗时
+        # （实测：不重定向时破坏版要跑满 120 秒，期间 hook 自然结束，
+        #  进程存活检查就失效了，测试反而变绿）。
+        "exec >/dev/null 2>&1\n"
+        # 把本进程 pid 写出去，供父测试核对它超时后是否还活着
+        f'echo $$ > "{hook_pid_file}"\n'
+        # 远超 timeout=1，确保触发超时分支
+        "sleep 120\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        # timeout=1：走超时分支，但不必真等 30 秒
+        _run_git_push_isolated(repo, ["push", "evil", current], timeout=1)
+    elapsed = time.monotonic() - started
+
+    # 超时分支本身必须「很快返回」。若 killpg 缺失，`proc.communicate()` 会等
+    # 孤儿进程释放 pipe，耗时接近 hook 的 sleep 时长（实测 122 秒 vs 正常 6 秒）。
+    assert elapsed < 15, (
+        f"超时分支耗时 {elapsed:.1f}s——预期 1~6s。"
+        "耗时接近 hook 的 sleep 时长，说明孙进程仍持有 pipe，进程组没有被整体杀掉。"
+    )
+
+    # hook 必须已经写过 pid，否则说明它压根没被执行（测试前提不成立）
+    assert hook_pid_file.exists(), "pre-push hook 没有执行痕迹，测试前提不成立"
+    hook_pid = int(hook_pid_file.read_text().strip())
+
+    # 给 killpg 一点时间生效（SIGKILL 是异步投递）
+    deadline = time.monotonic() + 5
+    alive = True
+    while time.monotonic() < deadline:
+        try:
+            os.kill(hook_pid, 0)  # 探测存活，不发送信号
+        except ProcessLookupError:
+            alive = False
+            break
+        except PermissionError:
+            # pid 被别的进程复用，也算原来的 hook 已经不在了
+            alive = False
+            break
+        time.sleep(0.1)
+
+    assert not alive, (
+        f"pre-push hook（pid={hook_pid}）在超时后仍然存活——"
+        "说明只杀了直接子进程（git push），孙进程变成了孤儿。"
+        "这正是 PR #30 遗漏、本 PR 要修的那一半。"
+    )
