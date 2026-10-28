@@ -54,10 +54,13 @@ mkdir -p "$TMPDIR" 2>/dev/null || fail "无法创建 TMPDIR=${TMPDIR}"
 # /tmp、/Users 都在它下面，挂载点**不是** /。用 == / 判断会漏掉整个内盘。
 #
 # 可靠判据：比较**设备**。目标路径的设备不能与根文件系统（/）的设备相同族。
-# 更简单且跨平台的等价判据：挂载点必须是一个显式的卷挂载点——
-#   macOS: /Volumes/<name>
-#   Linux: /mnt/... 或 /media/...
-# 本地约定要求产物放在外挂盘的 /Volumes/ 下，所以直接校验这一点。
+# 更简单且跨平台的等价判据：挂载点必须是一个显式的卷挂载点。
+#
+# **本脚本只支持 macOS**：白名单写死 /Volumes/*（见下面 case 分支）。
+# Linux 的 /mnt、/media 不在白名单内，在 Linux 上运行会以 exit 2 拒绝——
+# 这是有意为之，不是遗漏：本项目的测试与构建都在 macOS 的外挂卷上跑，
+# 加一条没被真实使用过的 Linux 分支等于增加一条没人验证的代码路径。
+# 将来若真要在 Linux 上跑，再连同验证一起加，不要先加分支后补验证。
 check_external() {
     local path="$1" label="$2" mount dev root_dev
     mount="$(df -P "$path" | awk 'NR==2 {print $NF}')"
@@ -70,14 +73,17 @@ check_external() {
         fail "拒绝运行：${label}=${path} 与根文件系统同设备（内盘）。
         测试产物不得落在内盘。"
     fi
-    # 白名单：必须位于显式的卷挂载点下（macOS: /Volumes/<name>）。
+    # 白名单：必须位于显式的卷挂载点下。**仅 macOS 的 /Volumes/<name>**。
     # 这比「排除 /System/Volumes/*」更稳——不依赖 macOS 具体把数据卷挂在哪，
     # 系统升级改了路径也不会静默失效（2026-10-28 首次实现用「挂载点==/」，
     # 在 macOS 上被判据漏掉，靠反向对照才发现）。
+    #
+    # 不含 Linux 的 /mnt、/media：见上方注释，Linux 未经验证故不支持。
     case "$mount" in
         /Volumes/*) : ;;
         *) fail "拒绝运行：${label}=${path} 的挂载点是 ${mount}，不在 /Volumes/ 下。
-            本机约定测试产物只能放在外挂卷（/Volumes/<name>）。" ;;
+            本脚本仅支持 macOS（产物只能放在外挂卷 /Volumes/<name>）；
+            Linux 的 /mnt、/media 未经验证，不在白名单内。" ;;
     esac
     echo "$mount"
 }
