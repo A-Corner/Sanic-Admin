@@ -2,7 +2,7 @@
 
 迁移工具：aerich 0.7.2（已写入 `requirements.txt`），配置见 `app/aerich_config.py`（`TORTOISE_ORM`）与 `pyproject.toml` 的 `[tool.aerich]`。
 
-`TORTOISE_ORM` 的数据库地址直接取 `app.config.settings.DATABASE_URL`，与 `app.models.init_db` 同源，受 `SANIC_ENV` 和 `DATABASE_URL` 环境变量控制，没有第二份连接配置。迁移文件在 `migrations/models/`，当前只有基线 `0_*_init.py`。
+`TORTOISE_ORM` 的数据库地址直接取 `app.config.settings.DATABASE_URL`，与 `app.models.init_db` 同源，受 `SANIC_ENV` 和 `DATABASE_URL` 环境变量控制，没有第二份连接配置。迁移文件在 `migrations/models/`，当前 1 条基线（`0_*`）+ 2 条增量（`1_*`、`2_*`）。
 
 以下命令均在仓库根目录执行，已按目标环境设置好 `SANIC_ENV` / `DATABASE_URL`。
 
@@ -79,8 +79,11 @@ DATABASE_URL="<生产库 DSN>" python scripts/migrations/upgrade.py
 实际缺列，`aerich upgrade` 永远不会补，运行期才报错。
 
 **MySQL / PostgreSQL 版本**：`baseline_existing_db.py --url <dsn>` 已支持（账本表 DDL
-按方言生成、PG 用 `current_schema()` 而非硬编码 `public`）。但**存量非空库的实操
-尚未在真实 MySQL/PG 上验证**（只验证了空库基线生成与执行），首次使用请先在生产副本上演练。
+按方言生成、PG 用 `current_schema()` 而非硬编码 `public`）。新库与存量库两条路径
+已由 `migrations-dialects` CI job 在真实 MySQL 8 / PostgreSQL 16 上覆盖
+（`.github/workflows/ci.yml:197` 起的 job，`:268` 的 `Existing database: increment only`
+在存量库上跑 `scripts/check_dialect_ddl.py <dialect> <url> --existing`；v0.4.2 CI 全绿，
+见 `docs/release/v0.4.2-release-notes.md:263-264`）；生产前仍建议先在副本上演练。
 
 ## 3. 开发与生产：`generate_schemas` 与 aerich 的分工
 

@@ -1,5 +1,7 @@
 # Sanic-Admin 架构文档
 
+> 本文档基线为 `8750d51`（`sanic==23.6.0`）。现行依赖见 `requirements.txt`（`sanic==25.12.1`）。
+
 > 适用范围：Sanic-Admin 后端（Sanic 23.6 + Tortoise ORM 0.20 + Redis + PyJWT），前端 AMIS 低代码框架。
 > 基线：发布候选 `release/v0.2.0`，M1 候选 `8750d51`（M1 已交付并入）。
 > 事实来源：逐文件阅读 `app/` 源码 + 在临时虚拟环境中实际启动应用、抓取路由表与响应头。
@@ -197,7 +199,7 @@ v0.2.0 的 `a0a6b27` 为 57 条）；
 | `app/api/responses.py` | `APIResponse` 统一响应封装（`success` / `error` / `list` / `created` / `serialize`）+ `APIError` 错误码常量表 |
 | `app/api/validators.py` | 参数校验装饰器：`validate_request` / `validate_path_param`，规则类 `Required` / `Type` / `Length` / `Range` / `Regex` / `Email` / `OneOf` / `Custom` |
 | `app/api/resources/` | 12 个业务资源模块（见 §2.3） |
-| `app/api/resources/route_methods.py` | `register_view()`：用 `Blueprint.route` 原样注册方法并为未支持的方法挂 405 兜底，使方法不匹配稳定返回 405 而不是 404/500（仅部分资源采用） |
+| `app/api/resources/route_methods.py` | `register_view()`：用 `Blueprint.route` 原样注册方法并为未支持的方法挂 405 兜底，使方法不匹配稳定返回 405 而不是 404/500（所有资源模块均采用） |
 
 **M1 已删除**（不再存在于仓库中）：`app/api/routes.py`（旧版 API 蓝图）与
 `app/api/example.py`（文档装饰器示例）。它们在 M1 之前是无调用点的死代码，且 import 的
@@ -206,7 +208,7 @@ v0.2.0 的 `a0a6b27` 为 57 条）；
 `app/api/resources/` 下的资源清单（**【读码确认】** `app/api/resources/__init__.py:36-65` 的
 `all_resources` 列表，共 27 个资源类）：
 
-| 文件 | 资源类 | 注册路径（`v1_bp.add_route`） |
+| 文件 | 资源类 | 注册路径（均经 `register_view`） |
 |---|---|---|
 | `account.py` | `AccountResource` / `AccountPasswordResource` / `AccountMeResource` / `MyAccountPasswordResource` | `/accounts`、`/accounts/<id>`、`/accounts/<id>/password`、`/accounts/me`、`/accounts/me/password` |
 | `role.py` | `RoleResource` / `RoleMembersResource` / `AccountRolesResource` | `/roles`、`/roles/<id>`、`/roles/<id>/members`、`/accounts/<id>/roles` |
@@ -221,8 +223,11 @@ v0.2.0 的 `a0a6b27` 为 57 条）；
 | `database.py` | `QueryLogsResource` / `SlowQueriesResource` / `QueryPlanResource` / `ConnectionPoolResource` / `DatabaseAnalysisResource` | `/api/database/query-logs` 等（独立 `bp`） |
 | `compression.py` | `CompressionStatsResource` / `CompressionConfigResource` | `/api/compression/...`（独立 `bp`） |
 
-**【已实测】** `account.py` / `role.py` / `profile.py` 用 `register_view()` 注册（自带 405 兜底），
-其余资源用 `v1_bp.add_route(...)`。`upload.py` 的 `FileDownloadCounterMiddleware` 已随 M1
+**【读码确认】** 上述 12 个业务资源模块全部用 `register_view()` 注册（自带 405 兜底）；
+`grep -rl 'register_view(' app/api/resources/` 命中 13 个文件（另外一个是提供 `register_view`
+自身的 `route_methods.py`），`grep -rn 'v1_bp.add_route(' app/` 现只剩
+`account.py:128` 的 docstring 说明文字，无实际调用。`database.py` / `compression.py`
+挂在独立 `bp` 上，同样用 `register_view(bp, ...)`。`upload.py` 的 `FileDownloadCounterMiddleware` 已随 M1
 移除——下载计数改由 `FileDownloadResource.get()` 内部原子自增
 （`app/api/resources/upload.py:380`），全局中间件不再需要它。
 
@@ -340,14 +345,15 @@ production 下（`ENABLE_API_DOCS=False`，实测）：
 
 | 文件 | 职责 |
 |---|---|
-| `app/web/routes.py` | `login_bp`（`/login`）与 `index_bp`（`/index`），用 Jinja2 渲染 `frontend/templates/login.html` / `site.html` |
+| `app/web/routes.py` | `login_bp`（`/login`）与 `index_bp`（`/index`），Jinja2 `FileSystemLoader('frontend/templates')` 分别渲染 `login.html` / `site.html`。**该模块未接线，实际不渲染任何页面**：`register_web_blueprints()`（`:39`）无调用点，`frontend/templates/` 目录不存在，仓库中也没有任何 `site.html` —— 详见下方说明 |
 | `app/web/__init__.py` | 仅模块 docstring |
 
-**【已实测】截至 `8750d51`**：`register_web_blueprints()`（`app/web/routes.py:39`）
-**仍无调用点**，且 `frontend/templates/` 目录在仓库中**不存在**
-（Jinja2 `FileSystemLoader('frontend/templates')` 会直接失败）。
-这批 Web 渲染路由是**死代码**——前端主线已切到 AMIS 静态页（`amis/`），
-Web 渲染路线是否移除留待后续版本决定。
+**【读码确认】** `register_web_blueprints()`（`app/web/routes.py:39`）**无调用点**
+（`grep -rn 'register_web_blueprints' app/ main.py` 只命中定义处），且 `frontend/templates/`
+目录在仓库中**不存在**（Jinja2 `FileSystemLoader('frontend/templates')` 会直接失败），
+`site.html` 在仓库里也**不存在**（`git ls-files | grep site.html` 为空）。
+该模块未接线，实际不渲染任何页面：这批 Web 渲染路由是**死代码**——前端主线已切到
+AMIS 静态页（`amis/`），Web 渲染路线是否移除留待后续版本决定。
 
 ---
 
@@ -780,7 +786,7 @@ register_view(v1_bp, "/articles/<article_id:int>", article_resource,
 
 | 约定 | 说明 |
 |---|---|
-| 蓝图 | 资源模块 `from app.api import v1_bp` 取蓝图，路由用 `register_view(v1_bp, ...)` 或 `v1_bp.add_route(...)`（`role.py:565-575` 是 `register_view` 范本，`log.py:179-181` 是 `add_route` 范本）。**只有**需要独立前缀（如 `/api/database`）时才自建 `bp` |
+| 蓝图 | 资源模块 `from app.api import v1_bp` 取蓝图，路由统一用 `register_view(v1_bp, ...)`（`role.py:597-601` 与 `log.py:180-182` 都是范本）。**只有**需要独立前缀（如 `/api/database`）时才自建 `bp`，同样用 `register_view(bp, ...)` |
 | 参数校验 | 在视图方法体内用 `validate_fields(data, {...})`（`app/api/validators.py`）——**不是** `@validate_request` / `@validate_path_param` 装饰器（那两个装饰器目前只有 docstring 示例，无实际调用点）。范本见 `role.py:244-251` |
 | 权限 | 视图方法上加 `@check_permissions("resource", "action")`（`app/auth/authorization.py:180`）。**权限判定在参数校验之前**——`role.py:213` 的 `@check_permissions("role", "read")` 就在 `get` 上，装饰器先于方法体执行 |
 | 响应 | 统一用 `APIResponse.success` / `.error` / `.list` / `.created`，不要手拼 dict |
@@ -832,24 +838,33 @@ M1 之前的 `crud-list.json` / `crud-new.json` / `crud-view.json` / `crud-edit.
 
 ### 6.2 路由怎么挂
 
-**主路径（M1 起）：由后端同源托管。** 应用把 `amis/` 目录挂在 `/amis` 下，并以 `login.html` 作为索引，
-因此管理界面的入口是 **`http://127.0.0.1:22222/amis/login.html`**。页面与 API 同源，
+**主路径（M1 起）：由后端同源托管。** AMIS 管理界面由 **`/amis/`** 与 **`/amis/<path>`** 两条普通路由托管，
+入口是 **`http://127.0.0.1:22222/amis/login.html`**。页面与 API 同源，
 `HttpOnly` 的 `session` Cookie 由浏览器自动携带，不涉及 CORS。
 
-挂载代码（由集成方在 `app/__init__.py` 中接入，`amis/` 目录本身不负责）：
+托管实现在 `_register_amis_static()`（`app/__init__.py:73-132`），路由本体在
+`app/__init__.py:104`（`/amis/`，`strict_slashes=True`）与 `app/__init__.py:111`
+（`/amis/<__rest__:path>`）：
 
 ```python
-AMIS_DIR = app.config.get("AMIS_DIR")
-if AMIS_DIR and os.path.isdir(AMIS_DIR):
-    app.static("/amis", AMIS_DIR, index="login.html")
+@app.route("/amis/", methods=["GET", "HEAD"], strict_slashes=True)
+async def amis_index(request): ...
+
+@app.route("/amis/<__rest__:path>", methods=["GET", "HEAD"], strict_slashes=True)
+async def amis_files(request, __rest__): ...
 ```
 
-`AMIS_DIR` 默认指向应用旁的 `amis/` 目录，并可通过环境变量覆盖；置空或指向不存在的目录则不挂载，
+`amis/` 下的开发文件（`server.js`、`package.json` 等）、目录路径与路径逃逸一律 404；
+裸 `/amis`（不带尾斜杠）不匹配任何路由，也是 404。**不再配合任何 `app.static` 挂载**
+（`app/__init__.py:77` 的注释：「用普通路由、不再配合任何 `app.static` 挂载」）；
+`grep -rn 'app.static(' app/` 现只剩 `app/__init__.py:169` 的 `/static` 一处。
+
+`AMIS_DIR` 默认指向应用旁的 `amis/` 目录，并可通过环境变量覆盖；置空或指向不存在的目录则不注册这两条路由，
 生产环境可据此关闭管理界面。
 
-**【已实测】** `AMIS_DIR` 配置项已在 `app/config.py:195` 定义、`app/config.py:348` 支持
-环境变量覆盖；`/amis` 挂载在 `app/__init__.py:62-67`。实测 `GET /amis/` 与
-`GET /amis/login.html` 均返回 200 并给出登录页 HTML，`GET /amis`（不带尾斜杠）返回 404。
+**【读码确认】** `AMIS_DIR` 配置项已在 `app/config.py:195` 定义、`app/config.py:366` 支持
+环境变量覆盖。实测 `GET /amis/` 与 `GET /amis/login.html` 均返回 200 并给出登录页 HTML，
+`GET /amis`（不带尾斜杠）返回 404。
 
 **【读码确认】** `amis/pages/site.json` 的菜单节点用 `schemaApi` 引用页面 JSON
 （当前内容，`amis/pages/site.json:17-30`）：
@@ -997,9 +1012,12 @@ M1 之前的基线上，`/api/v1/*` **全部不存在**，启动日志给出两�
 | 10 | 邮件配置无消费方 | `app/config.py:220-225` | **仍存在**：production 下验证码无处送达，注册验证 / 两步验证流程无法完成 |
 | 11 | `amis/index.html` 不存在；`site.json` 引用不存在的 `static/pages/` | `amis/` | **已修复**：M1 补齐 `index.html`，并把页面引用改成 `pages/xxx.json` 相对路径 |
 
-**另有一项未在上表但仍是现状的限制**：部分动态路径的方法不匹配仍返回 **404 而非 405**
-（405 兜底只覆盖 `account` / `role` / `profile` 三个资源，其余资源仍用
-`v1_bp.add_route(...)`）。例如实测 `DELETE /api/v1/settings/key/x` 返回 **404**。
+**方法不匹配统一返回 405**：`app/api/resources/` 下的 12 个业务资源模块（加上提供
+`register_view` 自身的 `route_methods.py` 共 13 个文件）全部经
+`register_view()`（`app/api/resources/route_methods.py:122`）注册，`app/` 内已无
+`v1_bp.add_route(...)` 调用。方法不匹配时由兜底路由返回
+**405**（`route_methods.py:79`），并带 RFC 9110 要求的 `Allow` 头列出该 URI 实际支持的方法；
+未认证时仍先得 401，不泄露路由存在性（`tests/test_amis_static_and_allow.py:268`）。
 
 ---
 
@@ -1061,7 +1079,7 @@ main.py  requirements.txt  SECURITY.md  .github/workflows/ci.yml  tests/conftest
 | `GET /amis/` / `GET /amis/login.html` | ✅ 200，登录页 HTML |
 | `GET /amis`（无尾斜杠） | 404（Sanic `DirectoryHandler` 只对带尾斜杠的路径做 index 查找） |
 | `GET /uploads/anything` | 404（上传目录不再静态托管） |
-| `DELETE /api/v1/settings/key/x` | 404 而非 405（405 兜底只覆盖 account / role / profile 三个资源） |
+| `DELETE /api/v1/settings/key/x` | 405 `METHOD_NOT_ALLOWED` + `Allow: GET, HEAD, PUT`（原记录为「404 而非 405」，与 `944a9e2` 时的代码不符：`setting.py` 当时已用 `register_view`，且 `tests/test_pagination_limits.py:257` 就断言 405；已按代码更正） |
 | `GET /api/v1/settings`（未认证） | 401 `AUTHENTICATION_ERROR` |
 | CORS（`Origin` 头 + `*` 白名单） | ✅ 返回 `Access-Control-Allow-Origin: *`，**不带** `Allow-Credentials` |
 | OPTIONS 预检 | ✅ 204 + CORS 头 |

@@ -1,5 +1,7 @@
 # Sanic-Admin 配置参考
 
+> 本文档基线为 `8750d51`（`sanic==23.6.0`）。现行依赖见 `requirements.txt`（`sanic==25.12.1`）。
+
 > 适用范围：Sanic-Admin 后端（Sanic 23.6 + Tortoise ORM 0.20 + Redis + PyJWT）。
 > 事实来源：`app/config.py`（450 行，本文中所有行号引用均指该文件在 `release/v0.2.0` @ `8750d51` 上的版本）。
 > 标注约定：
@@ -129,7 +131,7 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 | `SANIC_ENV` | 运行环境：`development` / `testing` / `production` | `development` | 否（但生产必须显式设为 `production`） |
 | `HOST` | 监听地址 | `127.0.0.1` | 否 |
 | `PORT` | 监听端口 | `22222` | 否 |
-| `AMIS_DIR` | AMIS 管理界面的静态资源目录。M1 起由后端同源托管在 `/amis` 下，浏览器访问 `http://127.0.0.1:22222/amis/login.html` 即为登录页，与 API 同源，不涉及 CORS。目录为空或不存在则不挂载（生产环境可据此关闭管理界面） | `str(BASE_DIR / "amis")`，即项目根下的 `amis/` | 否 |
+| `AMIS_DIR` | AMIS 管理界面的静态资源目录。M1 起由后端同源托管：`/amis/` 与 `/amis/<path>` 两条普通路由（`app/__init__.py:104,111`）托管该目录，浏览器访问 `http://127.0.0.1:22222/amis/login.html` 即为登录页，与 API 同源，不涉及 CORS。目录为空或不存在则不注册路由（生产环境可据此关闭管理界面） | `str(BASE_DIR / "amis")`，即项目根下的 `amis/` | 否 |
 
 `WORKERS`（1）、`AUTO_RELOAD`（False）、`REQUEST_MAX_SIZE`（16 MB，v0.3.0 起替代
 曾长期无效的 `MAX_CONTENT_LENGTH`——该名在 Sanic 下从未被读取，已于 v0.3.0 删除）、
@@ -137,9 +139,10 @@ cfg.DATABASE_URL = os.getenv("DATABASE_URL", cfg.DATABASE_URL)
 `MAX_PAGE_SIZE`（100）、`LOG_DIR`、`LOG_LEVEL`（INFO）均为类常量，**不可通过环境变量覆盖**。
 
 > `AMIS_DIR` 在 `DefaultConfig` 中的默认值是 `str(BASE_DIR / "amis")`，
-> 并可通过环境变量覆盖（`get_config()` 的 env 覆盖列表中包含它）。
-> `app/__init__.py` 用 `app.config.get("AMIS_DIR")` 读取后
-> `app.static("/amis", AMIS_DIR, index="login.html")` 挂载；目录为空或不存在则不挂载。
+> 并可通过环境变量覆盖（`get_config()` 的 env 覆盖列表中包含它，`app/config.py:366`）。
+> `app/__init__.py` 由 `_register_amis_static()`（`:73-132`）托管：`/amis/`（`:104`）与
+> `/amis/<path>`（`:111`）两条普通路由，**不使用 `app.static` 挂载**；开发文件黑名单过滤，
+> 裸 `/amis`（不带尾斜杠）不匹配任何路由，返回 404。目录为空或不存在则不注册这两条路由。
 >
 > **已实测**：`GET /amis/` 与 `GET /amis/login.html` 均返回 200 并给出登录页 HTML；
 > `GET /amis`（不带尾斜杠）返回 404。
