@@ -78,11 +78,11 @@
 │   ├── package.json  vue.config.js  .env.development  .env.production
 │   ├── public/index.html
 │   └── src/{api,components/layout,router,store,styles,utils,views/{dashboard,login}}
-├── amis/                       # AMIS 低代码前端（主线方向），236 个受版本控制文件
-│   ├── pages/*.json            # 页面 JSON（crud-list / console / login 等）
-│   ├── server.js  package.json # express 静态服务器，默认 PORT=3000
-│   └── login.html  site.html  login_form.html
-└── docs/                       # ★ 架构文档（并行 lane 编写，当前基线尚未存在）
+├── amis/                       # AMIS 低代码前端（主线方向），221 个受版本控制文件
+│   ├── pages/*.json            # 页面 JSON（customer-list / order-list / ticket-list / site 等）
+│   ├── server.js  package.json # 零依赖静态服务器（只用 Node 内置模块），默认 PORT=3000
+│   └── index.html  login.html  # 仅这两个入口页；`/` 由 server.js:46 映射到 index.html
+└── docs/                       # ★ 架构与配置文档（7 篇，已合入主干）
 ```
 
 ### 目录职责速查
@@ -173,16 +173,19 @@ npm run serve                       # 未实测。配置见 vue.config.js：端�
 
 # amis/ — AMIS 主线前端
 cd amis && npm install               # 实测：added 147 packages in 21s
-npm start                           # 实测：服务起来，但 GET / → 404（见下）
+npm start                           # 实测：服务起来，GET / → 200（server.js:46 映射到 index.html）
 ```
 
 > `frontend/` 的 `npm run lint` **当前必然失败**：仓库里没有跟踪 `.eslintrc*` 或
 > `babel.config.js`，ESLint 用默认 espree 解析器读 `.js`/`.vue`，报
 > `Parsing error: The keyword 'import' is reserved`。这不是你的改动引入的。
 >
-> `amis/` 的 `npm start` 会启动但 `GET /` 返回 **404**，因为 `amis/index.html` 不存在
-> （`server.js` 的兜底 `res.sendFile(path.join(__dirname, 'index.html'))` 找不到文件）。
-> `amis/site.html`、`amis/login.html` 是存在的。
+> `amis/` 的 `npm start` 跑的是 `node server.js`——一个**零依赖**开发服务器（只用
+> Node 内置 `http`/`fs`/`path`，没有 express、没有 `sendFile`）。根路径 `/` 由
+> `amis/server.js:46`（`if (rel === '/') rel = '/index.html';`）映射到 `index.html`，
+> 实测 `GET /` → 200、`GET /index.html` → 200、`GET /login.html` → 200。
+> 入口页只有 `amis/index.html` 与 `amis/login.html` 两个；`amis/site.html`、
+> `amis/login_form.html` **不存在**（实测 `GET /site.html` → 404）。
 
 ---
 
@@ -755,7 +758,8 @@ asyncio_mode = "auto"      # async def 测试无需 @pytest.mark.asyncio
   `vue.config.js` 的 devServer 端口 **8080**，`/api` 代理到 `http://localhost:8000`
   （注意与后端默认 22222 不一致）。
 - `amis/`：页面是 JSON（`amis/pages/*.json`），通过 `url` 字段指向后端接口。
-  `amis/package.json` 的 `start` 跑 `node server.js`（express + reload）。
+  `amis/package.json` 的 `start` 跑 `node server.js`——零依赖开发服务器（Node 内置
+  `http`/`fs`/`path`，**不是** express，也没有 reload 依赖）。
 - 两个前端目录都不在 ruff 检查范围内（`extend-exclude`）。
 
 ### 4.5 提交信息
@@ -1063,7 +1067,7 @@ app/middleware/error_handler.py 统一异常 → JSON
 | `/auth/associated` | POST | 关联会话 |
 | `/capt/request` | GET | 验证码请求 |
 | `/capt/image` | GET | 验证码图片 |
-| `/amis/*` | GET | AMIS 管理界面（`app.static('/amis', …, index='login.html', name='amis')`），**由后端同源托管** |
+| `/amis/*` | GET | AMIS 管理界面，**由后端同源托管**：两条普通路由 `/amis/` 与 `/amis/<path>`（`app/__init__.py:104,111`），开发文件黑名单过滤，裸 `/amis`（不带尾斜杠）返回 404 |
 | `/static/*` | GET | `STATIC_DIR` 存在时才挂载（仓库中无 `static/` 目录，实测未挂载） |
 
 **`/api/v1/*` 已挂载**：`app/api/__init__.py` 用
@@ -1086,7 +1090,7 @@ app/middleware/error_handler.py 统一异常 → JSON
 | 路径 | 状态 |
 |---|---|
 | `/uploads/*` | **404** —— 上传目录**不做静态托管**（M1 已移除），文件下载走需鉴权的 `GET /api/v1/files/<id>/download` |
-| `/roles`、`/account`、`/two-step` | `app/auth/routes.py` 定义了 `two_step_bp`/`role_bp`/`account_bp`，但**没有路由挂在上面**（只有 `auth_bp`/`capt_bp` 有装饰器路由） |
+| `/roles`、`/account`、`/two-step` | `app/auth/routes.py` 定义了 `two_step_bp`/`role_bp`/`account_bp`，但**没有路由挂在上面**（只有 `auth_bp`/`capt_bp` 有装饰器路由）。角色与账户 API 实际在 `/api/v1/roles`、`/api/v1/accounts` |
 | `/docs/openapi.json` | development 下 **404**（`setup_docs()` 接管了 `/docs` 前缀）；production 下 200，是 sanic-ext 自带的**另一份** OAS |
 | `/login`、`/index` | `app/web/routes.py` 的 `register_web_blueprints()` **从未被调用**；且它渲染的 `frontend/templates/` 目录不存在 |
 
@@ -1153,10 +1157,10 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 | 4 | `create_app()` 未调用 `setup_docs()` | M1 已接线，由 `ENABLE_API_DOCS` 控制（开发开、生产关） | 已解决：`/swagger` 302→200、`/redoc` 200、`/swagger.json` 200 |
 | 5 | `tests/test_docs/` 两个同名 `Sanic("test_app")` fixture | 测试套件已重建 | 已解决 |
 | 6 | `test_openapi_spec_generation` 尾斜杠断言 | 测试套件已重建 | 已解决 |
-| 7 | `two_step_bp` / `role_bp` / `account_bp` 无路由 | M1 已补齐 | 已解决 |
+| 7 | `two_step_bp` / `role_bp` / `account_bp` 无路由 | **仍未补齐**：三个蓝图只有定义（`app/auth/routes.py:38-40`）与注册（`app/__init__.py:278`），`grep -rn '@role_bp\|@account_bp\|@two_step_bp' app/` 命中 0 处。角色与账户 API 实际在 `/api/v1/roles`（`app/api/resources/role.py:598`）、`/api/v1/accounts`（`app/api/resources/account.py:476`） | `/roles`、`/account`、`/two-step` 仍 404 |
 | 8 | `app/web/routes.py` 的 `register_web_blueprints()` 从未调用 | 仍未调用；`frontend/templates/` 不存在 | `/login`、`/index` 仍 404。该模块是 Vue 实验线，AMIS 主线不依赖它 |
 | 9 | `frontend/` 缺 `.eslintrc` / `babel.config.js` | 未处理（Vue 实验线不维护） | `npm run lint` exit 1，8 个 Parsing error |
-| 10 | `amis/index.html` | M1 已补齐，`server.js` 兜底可用 | 已解决 |
+| 10 | `amis/index.html` | 已随仓库跟踪（`git ls-files amis/index.html` 命中），`server.js:46` 把 `/` 映射到它，实测 `GET /` → 200 | 已解决 |
 | 11 | production 模式启动 | 实测：**四个密钥齐备 + 真实 Redis + SQLite `DATABASE_URL` 时可正常启动**（`Goin' Fast`） | 已解决。但 production 默认 `CACHE_TYPE=redis`，Redis 不可达即拒绝启动；`DATABASE_URL` 默认拼装 MySQL 而 `aiomysql` 不在依赖里 |
 | 12 | `.gitignore` 未忽略 `uploads/` | 未处理 | 上传测试文件可能被误提交 |
 | 13 | 真实 `docker compose up` | 本机 Docker daemon 需特权助手 `com.docker.vmnetd`（sudo 授权）才能启动 | 容器行为由 CI 的 `.github/workflows/docker.yml` 承接 |
