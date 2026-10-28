@@ -48,6 +48,51 @@ menu: {icon: fa-receipt, order: 70}
 
 属性贯通：`default/choices/required/max_length/unique` 同时进入模型、API 校验（框架 `validate_fields`：先 `extract_whitelisted` 再校验提取结果）、AMIS 表单（select / maxLength / required / value）、生成测试。`belongs_to` 创建/更新时校验被引用记录存在（400），删除被引用的父记录返回 409。
 
+### 409 的语义：删除被引用的父记录
+
+**触发条件**：删除一个**被其他记录通过 `belongs_to` 引用**的父记录时返回 409。同一个资源上 409 还有另一个来源（`unique` 字段冲突），两者 `error` 码相同但 `message` 不同，见下文。
+
+**「子记录」指什么**：不需要手写——生成器从全部规格里挑出 `belongs_to.target == 本资源` 的项，写进该资源的 `CHILDREN` 元组（`tools/specgen/render_py.py` 的 `render_resource`）。`belongs_to` 生成的外键一律带 `on_delete=fields.RESTRICT`。以 `customer` 为例，当前 `CHILDREN = ((Order, 'customer_id', '订单'), (Ticket, 'customer_id', '工单'))`，即 `order` 与 `ticket` 两个资源；反过来 `order.py` 与 `ticket.py` 的 `CHILDREN` 都是空元组，删除它们不会因「有子记录」而 409。
+
+**与相邻状态码的区分**：
+
+| 状态码 | 何时返回 | `error` 码 | 差异 |
+|---|---|---|---|
+| **404** | 父记录 id 不存在 | `CUSTOMER_NOT_FOUND`（`<RESOURCE>_NOT_FOUND` 形式） | 目标是「没有这个对象」 |
+| **409** | 父记录存在，但仍有子记录引用它 | `CONFLICT` | 目标是「有这个对象，但现在不能删」 |
+| **409** | `unique` 字段值已存在（创建/更新同名邮箱等） | `CONFLICT` | 同一状态码的另一来源，`message` 为「字段值已存在」 |
+| **400** | 创建/更新时 `belongs_to` 指向的记录不存在 | `VALIDATION_ERROR` | 目标是「你给的引用无效」，`details` 里指出具体外键字段 |
+| **403** | 调用方没有 `<resource>:delete` 权限 | `INSUFFICIENT_PERMISSIONS` | 目标是「你没有权限」，由 `@requires_permission` 装饰器在进入处理函数**之前**抛出 |
+| **403** | 创建/更新时对引用目标没有 `<target>:read` 权限 | `FORBIDDEN` | 防 ID 枚举，只在 `POST`/`PUT` 出现，`DELETE` 不走这条 |
+| **401** | 未携带令牌或会话失效 | `AUTHENTICATION_ERROR` | 在权限检查之前 |
+
+**响应体形态**（三个字段固定，`details` 仅在传入时出现）：
+
+````json
+{
+  "success": false,
+  "message": "存在关联的订单，无法删除客户",
+  "error": "CONFLICT"
+}
+````
+
+`message` 由 `f"存在关联的{child_label}，无法删除{LABEL}"` 拼出，`child_label` 取自规格的 `label`。字段名是 **`error`**（不是 `error_code`）——`APIResponse.error(..., error_code=code)` 把 `error_code` 参数写进响应体的 `error` 键。
+
+**检查顺序**（决定多个问题同时存在时返回哪个）：
+
+1. 认证（401）——`authenticate_request` 在装饰器里先跑；
+2. 权限（403 `INSUFFICIENT_PERMISSIONS`）——`@requires_permission` 在进入处理函数前抛出；
+3. 父记录存在性（404）——`Customer.filter(id=...).first()` 为 `None` 时直接返回；
+4. 子记录引用（409）——逐个 `CHILDREN` 项 `exists()`，命中第一个就返回；
+5. 真正删除。
+
+**软删除不影响本节语义**：子记录检查发生在 `deleted` 标志置位之前，因此 `soft_delete: true` 与关闭时**都会**因存在子记录而 409。
+
+两处容易误判的细节：
+
+- **父记录已软删除时，重复 DELETE 不会 404，而是再次 200。** `delete()` 用 `filter(id=...)` 查父记录，**没有** `deleted=False` 条件（只有 `soft_delete: true` 时的列表与详情 `GET` 才会加这个过滤）。所以对一条已软删除的父记录再删一次，会重新走到子记录检查和 `obj.deleted = True`，返回成功。404 只代表「这个 id 在表里根本没有」。
+- **子记录检查同样不过滤 `deleted`。** `child.filter(**{column: id}).exists()` 不带 `deleted=False`，所以一条已软删除的子记录**仍然**会挡住父记录的删除。若业务需要「子记录都软删了就能删父」，必须先改生成器，而不是改规格。
+
 ## 自动注册（不再手工接线）
 
 只在两个文件里各有一行**一次性**接线（已提交，之后新增资源不再改）：`app/models/__init__.py` 导入 `app.generated.models`；`app/api/resources/__init__.py` 导入 `app.generated.resources`（导入即注册路由与权限点）。菜单由生成器改写 `site.json`；测试路径替换由 `tests/conftest.py` 通用正则处理。
