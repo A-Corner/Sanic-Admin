@@ -401,21 +401,22 @@ def test_positive_control_failure_reason_is_visible(sandbox):
     方言一致性检查），然后给规格加一个字段并 `generate` —— 模型领先于迁移链，
     check 必须报「模型有、迁移链没有」。
     """
-    # 两边同步删最新增量，保持 dialects 与 models 一致
-    versions = sorted(
-        {p.name for d in mig.DIALECTS
-         for p in (sandbox / "migrations" / "dialects" / d).glob("*.py")
-         if not p.name.startswith("0_")},
-        key=mig._version_num)
-    assert versions, "没有增量迁移可供移除，用例前提不成立"
-    newest = versions[-1]
+    # 两边同步删掉**全部非基线增量**（dialects/ 与 models/ 一致），让模型大幅领先迁移链。
+    # 早期版本只删「最新增量」——那隐含了「最新增量是建表」的假设：删掉它才有表级
+    # 「模型有、迁移链没有」。SPEC-005 的增量改的是列类型，只删它不会产生整表缺失，
+    # 该断言就退化成对增量内容的脆弱假设。删全部非基线增量后，除 customer 外的表
+    # 全部缺失，表级原因必然出现，用例对任何未来增量形态都稳健。
+    removed = []
     for d in mig.DIALECTS:
-        f = sandbox / "migrations" / "dialects" / d / newest
-        if f.is_file():
+        for f in (sandbox / "migrations" / "dialects" / d).glob("*.py"):
+            if not f.name.startswith("0_"):
+                f.unlink()
+                removed.append(f.name)
+    for f in (sandbox / "migrations" / "models").glob("*.py"):
+        if not f.name.startswith("0_"):
             f.unlink()
-    f = sandbox / "migrations" / "models" / newest
-    if f.is_file():
-        f.unlink()
+            removed.append(f.name)
+    assert removed, "没有增量迁移可供移除，用例前提不成立"
 
     # 给规格加字段 -> 模型领先迁移链
     spec = sandbox / "specs" / "customer.yaml"

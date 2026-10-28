@@ -119,6 +119,11 @@ class FieldSpec(_Strict):
     unique: bool = False
     list: bool = False
     searchable: bool = False
+    # 最小单位整数：1 个展示单位 = unit_scale 个存储单位（SPEC-005）。
+    # 只允许 int —— 二进制浮点无法精确表示十进制小数，金额类字段不该用 float。
+    # 单位**名称**由 label 承载（人看），scale 由本属性承载（程序看）——
+    # 两者分开是因为 scale=100 推不出单位叫「分」还是「美分」。
+    unit_scale: Optional[int] = Field(default=None, ge=2)
 
     @field_validator("name")
     @classmethod
@@ -139,6 +144,16 @@ class FieldSpec(_Strict):
             raise ValueError(f"{t} 类型不支持 unique")
         if self.searchable and t not in ("string", "text"):
             raise ValueError("searchable 仅 string/text 类型可用")
+        if self.unit_scale is not None:
+            if t != "int":
+                raise ValueError(
+                    f"unit_scale 仅 int 类型可用（当前 {t}）：最小单位整数语义不适用于其他类型"
+                )
+            if self.choices is not None:
+                raise ValueError(
+                    "unit_scale 与 choices 互斥：choices 的取值必须是 unit_scale 的倍数，"
+                    "两者同时出现时取值语义容易被读错"
+                )
         if self.choices is not None:
             if t not in ("string", "int"):
                 raise ValueError("choices 仅 string/int 类型可用")
@@ -164,6 +179,13 @@ class FieldSpec(_Strict):
             }[t]
             if not ok(self.default):
                 raise ValueError(f"default {self.default!r} 与字段类型 {t} 不符")
+            if self.unit_scale is not None and self.default % self.unit_scale != 0:
+                # 默认值必须是整展示单位：scale=100 时 default=1 意味着 0.01 个单位，
+                # 是「看起来正常但意思是错的」那类坑。
+                raise ValueError(
+                    f"default {self.default!r} 必须是 unit_scale={self.unit_scale} 的倍数"
+                    f"（否则它不是整数个展示单位）"
+                )
             if self.choices is not None and self.default not in self.choices:
                 raise ValueError(f"default {self.default!r} 不在 choices 内")
             if t == "string" and len(self.default) > (self.max_length or 255):
