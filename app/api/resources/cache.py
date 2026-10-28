@@ -186,7 +186,7 @@ class CacheResource(HTTPMethodView):
         #     parts = [f"id={object_id}"]; detail = " ".join(parts)
         #
         # 而官方解析器（docs/audit-log-format.md）按 ``detail[3:].split(" ", 1)[0]``
-        # 取 id、按 ``detail.find("fields=")`` 取字段名。两条都受 pattern 内容影响：
+        # 取 id、按 ``detail.find("fields=")`` 取字段名。两类内容会破坏它：
         #
         # 1. **空格** → ``split(" ", 1)[0]`` 截断 id：
         #      pattern="a b" → detail="id=pattern:a b" → 解析出 id="pattern:a"
@@ -198,16 +198,53 @@ class CacheResource(HTTPMethodView):
         # 而伪造的 fields 语义是「被操作的字段名」——攻击者可以让审计看起来
         # 像「只动了 title」。
         #
-        # 这里只拦这两类。``\\t`` / ``\\n`` / ``=`` / ``:`` / ``,`` / ``*`` 都实测
-        # 不破坏结构（``split(" ", 1)`` 只认 ASCII 空格）。
+        # 另外拦 ``\\r`` / ``\\n`` / ``\\t``（复审 SF-2）：
+        # - **对 detail 解析无影响** —— ``split(" ", 1)`` 只认 ASCII 空格，
+        #   这三种字符实测不会截断 id（见 ``test_benign_patterns_are_not_rejected``
+        #   的历史用例，已随 SF-2 改为拒绝）。
+        # - **但对下游日志系统有影响** —— Syslog / Loki / ELK 按行收集，
+        #   ``\\n`` 会把一条审计拆成两行（**日志伪造**）；消费方若用无参
+        #   ``detail.split()``（不传参数时按任意空白切），``\\t`` 同样截断。
+        # - **误拒面≈0**：现实缓存键不含这些字符。
         #
         # 根本修法是让 ``record_resource_event`` 约束 ``object_id`` 的字符集或
         # 改用结构化 detail —— 那要动解析契约与所有消费方，不在本 PR 范围
         # （已记 EVT-20261028-043）。
-        if " " in pattern:
-            return _bad_request("pattern 不能包含空格（空格会截断审计记录中的对象标识）")
+        # 防御性检查：``?pattern=``（空值）在 Sanic 下**到不了这里** ——
+        # query 解析用 ``keep_blank_values=False``（urllib 默认），空值被当作
+        # 「不存在」，于是 ``args.get("pattern", "*")`` 返回默认 ``"*"``。
+        # 实测 ``?type=pattern&pattern=`` 与不传 pattern 行为完全一致。
+        #
+        # 保留这条的理由：若将来换成别的 WSGI/ASGI 适配器、或调整解析配置，
+        # 空串就可能到达。它是**防御性死代码，不是已修复的缺陷**——
+        # PR 描述里不要把它列为「修了空 pattern」。
+        if not pattern:
+            return _bad_request("pattern 不能为空；要清空全部请用 type=all（会写审计）")
+        for _ch, _name in (
+            (" ", "空格"),
+            ("\r", "回车"),
+            ("\n", "换行"),
+            ("\t", "制表符"),
+        ):
+            if _ch in pattern:
+                return _bad_request(
+                    f"pattern 不能包含{_name}（会破坏审计记录结构或下游日志按行解析）"
+                )
         if "fields=" in pattern:
             return _bad_request("pattern 不能包含 'fields=' 子串（会伪造审计记录中的字段名）")
+
+        # object_id 的取值按分支填，让 detail 能读出删除范围：
+        #   type=all     -> id=all
+        #   type=route   -> id=route:<pattern>
+        #   type=pattern -> id=pattern:<pattern>
+        #
+        # 先算出 object_id 再进 try —— 因为 except 分支写失败审计时也要用它。
+        if cache_type == "all":
+            object_id = "all"
+        elif cache_type == "route":
+            object_id = f"route:{pattern}"
+        else:
+            object_id = f"pattern:{pattern}"
 
         try:
             if cache_type == "route":
@@ -223,6 +260,23 @@ class CacheResource(HTTPMethodView):
                     count = cache.delete_many(keys)
                     message = f"已清除 {count} 个缓存键"
         except Exception:
+            # 失败也写审计（复审 SF-1）—— 这是本项「凡删除必审计」的最后一环。
+            #
+            # 为什么必须在 except 里写：删除可能**部分完成后**才抛错（例如
+            # ``delete_many`` 删到一半缓存后端断了），此时缓存已经变了，
+            # 但没有记录。加上这条之后，「删除已发生/部分发生却无痕」
+            # 这最后一条口子被封死。
+            #
+            # ``status="failure"`` 让消费方能区分「确实删了」与「尝试了但失败」。
+            # record_resource_event 永不抛出，所以这里不会因为审计再引发异常。
+            await record_resource_event(
+                request,
+                resource="cache",
+                action="delete",
+                object_id=object_id,
+                account=request.ctx.authentication_session.bearer,
+                status="failure",
+            )
             return _server_error("清理缓存失败")
 
         # 三个分支都写审计 —— 不是只有 all。
@@ -237,17 +291,6 @@ class CacheResource(HTTPMethodView):
         #
         # 改成「凡删除必审计」后，这个问题不存在了：审计的内容是「删了什么范围」，
         # 而「这个范围是否等于全部」是一个派生问题，不需要在审计时回答。
-        #
-        # object_id 的取值按分支填，让 detail 能读出删除范围：
-        #   type=all     -> id=all
-        #   type=route   -> id=route:<pattern>
-        #   type=pattern -> id=pattern:<pattern>
-        if cache_type == "all":
-            object_id = "all"
-        elif cache_type == "route":
-            object_id = f"route:{pattern}"
-        else:
-            object_id = f"pattern:{pattern}"
 
         # 审计是旁路：record_resource_event 永不抛出（audit.py:144），
         # 所以这里不需要 try/except，也不该因为它影响主请求的结果。
