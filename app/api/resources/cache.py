@@ -130,15 +130,15 @@ class CacheResource(HTTPMethodView):
         """
         清理缓存。**必须显式指定 ``type``**，没有默认行为。
 
-        ``type`` 的三个合法值：
+        ``type`` 的三个合法值（**三个都写审计**）：
 
-        =========== ============================================== ==========
-        type        行为                                           写审计
-        =========== ============================================== ==========
-        ``route``   只清路由缓存（``pattern`` 生效）               否
-        ``pattern`` 按 ``pattern`` 删除匹配的键                     否
-        ``all``     全量清空（**破坏性**）                          **是**
-        =========== ============================================== ==========
+        =========== ==================================== ==================
+        type        行为                                 审计 ``object_id``
+        =========== ==================================== ==================
+        ``route``   只清路由缓存（``pattern`` 生效）      ``route:<pattern>``
+        ``pattern`` 按 ``pattern`` 删除匹配的键            ``pattern:<pattern>``
+        ``all``     全量清空（**破坏性**）                ``all``
+        =========== ==================================== ==================
 
         为什么取消默认值（EVT-20261028-041）
         ===================================
@@ -151,11 +151,25 @@ class CacheResource(HTTPMethodView):
         改为必填后，误操作需要显式写 ``?type=all`` —— 从「默认危险」变成
         「显式危险」。
 
-        为什么只有 ``all`` 写审计
-        =========================
-        ``route`` 与 ``pattern`` 都是**定范围**的删除，删掉的东西可由 pattern
-        重建；``all`` 是**无范围**的，事后无法知道删了什么。所以只在 ``all``
-        留一条「谁在什么时候清了整个缓存」。
+        为什么三个分支都写审计（不是只有 ``all``）
+        ==========================================
+        最初只让 ``all`` 写。复审发现这留下了一条**不留痕的全清路径**：
+        ``?type=pattern&pattern=*`` 与 ``type=all`` 效果完全相同（``*`` 匹配全部键）
+        却因为是 ``pattern`` 分支而不写审计。
+
+        尝试过「先判断这次 pattern 是否等效全清，等于才拒绝/才审计」，
+        但这条路要求穷举「所有等效于 ``*`` 的 glob 写法」（``*`` / ``**`` / ``*?`` /
+        ``[a-w]*`` …），集合无法穷举；而且两个缓存后端（``fnmatch`` 与 redis
+        ``KEYS``）的 glob 语义还不一致。
+
+        改成「凡删除必审计」后问题消失：**审计记录的内容是「删了什么范围」，
+        而「这个范围是否等于全部」是派生问题，不需要在审计时回答。**
+
+        为什么 pattern 不能含空格或 ``fields=``
+        ======================================
+        ``pattern`` 会被拼进审计 ``detail``（``id=pattern:<pattern>``），而 detail
+        是空格分隔的 ``key=value`` 格式。两类字符会破坏它，且都能让操作者伪造
+        审计内容 —— 详见 ``delete`` 方法体内的注释与 ``EVT-20261028-043``。
         """
         cache_type = request.args.get("type")
         if cache_type not in ("route", "pattern", "all"):
@@ -165,6 +179,35 @@ class CacheResource(HTTPMethodView):
             )
 
         pattern = request.args.get("pattern", "*")
+
+        # pattern 会被拼进审计的 detail（``id=pattern:<pattern>``），而 detail 是
+        # **空格分隔的 key=value 格式**（audit.py:152-159）：
+        #
+        #     parts = [f"id={object_id}"]; detail = " ".join(parts)
+        #
+        # 而官方解析器（docs/audit-log-format.md）按 ``detail[3:].split(" ", 1)[0]``
+        # 取 id、按 ``detail.find("fields=")`` 取字段名。两条都受 pattern 内容影响：
+        #
+        # 1. **空格** → ``split(" ", 1)[0]`` 截断 id：
+        #      pattern="a b" → detail="id=pattern:a b" → 解析出 id="pattern:a"
+        # 2. **子串 "fields="** → ``find("fields=")`` 命中的是 pattern 里那个：
+        #      pattern="fields=y" → detail="id=pattern:fields=y"
+        #      → 解析出 fields=["y"]（id 段看起来正常，但 fields 被伪造）
+        #
+        # 第 2 条比第 1 条更隐蔽：**id 没被截断，整条记录看起来格式合法**，
+        # 而伪造的 fields 语义是「被操作的字段名」——攻击者可以让审计看起来
+        # 像「只动了 title」。
+        #
+        # 这里只拦这两类。``\\t`` / ``\\n`` / ``=`` / ``:`` / ``,`` / ``*`` 都实测
+        # 不破坏结构（``split(" ", 1)`` 只认 ASCII 空格）。
+        #
+        # 根本修法是让 ``record_resource_event`` 约束 ``object_id`` 的字符集或
+        # 改用结构化 detail —— 那要动解析契约与所有消费方，不在本 PR 范围
+        # （已记 EVT-20261028-043）。
+        if " " in pattern:
+            return _bad_request("pattern 不能包含空格（空格会截断审计记录中的对象标识）")
+        if "fields=" in pattern:
+            return _bad_request("pattern 不能包含 'fields=' 子串（会伪造审计记录中的字段名）")
 
         try:
             if cache_type == "route":
@@ -182,27 +225,49 @@ class CacheResource(HTTPMethodView):
         except Exception:
             return _server_error("清理缓存失败")
 
+        # 三个分支都写审计 —— 不是只有 all。
+        #
+        # 为什么改（EVT-20261028-041 复审发现）：此前只有 ``type=all`` 写审计，
+        # 于是 ``?type=pattern&pattern=*`` 能达成与 ``type=all`` 完全相同的效果
+        # （pattern="*" 匹配全部键）却不留任何记录 —— 一条**不留痕的全清路径**。
+        #
+        # 尝试过「检测 pattern 是否等于全清再决定是否审计」，但那条路要求穷举
+        # 「所有等效于 * 的 glob 写法」（``*`` / ``**`` / ``*?`` / ``[a-w]*`` …），
+        # 集合无法穷举，且两个缓存后端（fnmatch / redis KEYS）语义还不同。
+        #
+        # 改成「凡删除必审计」后，这个问题不存在了：审计的内容是「删了什么范围」，
+        # 而「这个范围是否等于全部」是一个派生问题，不需要在审计时回答。
+        #
+        # object_id 的取值按分支填，让 detail 能读出删除范围：
+        #   type=all     -> id=all
+        #   type=route   -> id=route:<pattern>
+        #   type=pattern -> id=pattern:<pattern>
         if cache_type == "all":
-            # 审计是旁路：record_resource_event 永不抛出（audit.py:144），
-            # 所以这里不需要 try/except，也不该因为它影响主请求的结果。
-            #
-            # object_id 用 "all"：record_resource_event 的契约是「被操作记录的 id」
-            # （audit.py:139），而全量清空没有单一对象。用 "all" 作显式标记，
-            # 让 detail 读作 "id=all"，配合 resource=cache / action=delete
-            # 语义通顺。
-            #
-            # 这是对契约的拉伸，不是完美契合 —— 见 PR 描述里的 NOTE。
-            await record_resource_event(
-                request,
-                resource="cache",
-                action="delete",
-                object_id="all",
-                account=getattr(
-                    getattr(request.ctx, "authentication_session", None),
-                    "bearer",
-                    None,
-                ),
-            )
+            object_id = "all"
+        elif cache_type == "route":
+            object_id = f"route:{pattern}"
+        else:
+            object_id = f"pattern:{pattern}"
+
+        # 审计是旁路：record_resource_event 永不抛出（audit.py:144），
+        # 所以这里不需要 try/except，也不该因为它影响主请求的结果。
+        #
+        # account 直接取 ctx.authentication_session.bearer，不加 getattr 兜底：
+        # 本方法有 @check_permissions，而 check_permissions 内部必走
+        # authenticate_request，后者**无条件**写
+        # ``request.ctx.authentication_session``（authentication.py:389）。
+        # 仓库里 8 处同类调用（order/ticket/customer 各 2-3 处）也都是直接取。
+        #
+        # 注意：``object_id="all"`` 与 ``object_id="route:*"`` 挤在同一个契约里
+        # 是拉伸 —— 该参数的语义是「被操作记录的 id」，而批量操作没有单一对象。
+        # 已记 EVT-20261028-043。
+        await record_resource_event(
+            request,
+            resource="cache",
+            action="delete",
+            object_id=object_id,
+            account=request.ctx.authentication_session.bearer,
+        )
 
         return APIResponse.success(message=message)
 
