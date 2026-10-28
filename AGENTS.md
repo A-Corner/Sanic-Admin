@@ -864,10 +864,13 @@ production 启动即报 `ConfigError` 并提示原因。升级到 v0.3.4 前请�
   并带 credentials。
 - `app/middleware/error_handler.py`：未捕获异常在 `DEBUG=True` 时才把 `detail` 和
   `traceback` 放进响应体。**不要在生产把 DEBUG 开着**。
-- CSRF：`csrf_protect()` 装饰器要求非 GET 请求的 `X-CSRF-Token` 头与 `csrf_token` cookie
-  一致，不一致返回 403。**但目前没有任何路由挂上它**——该装饰器已实现却未启用，
-  当前**没有**实际的 CSRF 防护，依赖的是会话 Cookie 的 `HttpOnly` + `SameSite=Lax`
-  以及 API 用 `Authorization` 头承载凭据。与 `SECURITY.md` 的记载一致。
+- CSRF：`enforce_csrf` 是**全局请求中间件**（`@app.middleware('request')`，
+  `app/middleware/security_middleware.py:96-126`），由 `setup_security_middleware` 在
+  `app/middleware/__init__.py:59` 注册，**不是**按路由挂的装饰器。它拦「非 GET/HEAD/OPTIONS
+  + 带 `session` cookie + 无 `Authorization` 头」的请求，要求 `X-CSRF-Token` 头与 `csrf_token`
+  cookie 一致（`secrets.compare_digest`），不一致返回 403 `CSRF_TOKEN_INVALID`；
+  `/auth/login`、`/auth/register` 豁免。会话 cookie 另有 `HttpOnly` + `SameSite=Lax`
+  作纵深防御的另一层，不是唯一防线。与 `SECURITY.md` 的记载一致。
 
 ### 5.4 其他硬性禁区
 
@@ -1014,7 +1017,8 @@ app/middleware/__init__.py::register_all_middlewares()
   ├─ error_handler.setup_error_handlers()      # BaseError / SanicException / Exception → JSON
   ├─ security_middleware.setup_security_middleware()
   │    ├─ response 中间件：按 CORS_ALLOWED_ORIGINS 加 CORS 头
-  │    └─ request 中间件：OPTIONS → 204（避免未知路径 405）
+  │    ├─ request 中间件：OPTIONS → 204（避免未知路径 405）
+  │    └─ request 中间件：enforce_csrf → 校验双提交 token，不一致 403
   ├─ _setup_request_logging()                  # request/response 中间件打 debug 日志
   └─ AuthMiddleware()                          # 从 Authorization: Bearer / cookie 取会话
                                                  # cookie 名取 AuthenticationSession.cookie_name
