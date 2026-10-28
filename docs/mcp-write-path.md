@@ -94,7 +94,7 @@ AI 通过 MCP 提交规格变更，系统产出：
 
 | 层 | 内容 | 谁控制 |
 |---|---|---|
-| MCP 工具层 | **已实现（v0.4.2）**：`--allow-write` 是**注册门槛**（不加则三个写入工具不出现在 `tools/list`），`spec:write` 是**调用门槛**（每次调用前 `require_spec_write()` 实时调 `GET /auth/whoami` 校验），两者是 **AND** 关系。权限点注册于 `app/auth/permissions.py:60`（`"spec": ["write"]`），校验入口 `tools/mcp_server/identity.py:219`，三个写入工具首行调用（`write_tools.py:128,205,224`） | 项目 RBAC（`spec:write`） |
+| MCP 工具层 | **已实现（v0.4.2）**：`--allow-write` 是**注册门槛**（不加则四个写入工具都不出现在 `tools/list`），`spec:write` 是**调用门槛**（每次调用前 `require_spec_write()` 实时调 `GET /auth/whoami` 校验），两者是 **AND** 关系。权限点注册于 `app/auth/permissions.py:60`（`"spec": ["write"]`），校验入口 `tools/mcp_server/identity.py:219`，四个写入工具首行调用（`write_tools.py:134,211,232,272`） | 项目 RBAC（`spec:write`） |
 | 操作系统层 | 工具进程以**运行它的用户**身份执行 git 命令，不额外提权、不调用 `sudo` | 部署方 |
 
 ### 3.2 令牌范围
