@@ -269,6 +269,8 @@ cache_resource = CacheResource()
 cache_keys_resource = CacheKeysResource()
 cache_key_resource = CacheKeyResource()
 
-register_view(v1_bp, "/cache", cache_resource, ["GET"], "cache_overview")
+register_view(v1_bp, "/cache", cache_resource, ["GET", "DELETE"], "cache_overview")
 register_view(v1_bp, "/cache/keys", cache_keys_resource, ["GET"], "cache_keys")
-register_view(v1_bp, "/cache/keys/<key:str>", cache_key_resource, ["GET"], "cache_key")
+register_view(
+    v1_bp, "/cache/keys/<key:str>", cache_key_resource, ["GET", "PUT", "DELETE"], "cache_key"
+)
