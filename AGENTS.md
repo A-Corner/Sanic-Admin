@@ -315,7 +315,7 @@ npm start                           # 实测：服务起来，GET / → 200（se
 ### 3.1 命令（全部实测）
 
 ```bash
-# 收集（会报 6 个错，见 §3.2）
+# 收集用例清单（只收集，不执行）
 .venv/bin/pytest --collect-only -q
 
 # 全量
