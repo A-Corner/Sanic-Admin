@@ -75,6 +75,41 @@ def diff_schemas(migrated: dict, expected: dict) -> list:
     return problems
 
 
+def check_migration_contents(repo: Path = None) -> list:
+    """检查 ``migrations/models/`` 与 ``migrations/dialects/sqlite/`` 的同名文件**内容**一致。
+
+    ``migrations/models/`` 是 SQLite 链的源（aerich 的工作目录），
+    ``migrations/dialects/sqlite/`` 是它的副本（切方言基线时复制过去）。
+    两者本应**逐字相同**——不同步时副本里可能留着旧版迁移。
+
+    为什么需要这个检查：``check_dialect_baselines`` 只比**文件名集合**，
+    内容差异一律查不出来。实际踩过：做「CAST/ROUND 破坏实验」时只改了
+    ``models/`` 忘了 ``dialects/sqlite/``，两条链静默不同步，任何现有检查都绿。
+
+    其余方言（mysql/postgres）的 SQL 本来就与 SQLite 不同，不做内容比对。
+    """
+    repo = repo or Path(__file__).resolve().parent.parent
+    models_dir = repo / "migrations" / "models"
+    sqlite_dir = repo / "migrations" / "dialects" / "sqlite"
+    if not models_dir.is_dir() or not sqlite_dir.is_dir():
+        return []
+    problems = []
+    for path in sorted(models_dir.glob("*.py")):
+        if path.name.startswith("__"):
+            continue
+        peer = sqlite_dir / path.name
+        if not peer.is_file():
+            # 文件名本身不一致由 check_dialect_baselines 负责报，这里不重复。
+            continue
+        if path.read_bytes() != peer.read_bytes():
+            problems.append(
+                f"migrations/models/{path.name} 与 "
+                f"migrations/dialects/sqlite/{path.name} 内容不一致"
+                "（models 是 SQLite 链的源，dialects/sqlite 是它的副本，应逐字相同）"
+            )
+    return problems
+
+
 def check_dialect_baselines(repo: Path = None) -> list:
     """检查三份方言基线的迁移文件名集合是否一致（纯文件检查，CI 用）。
 
@@ -191,6 +226,13 @@ def main(argv=None) -> int:
     if dialect_problems:
         print("!! 方言基线文件名不一致：", file=sys.stderr)
         for item in dialect_problems:
+            print(f"   - {item}", file=sys.stderr)
+        return 1
+
+    content_problems = check_migration_contents()
+    if content_problems:
+        print("!! SQLite 链与 migrations/models/ 内容不一致：", file=sys.stderr)
+        for item in content_problems:
             print(f"   - {item}", file=sys.stderr)
         return 1
 
