@@ -101,10 +101,11 @@ cwd = "/absolute/path/to/Sanic-Admin"
 
 ## 写入工具的启用与身份（spec:write，v0.4.2 起）
 
-写入工具（`propose_spec_change` / `list_proposals` / `discard_proposal`）默认不注册，
+写入工具（`propose_spec_change` / `list_proposals` / `describe_proposal` /
+`discard_proposal`，共四个）默认不注册，
 启用与可用要**同时**满足两个门槛（AND，设计见 `docs/mcp-write-path.md` §10.6）：
 
-1. **部署门槛**：启动参数加 `--allow-write`——不加，三个工具不出现在 `tools/list`。
+1. **部署门槛**：启动参数加 `--allow-write`——不加，四个工具都不出现在 `tools/list`。
 2. **身份门槛**：环境变量 `SANIC_ADMIN_MCP_TOKEN` 配置为有效的会话 JWT，且该账户
    拥有 `spec:write` 权限（admin 默认拥有；普通角色在角色管理里显式授予）。
 

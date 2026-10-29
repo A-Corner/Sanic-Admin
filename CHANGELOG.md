@@ -7,6 +7,36 @@
 
 <!-- 下一版变更写在这里。 -->
 
+### Added
+
+- **`describe_proposal` MCP 工具**（#46）—— 返回单个提案相对基线的完整 unified
+  diff 与元数据（`branch` / `base` / `head` / `commits` / `files` / `diff`）。
+  只读：全程在隔离 clone 里跑 git，不读用户工作区、不写任何东西。注册在
+  `--allow-write` 分支，与其余三个提案工具同级——每次调用需 `spec:write`。
+  此前查看单提案的完整 diff 只能由人工 `git show`。
+
+### Fixed
+
+- **`describe_proposal` 的 diff 区间改用 merge-base 三点号**（#46）——
+  `A..B` 是两棵树的全量对比；提案从旧 master 分出后 master 又前进时，会把别人
+  已合并的改动**反向**显示成本提案删除的内容，`files` 里也混入别人的文件。
+  现在 `base` 是 merge-base 的 SHA，`diff` 与 `files` 都同源于它。
+- **`describe_proposal` 的 `base_ref` 走 `validate_base_ref()`**（#46）——
+  与 `propose_spec_change` 完全一致。修掉了三类问题：`HEAD` 曾解析成用户当前
+  checkout 的分支；合法 tag 曾报「找不到 base_ref」；`HEAD~0` 曾让裸
+  `CalledProcessError` 冒到客户端（暴露内部 git 命令）。
+- **`describe_proposal` 的 diff 加上限**（#46）—— 超过
+  `MAX_PROPOSAL_DIFF_BYTES`（256KB = 4 × 规格文本上限）直接报错，不截断。
+  归属标记设计上不校验 SHA，任何人都能让 diff 变大；静默截断会让审核人以为
+  看到了全部改动。
+- **`files[].status` 改用 `git diff --name-status -z` 解析**（#46）—— 改前从
+  diff 头切 `" b/"`，非 ASCII 路径会被解析成转义引号串且状态恒为 `M`，重命名
+  的旧路径丢失。现在 A/M/D/R/C 判对，重命名额外给出 `old_path`。
+- **`GitNotAllowed` 归入 `ToolError` 家族**（#46）—— 它携带的是已脱敏、可给
+  调用方看的原因。不继承时 MCP 出口把它当未预料异常，客户端只收到
+  `Error executing tool <name>`，真实原因被丢掉。
+
+
 ### Changed
 
 - **`order.amount` 由「元（float）」改为「分（int）」——存储语义变更，存量库必须迁移**

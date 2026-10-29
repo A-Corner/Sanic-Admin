@@ -22,10 +22,12 @@ import time
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from tools.mcp_server import ToolError
 from tools.mcp_server.proposal_registry import (
     make_workspace,
     proposal_ref,
 )
+from tools.specgen.schema import MAX_SPEC_TEXT_BYTES
 
 _log = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ ALLOWED_SUBCOMMANDS = frozenset({
     "status",
     "branch",
     "rev-parse",
+    "merge-base",
     "ls-files",
     "checkout",
     "show",
@@ -56,6 +59,36 @@ PROPOSAL_PREFIX = "proposal/"
 #: 默认 base_ref。**不取 HEAD**：用户的工作区可能停在某个功能分支上，那样提案
 #: 会基于一个未完成的提交。master 才是约定的主线。
 DEFAULT_BASE_REF = "master"
+
+#: 单次 ``describe_proposal`` 返回的 diff 字节上限。
+#:
+#: 为什么必须有：归属标记按设计**不校验 SHA**——任何人本地在带标记的分支上提交
+#: 一个大文件即可，``git diff`` 的输出会原样进 JSON 响应（审核实测 2.4MB 原样
+#: 返回）。``_git`` 用 ``capture_output`` 全量缓冲，只有 300s 超时、没有字节上限。
+#:
+#: 为什么取 4× 规格上限（=256KB）而不是 1×：``propose_spec_change`` 允许 64KB
+#: 规格文本，其 diff 加上文件头与行前缀后必然超过 64KB。上限若取 1×，一个**合法**
+#: 的最大提案会变得无法被 describe——工具拒绝自己的产物。4× 覆盖合法上限，又给
+#: 多文件提案留出余量，同时把响应封在几百 KB 内。
+#:
+#: 超限**报错而不是截断**：静默截断会让审核人以为看到了全部改动。
+MAX_PROPOSAL_DIFF_BYTES = 4 * MAX_SPEC_TEXT_BYTES
+
+#: 单次 ``describe_proposal`` 返回的提交条数上限。
+#:
+#: 为什么 diff 的上限不够：那道上限只封 ``diff`` 字段，而 ``commits`` 是**另一个**
+#: 无上限的字段。归属标记不校验 SHA，任何人都能在带标记的分支上推大量提交——
+#: 每一条都进 ``commits`` 数组、原样进 JSON 响应，一个字节的 diff 都不用产生
+#: （空提交，``--allow-empty``）。审核实测的形态：5 万个空提交 → diff 为空、
+#: 闸不触发、响应却是几 MB 的 commits 数组。
+#:
+#: 为什么取 500：``propose_spec_change`` 一次提交一条提案，人工迭代的正常提案
+#: 远达不到这个量级；500 条已远超任何真实提案的提交数，同时把 ``commits``
+#: 元数据的 JSON 体积封在几百 KB 内（与 diff 闸同一量级）。
+#:
+#: 超限**报错而不是截断**：只返回前 N 条会让读者以为提案只有这些提交——与 diff
+#: 截断是同一类误导，处置方式保持一致。
+MAX_PROPOSAL_COMMITS = 500
 
 #: 提案提交使用的工具身份。
 #:
@@ -90,11 +123,13 @@ _ALLOWED_ARGS: dict = {
     "clone": (("--no-hardlinks", "--local", "-q"), 2),
     "add": (("-A", "-u"), 0),
     "commit": (("-m", "-q"), 1),
-    "diff": (("--stat", "--name-only", "--format=", "-U"), 2),
+    "diff": (("--stat", "--name-only", "--name-status", "--format=", "-U", "-z"), 2),
     "log": (("--format=", "-1", "--oneline", "--stat", "-n"), 1),
     "status": (("--porcelain", "--short"), 0),
     "branch": (("--list", "--format=", "-d", "-D", "--show-current"), 2),
     "rev-parse": (("--verify", "--abbrev-ref", "--short", "--show-toplevel"), 1),
+    # 只读 plumbing：两个 ref，无选项。用于三点区间（`A...B`）的左端。
+    "merge-base": ((), 2),
     "ls-files": ((), 1),
     "checkout": (("-b", "-q", "--detach"), 2),
     "update-ref": (("-d",), 2),
@@ -109,8 +144,16 @@ _FORBIDDEN_ARGS = frozenset({
 })
 
 
-class GitNotAllowed(Exception):
-    """尝试执行白名单之外的 git 子命令。"""
+class GitNotAllowed(ToolError):
+    """
+    尝试执行白名单之外的 git 子命令，或提案相关校验不通过。
+
+    继承 :class:`tools.mcp_server.ToolError`（**不是**裸 Exception）：它携带的是
+    已经脱敏、可以给调用方看的原因（分支名、base_ref 形态、diff 超限的字节数）。
+    不继承的话，``_mcp_tool`` 出口会把它当「未预料异常」，客户端只收到
+    ``Error executing tool <name>``，真实原因被丢掉——正是 MCP-05 审核实测到的
+    ``HEAD~0`` 那类表现。``identity.IdentityError`` 已经是同一做法。
+    """
 
 
 #: 能覆盖「操作哪个仓库」的环境变量。必须全部清掉：
@@ -326,10 +369,16 @@ def _pin_base_ref(clone_dir: Path, base_ref: str) -> None:
     顺序很重要：必须在 ``_harden_clone`` 删掉 remote 之前调用。clone 默认只
     checkout 用户当前的 HEAD 分支，若 base_ref 是别的分支（常见：用户停在功能
     分支、base_ref 是 master），它只以 ``refs/remotes/origin/<name>`` 存在。
+
+    ``refs/tags/<name>`` 也在候选表内：``validate_base_ref`` 接受合法 tag
+    （``rev-parse --verify <tag>^{commit}`` 能解析），若这里只看 heads/remotes，
+    同一个 ``v1`` 就会「校验通过、创建提案时却说找不到」——审核实测到的不一致。
+    优先级保持 heads → remotes → tags：已有分支名的解析结果不变，只是补上 tag。
     """
     candidates = [
         f"refs/heads/{base_ref}",
         f"refs/remotes/origin/{base_ref}",
+        f"refs/tags/{base_ref}",
     ]
     for ref in candidates:
         try:
@@ -570,6 +619,252 @@ def list_proposal_branches(repo_root: Path) -> List[dict]:
     return branches
 
 
+#: 归属校验失败时按操作给出的补充说明。``describe_proposal`` 与
+#: ``discard_proposal`` 共用同一份校验（:func:`_check_proposal_ownership`），
+#: 只有这句解释按操作分叉。
+_OWNERSHIP_HINTS = {
+    "描述": "本工具只描述自己创建的提案分支——手工建立的同名分支不在此列。",
+    "删除": "本工具只删除自己创建的提案分支——手工建立的同名分支不会被删。",
+}
+
+
+def _check_proposal_ownership(repo_root: Path, branch: str, *, action: str) -> str:
+    """
+    提案归属校验——``describe_proposal`` 与 ``discard_proposal`` **共用这一份**。
+
+    在抽出来之前，两个工具各写了一遍（连注释都几乎一样），「与 discard 同源」
+    只是口头说法：任何一处的判据被改动，另一处不会跟着变。现在只有一个实现。
+
+    必须同时满足：
+
+    1. 分支名是 ``proposal/`` 前缀（:data:`PROPOSAL_PREFIX`）
+    2. 分支名形态合法（:data:`_BRANCH_RE`，``git check-ref-format`` 的子集）
+    3. 分支存在
+    4. 存在归属标记 ``refs/specgen/proposals/<name>``（证明是本工具创建的）
+
+    **不比对标记 SHA**：那条只为「删除时被人偷换内容」服务，由
+    :func:`discard_proposal` 在拿到返回值后自己做——读操作应如实返回分支现状。
+
+    Args:
+        repo_root: 用户仓库根目录（调用方负责 ``resolve()``）
+        branch: 提案分支名
+        action: ``"描述"`` 或 ``"删除"``，只用于错误措辞
+
+    Returns:
+        ``(ref, marked)``：归属标记的 ref 全名，以及它指向的 commit SHA（已 strip）。
+        ``discard`` 用这两者做 SHA 比对与标记清理；``describe`` 只关心「标记存在」，
+        忽略返回值。
+
+    Raises:
+        GitNotAllowed: 上述任一条不满足
+    """
+    if not branch.startswith(PROPOSAL_PREFIX):
+        raise GitNotAllowed(
+            f"只能{action} {PROPOSAL_PREFIX!r} 前缀的分支，实际 {branch!r}"
+        )
+    # 形态校验放在最前：拼 `refs/heads/<b>` 全名之前先确认名字合法，
+    # 否则 `proposal/../x` 这类输入可能拼出意料之外的 ref 路径。
+    if not _BRANCH_RE.fullmatch(branch):
+        raise GitNotAllowed(f"分支名不合法：{branch!r}")
+
+    if not branch_exists(repo_root, branch):
+        raise GitNotAllowed(f"分支不存在：{branch!r}")
+
+    ref = proposal_ref(branch)
+    try:
+        marked = _git(
+            ["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo_root
+        ).strip()
+    except subprocess.CalledProcessError:
+        raise GitNotAllowed(
+            f"拒绝{action} {branch!r}：没有归属标记（{ref}）。"
+            + _OWNERSHIP_HINTS[action]
+        ) from None
+    return ref, marked
+
+
+def _parse_name_status(raw: str) -> List[dict]:
+    """
+    解析 ``git diff --name-status -z`` 的输出。
+
+    **为什么不从 diff 头里猜状态**（改前的做法）：git 对非 ASCII 路径输出转义
+    引号形式 ``diff --git "a/specs/\\346\\226\\260\\345\\242\\236.yaml" "b/..."``，
+    切 ``" b/"`` 得到的是「状态恒为 M + 被转义的引号串」——新增文件被报成修改，
+    重命名只剩新路径。审核实测：把状态恒置 ``"M"``，16 项测试全绿，证明该字段
+    没有任何断言覆盖。
+
+    ``--name-status -z`` 直接给出状态字母与 **未转义** 的 NUL 分隔路径。实测格式::
+
+        A\\0path\\0
+        M\\0path\\0
+        D\\0path\\0
+        R100\\0oldpath\\0newpath\\0
+
+    重命名/复制（``R``/``C``）占三段：状态、旧路径、新路径；其余占两段。
+
+    Returns:
+        ``[{"status": "A"|"M"|"D"|"R"|"C"|..., "path": <新路径>, "old_path": <仅 R/C>}]``
+
+        状态归一成首字母（``R100`` → ``R``），与 ``A``/``M``/``D`` 保持同为单字符，
+        相似度分数不携带额外语义。重命名额外给出 ``old_path``——旧路径消失正是
+        改前实现的第二个错误。
+    """
+    tokens = raw.split("\0")
+    # `-z` 末尾必带一个 NUL，split 后末位是空串；中途的空串只可能来自格式异常。
+    if tokens and tokens[-1] == "":
+        tokens.pop()
+
+    entries: List[dict] = []
+    i = 0
+    while i < len(tokens):
+        status = tokens[i]
+        i += 1
+        if not status:
+            continue
+        letter = status[:1]
+        if letter in ("R", "C"):
+            # 重命名/复制占三段：<status> <old> <new>
+            if i + 1 >= len(tokens):
+                # 格式异常：宁可丢弃这一条，也不要凭空造一个空路径。
+                _log.warning("git diff --name-status -z 输出不完整，已跳过：%r", raw)
+                break
+            old_path, new_path = tokens[i], tokens[i + 1]
+            i += 2
+            entries.append({"status": letter, "path": new_path, "old_path": old_path})
+        else:
+            # 其余占两段：<status> <path>
+            if i >= len(tokens):
+                _log.warning("git diff --name-status -z 输出不完整，已跳过：%r", raw)
+                break
+            entries.append({"status": letter, "path": tokens[i]})
+            i += 1
+    return entries
+
+
+def describe_proposal(repo_root: Path, branch: str, *, base_ref: str = DEFAULT_BASE_REF) -> dict:
+    """
+    返回一个提案相对基线的完整 unified diff 与元数据。**只读**。
+
+    归属校验与 :func:`discard_proposal` **同源**——两边都调用
+    :func:`_check_proposal_ownership`，必须同时满足：
+
+    1. 分支名是 ``proposal/`` 前缀且形态合法
+    2. 存在归属标记 ``refs/specgen/proposals/<name>``（证明是本工具创建的）
+
+    与 ``discard`` 的区别：不要求「标记 SHA == 分支当前 SHA」。那条是为了防
+    **删除**时被人偷换内容；这里只**读**，内容变了反而应该如实返回——读者
+    看到的正是分支现在的样子。标记只用来证明「这是本工具建的提案」，不是证明
+    「没被改过」。
+
+    全程在**隔离 clone** 里执行 ``git diff``：不读用户工作区、不写任何东西、
+    不碰工作区的 index。
+
+    **diff 区间用三点号**（``<base>...<head>`` = ``merge-base(base, head)..head``）：
+    提案从旧 master 分出后 master 又前进了，两点号会把别人已合并的改动**反向**
+    显示成本提案删除的内容，并在 ``files`` 里混入别人的文件（审核实测）。
+
+    Args:
+        repo_root: 用户仓库根目录
+        branch: 提案分支名
+        base_ref: 对比的基线，默认 ``master``
+
+    Returns:
+        ``{"branch", "base", "head", "commits", "files", "diff"}``
+
+        ``base`` 是 **merge-base** 的 SHA（即三点区间的左端），不是 ``base_ref``
+        当前指向的提交——master 前进后二者会不同，而 diff 恰好是相对前者的。
+
+    Raises:
+        GitNotAllowed: 前缀/形态不合法、分支不存在、无归属标记、基线不可达、
+            diff 超过 :data:`MAX_PROPOSAL_DIFF_BYTES`、提交条数超过
+            :data:`MAX_PROPOSAL_COMMITS`
+    """
+    repo_root = repo_root.resolve()
+    _check_proposal_ownership(repo_root, branch, action="描述")
+
+    # 全名解析，避免与同名 tag 混淆
+    head = _git(["rev-parse", f"refs/heads/{branch}^{{commit}}"], cwd=repo_root).strip()
+
+    tmp_root = make_workspace()
+    clone_dir = tmp_root / "repo"
+    try:
+        _git(
+            ["clone", "--no-hardlinks", "--local", str(repo_root), str(clone_dir)],
+            cwd=repo_root,
+        )
+        _pin_base_ref(clone_dir, base_ref)
+        _harden_clone(clone_dir)
+
+        # 「基线不可达」不由本函数报：`_pin_base_ref` 解析不到 base_ref 时已经
+        # 先抛（措辞「隔离 clone 里找不到 base_ref」）。改前这里还有一段
+        # `rev-parse <base_ref>^{commit}` + 「基线分支不可达」，但 `_pin_base_ref`
+        # 刚把该 ref 固化成 `refs/heads/<base_ref>`，那段永远走不到（审核指出是
+        # 死代码，已删）。这里负责的是另一件事——两个 ref 可达但**没有共同祖先**。
+
+        # 三点区间：A...B == diff $(git merge-base A B) B。
+        # 两点号是「两棵树全量对比」，master 前进后会把别人已合并的改动**反向**
+        # 显示成本提案删除的内容（审核实测），且 `files` 里混入别人的文件。
+        # 注意 `git rev-parse A...B` 会输出**三行**（A、B、^merge-base），不能拿它
+        # 算左端；`git merge-base` 只给那一行。
+        try:
+            base = _git(["merge-base", base_ref, head], cwd=clone_dir).strip()
+        except subprocess.CalledProcessError:
+            raise GitNotAllowed(
+                f"基线 {base_ref!r} 与提案分支没有共同祖先，无法计算 diff"
+            ) from None
+
+        commits_out = _git(
+            ["log", "--format=%H%x1f%an%x1f%aI%x1f%s", f"{base}..{head}"],
+            cwd=clone_dir,
+        ).strip()
+
+        # 提交条数闸：上面的 diff 闸只封 ``diff`` 字段，``commits`` 是另一个
+        # 独立字段——空提交（``--allow-empty``）不产生任何 diff，能让 commits
+        # 无上限增长而完全不触发 diff 闸。超限同样**报错而不是截断**。
+        commit_lines = [line for line in commits_out.split("\n") if line.strip()]
+        commit_count = len(commit_lines)
+        if commit_count > MAX_PROPOSAL_COMMITS:
+            raise GitNotAllowed(
+                f"提案过大：{commit_count} 条提交，超过上限 "
+                f"{MAX_PROPOSAL_COMMITS} 条。本工具不返回被截断的内容——"
+                "请缩小提案，或由人在本地用 git log 查看完整提交列表。"
+            )
+
+        commits = []
+        for line in commit_lines:
+            sha, author, iso, subject = line.split("\x1f", 3)
+            commits.append(
+                {"sha": sha, "author": author, "date": iso, "subject": subject}
+            )
+
+        diff = _git(["diff", f"{base}...{head}"], cwd=clone_dir)
+        # 归属标记按设计不校验 SHA：任何人本地在带标记的分支上提交一个大文件
+        # 即可让 diff 无限增长原样进 JSON。超限**报错而不是截断**——静默截断会
+        # 让审核人以为看到了全部改动。
+        diff_size = len(diff.encode("utf-8"))
+        if diff_size > MAX_PROPOSAL_DIFF_BYTES:
+            raise GitNotAllowed(
+                f"提案过大：diff {diff_size} 字节，超过上限 "
+                f"{MAX_PROPOSAL_DIFF_BYTES} 字节。本工具不返回被截断的内容——"
+                "请缩小提案，或由人在本地用 git show 查看完整改动。"
+            )
+
+        files = _parse_name_status(
+            _git(["diff", "--name-status", "-z", f"{base}...{head}"], cwd=clone_dir)
+        )
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    return {
+        "branch": branch,
+        "base": base,
+        "head": head,
+        "commits": commits,
+        "files": files,
+        "diff": diff,
+    }
+
+
 def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> None:
     """
     删除提案分支。**必须同时满足三条**才允许删：
@@ -580,26 +875,12 @@ def discard_proposal(repo_root: Path, branch: str, *, force: bool = False) -> No
 
     只按前缀删是危险的：任何人手工建一个 ``proposal/xxx`` 就能被本工具删掉，
     而删除不可逆。归属标记把「命名约定」换成了「可验证的证据」。
+
+    前两条由 :func:`_check_proposal_ownership` 执行——与 ``describe_proposal``
+    **同一个函数**，不是两份副本。第三条只有删除需要，在本函数内完成。
     """
-    if not branch.startswith(PROPOSAL_PREFIX):
-        raise GitNotAllowed(f"只能删除 {PROPOSAL_PREFIX!r} 前缀的分支，实际 {branch!r}")
-    # L2：形态校验放在最前——`refs/heads/<b>` 全名拼出来之前先确认名字合法，
-    # 否则 `proposal/../x` 这类输入可能拼出意料之外的 ref 路径。
-    if not _BRANCH_RE.fullmatch(branch):
-        raise GitNotAllowed(f"分支名不合法：{branch!r}")
-
-    if not branch_exists(repo_root, branch):
-        raise GitNotAllowed(f"分支不存在：{branch!r}")
-
-    ref = proposal_ref(branch)
-    try:
-        marked = _git(["rev-parse", "--verify", f"{ref}^{{commit}}"],
-                      cwd=repo_root).strip()
-    except subprocess.CalledProcessError:
-        raise GitNotAllowed(
-            f"拒绝删除 {branch!r}：没有归属标记（{ref}）。"
-            "本工具只删除自己创建的提案分支——手工建立的同名分支不会被删。"
-        ) from None
+    # 与 describe 共用同一份归属校验：前缀 → 形态 → 存在 → 标记存在。
+    ref, marked = _check_proposal_ownership(repo_root, branch, action="删除")
 
     # 全名解析：短名遇到同名 tag 时 git 会有歧义（tag 与分支同名是合法的）
     current = _git(

@@ -3,11 +3,15 @@
 """
 MCP 写入工具（M2 第二段）。**默认不注册**，只有显式 ``--allow-write`` 才暴露。
 
-设计见 ``docs/mcp-write-path.md``。三个工具：
+设计见 ``docs/mcp-write-path.md``。四个工具：
 
 - ``propose_spec_change``：在隔离 clone 里提交规格变更，把分支 fetch 回用户仓库
 - ``list_proposals``：列出 ``proposal/`` 前缀的分支
+- ``describe_proposal``：返回单个提案相对基线（merge-base 三点区间）的完整 diff 与元数据
 - ``discard_proposal``：删除提案分支
+
+``describe_proposal`` 是只读的，但**权限与其余三个同级**：提案 diff 可能含客户业务
+规格片段，暴露面大于分支名列表，不能出现「看不到列表却能看全文」的倒挂。
 
 ## 为什么默认关闭
 
@@ -35,6 +39,7 @@ from tools.mcp_server.git_isolation import (
     PROPOSAL_PREFIX,
     GitNotAllowed,
     branch_exists,
+    describe_proposal,
     discard_proposal,
     list_proposal_branches,
     make_branch_name,
@@ -48,6 +53,7 @@ WRITE_TOOL_NAMES = frozenset(
         "propose_spec_change",
         "list_proposals",
         "discard_proposal",
+        "describe_proposal",
     }
 )
 
@@ -196,7 +202,7 @@ def propose_spec_change(
 
 def list_proposals(*, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
     """列出提案分支（``proposal/`` 前缀）。只读，但同样要求 ``spec:write``
-    （CPL 裁定：三个写入工具粒度一致，且提案内容不应向无权限方暴露）。"""
+    （CPL 裁定：写入工具族粒度一致，且提案内容不应向无权限方暴露）。"""
     from tools.mcp_server import _repo_root
     from tools.mcp_server.identity import IdentityError, require_spec_write
 
@@ -212,6 +218,48 @@ def list_proposals(*, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
         raise
     _audit("list_proposals", status="success", detail={"count": len(items), "account_id": account_id})
     return items
+
+
+def describe_proposal_tool(
+    branch: str, *, base_ref: Optional[str] = None, repo_root: Optional[Path] = None
+) -> Dict[str, Any]:
+    """返回提案相对基线的完整 diff 与元数据。只读，但与其他三工具同级权限。"""
+    from tools.mcp_server import _repo_root
+    from tools.mcp_server.identity import IdentityError, require_spec_write
+
+    root = (repo_root or _repo_root()).resolve()
+    try:
+        account_id = require_spec_write()
+        # base_ref 与 propose_spec_change **逐字一致**地走同一个校验函数。
+        # 改前这里把 base_ref 原样转给 describe_proposal，等于完全绕过校验：
+        #   - "HEAD" 被接受，解析成用户当前 checkout 的分支（设计 §9.1 明令禁止）
+        #   - 合法 tag "v1" 报「找不到 base_ref」，而同族工具接受它
+        #   - "HEAD~0" 让 clone 里的 update-ref 抛裸 CalledProcessError
+        base = validate_base_ref(root, base_ref or DEFAULT_BASE_REF)
+        result = describe_proposal(root, branch, base_ref=base)
+    except IdentityError as exc:
+        _audit("describe_proposal", status="failure", detail={"branch": branch, "reason": exc.reason})
+        raise
+    except Exception as exc:
+        _audit(
+            "describe_proposal",
+            status="failure",
+            detail={"branch": branch, "reason": type(exc).__name__},
+        )
+        raise
+    _audit(
+        "describe_proposal",
+        status="success",
+        detail={
+            "branch": branch,
+            "account_id": account_id,
+            "base_ref": base,
+            "files": len(result["files"]),
+            "commits": len(result["commits"]),
+            "diff_bytes": len(result["diff"].encode("utf-8")),
+        },
+    )
+    return result
 
 
 def discard_proposal_tool(branch: str, *, force: bool = False, repo_root: Optional[Path] = None) -> Dict[str, Any]:
@@ -237,7 +285,7 @@ def discard_proposal_tool(branch: str, *, force: bool = False, repo_root: Option
 
 def register_write_tools(server) -> None:
     """
-    把三个写入工具注册到 MCP server。**只应在 --allow-write 时调用。**
+    把四个写入工具注册到 MCP server。**只应在 --allow-write 时调用。**
 
     每个 handler 都过 ``_mcp_tool``，与只读工具一致地把异常转成脱敏后的
     SDK ToolError。
@@ -263,6 +311,19 @@ def register_write_tools(server) -> None:
     @_mcp_tool
     def list_proposals_tool() -> List[Dict[str, Any]]:
         return list_proposals()
+
+    @server.tool(
+        name="describe_proposal",
+        description=(
+            "返回指定提案分支相对基线的完整 unified diff 与元数据（分支、基线、head、"
+            "提交列表、改动文件）。只读——不读工作区、不写任何东西；每次调用需有效会话"
+            "且账户拥有 spec:write 权限（与其他三个提案工具同级）。"
+        ),
+    )
+    @_mcp_tool
+    def describe_proposal_handler(branch: str, base_ref: str = "") -> Dict[str, Any]:
+        """branch 必须是本工具创建的 proposal/ 分支；base_ref 留空则用 master。"""
+        return describe_proposal_tool(branch, base_ref=base_ref or None)
 
     @server.tool(
         name="discard_proposal",
