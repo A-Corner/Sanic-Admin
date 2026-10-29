@@ -31,7 +31,7 @@ plural: orders             # URL 复数，默认 resource + "s" -> /api/v1/order
 label: 订单
 fields:
   - name: title
-    type: string           # string | text | int | float | bool
+    type: string           # 见下方「字段类型」：以 tools/specgen/schema.py 的 FieldType 为准
     max_length: 128        # 仅 string，默认 255
     required: true         # 与 default 互斥
     unique: true           # 模型 unique + API 409
