@@ -1,9 +1,10 @@
 # Sanic-Admin 架构文档
 
-> 本文档基线为 `8750d51`（`sanic==23.6.0`）。现行依赖见 `requirements.txt`（`sanic==25.12.1`）。
+> 本文档基线：架构描述反映当前 `origin/master`；带 `8750d51` 标记的陈述是该候选时点的历史观测。
+> 依赖版本不在正文写死，以 `requirements.txt` 为准，查询命令：`grep -E '^(sanic|tortoise-orm)==' requirements.txt`。
 
-> 适用范围：Sanic-Admin 后端（Sanic 23.6 + Tortoise ORM 0.20 + Redis + PyJWT），前端 AMIS 低代码框架。
-> 基线：发布候选 `release/v0.2.0`，M1 候选 `8750d51`（M1 已交付并入）。
+> 适用范围：Sanic-Admin 后端（Sanic + Tortoise ORM + Redis + PyJWT，版本见 requirements.txt），前端 AMIS 低代码框架。
+> 基线沿革：M1 候选 `8750d51`（已并入 master；本文中带此 SHA 的陈述是该时点的观测）。
 > 事实来源：逐文件阅读 `app/` 源码 + 在临时虚拟环境中实际启动应用、抓取路由表与响应头。
 > 标注约定：
 > - **【读码确认】** = 源码可查证，且多数经过运行时实测。
@@ -20,7 +21,7 @@
 graph TD
     Client[浏览器 / AMIS / curl]
 
-    subgraph Sanic["Sanic 23.6 应用进程"]
+    subgraph Sanic["Sanic 应用进程"]
         subgraph MW["中间件链 app/middleware（下列编号为注册序，非执行序）"]
             MW1["注册1 响应: CORS 头<br/>security_middleware.py:73-88"]
             MW2["注册2 请求: OPTIONS 预检短路<br/>security_middleware.py:90-94"]
@@ -579,7 +580,7 @@ curl -X POST /auth/associated -H "Authorization: Bearer <JWT>" # 200
 Sanic-Admin/
 ├── main.py                       # 进程入口；捕获 ConfigError 后 sys.exit
 ├── pyproject.toml
-├── requirements.txt              # 运行时依赖（sanic 23.6 / tortoise-orm 0.20 / PyJWT / argon2-cffi / cryptography / captcha / redis ...）
+├── requirements.txt              # 运行时依赖（版本以本文件为准）
 ├── requirements-dev.txt
 ├── README.md / README_cn.md / SECURITY.md / CHANGELOG.md / CONTRIBUTING.md
 ├── upgrade_schema.md
