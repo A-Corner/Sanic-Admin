@@ -48,8 +48,8 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
                 -- 断言右侧必须 ROUND（PG 这行原本就对）。注意 ROUND(double) 是
                 -- ties-to-even，但本场景 x*100 距整数要么 <1.19e-7 要么 =0.5，
                 -- 不会落在「恰好 .5 的浮点表示」上，两种舍入方向不触发。
-                WHEN ABS("amount" * 100 - CAST("amount" * 100 AS INTEGER)) <= 1e-3
-                    THEN CAST("amount" * 100 AS INTEGER)
+                WHEN ABS("amount" * 100 - ROUND("amount" * 100)) <= 1e-3
+                    THEN CAST(ROUND("amount" * 100) AS BIGINT)
                 ELSE NULL
             END,
             "quantity", "status", "customer_id"

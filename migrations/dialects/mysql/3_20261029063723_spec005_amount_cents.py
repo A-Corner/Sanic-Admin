@@ -45,8 +45,8 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
                 -- 断言右侧必须 ROUND，不能 CAST：CAST 向零截断，
                 -- 1.14*100=113.99999999999999 会被截成 113，产生 1.0 的假残差，
                 -- 把合法金额判成不精确（实测 1.14/2.28/0.29/0.57/19.99 共 5/8 被判死）。
-                WHEN ABS(`amount` * 100 - CAST(`amount` * 100 AS SIGNED)) <= 1e-3
-                    THEN CAST(`amount` * 100 AS SIGNED)
+                WHEN ABS(`amount` * 100 - ROUND(`amount` * 100)) <= 1e-3
+                    THEN CAST(ROUND(`amount` * 100) AS SIGNED)
                 ELSE NULL
             END,
             `quantity`, `status`, `customer_id`

@@ -32,8 +32,8 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
             -- 换算侧的 CAST 在断言通过后是无损的（此时 x*100 距整数 <1e-3）。
             CASE
                 WHEN typeof("amount") = 'integer' THEN "amount"
-                WHEN ABS("amount" * 100 - CAST("amount" * 100 AS INTEGER)) <= 1e-3
-                    THEN CAST("amount" * 100 AS INTEGER)
+                WHEN ABS("amount" * 100 - ROUND("amount" * 100)) <= 1e-3
+                    THEN CAST(ROUND("amount" * 100) AS INTEGER)
                 ELSE NULL
             END,
             "quantity", "status", "customer_id"
