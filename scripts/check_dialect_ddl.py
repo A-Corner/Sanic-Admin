@@ -18,6 +18,16 @@ MySQL 报 1064，任何全新部署都在基线第一步失败。
     --existing  存量库形态：先用当前模型建表（模拟 v0.3.2 的 generate_schemas），
                 再基线化，最后 upgrade —— 断言**只应用增量**、基线不重跑。
 
+    --with-amount-seed  SPEC-005 数据换算场景（在**非空** orders 表上验证）：
+                空库先跑 0_*+1_*+2_*（不含 3_*，得旧形态 amount REAL/DOUBLE），
+                插入种子值（含 *100 后是 xxx.999… 的关键回归值），跑 3_*，
+                逐行断言 amount == round(原值*100) 精确相等；另造一库插 12.345
+                （半分尾数），断言迁移中止且一行未写。
+                **为什么必须在有数据的库上跑**：空库时 CASE 的分支一行都不会命中，
+                「守卫查错表」「断言用 CAST」这两类缺陷在空库上必然全绿
+                （PR #89 审核实测）。见 tests/test_spec005_migration_data.py
+                的模块 docstring（SQLite 侧同源用例）。
+
 退出码：0 全部断言通过；1 断言失败；2 脚本/环境错误。
 """
 
@@ -351,10 +361,206 @@ async def run(dialect: str, url: str, existing: bool) -> int:
     return 0
 
 
+
+
+# ---------------------------------------------------------------------------
+# SPEC-005 数据换算场景（--with-amount-seed）
+# ---------------------------------------------------------------------------
+
+#: 种子表：元值 -> 期望分值（round(元*100)）。全部可精确换算。
+#: 1.14/2.28/0.29/0.57/19.99 是 *100 后为 xxx.999… 的关键回归值：
+#: 断言若用 CAST（向零截断）会产生 1.0 的假残差把它们全部判死（PR #89 审核实测）。
+AMOUNT_SEEDS = [
+    (12.34, 1234),
+    (1.14, 114),
+    (2.28, 228),
+    (0.29, 29),
+    (0.57, 57),
+    (19.99, 1999),
+    (0.01, 1),
+    (0, 0),
+    (21474836.47, 2147483647),   # 32 位 INT 上界
+    (-12.34, -1234),             # 业务未禁止负数（规格无 min/max，_INT_RULE 只查类型）
+    (0.30000000000000004, 30),   # 0.1+0.2 的浮点累加值，精确对应 30 分
+]
+#: 半分尾数：唯一应触发「不精确 → 中止」的值
+AMOUNT_INEXACT = 12.345
+
+
+def _load_dialect_migration(dialect: str, min_version: int):
+    """加载 migrations/dialects/<方言>/ 下版本号 >= min_version 的迁移模块（按序）。"""
+    base = REPO / "migrations" / "dialects" / dialect
+    files = sorted(
+        (p for p in base.glob("*.py") if not p.name.startswith("__")),
+        key=lambda p: int(p.name.split("_", 1)[0]),
+    )
+    out = []
+    for path in files:
+        version = int(path.name.split("_", 1)[0])
+        if version < min_version:
+            continue
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        out.append(mod)
+    return out
+
+
+def _q(dialect: str, ident: str) -> str:
+    """按方言给标识符加引号。"""
+    return f"`{ident}`" if dialect == "mysql" else f'"{ident}"'
+
+
+async def _amount_seed_scenario(dialect: str, url: str) -> list:
+    """非空 orders 表上的精确换算与中止验证，返回问题列表（空 = 通过）。"""
+    from tortoise import Tortoise
+
+    problems: list = []
+    tq = _q(dialect, "orders")
+    oq = _q(dialect, "orders_old")
+    cq = _q(dialect, "customer")
+
+    # ---- 场景 A：全部可精确换算 ----
+    print(f"  [{dialect}][seed] 场景 A：非空表精确换算（{len(AMOUNT_SEEDS)} 条种子）")
+    await _recreate_database(dialect, url)
+    await _ensure_database(dialect, url)
+    await Tortoise.init(db_url=_tortoise_url(dialect, url), modules={"models": []})
+    conn = Tortoise.get_connection("default")
+
+    # 跑 0_*+1_*+2_*（旧形态 orders：amount REAL/DOUBLE），**跳过 3_**
+    pre = [m for m in _load_dialect_migration(dialect, 0)
+           if not m.__name__.startswith("3_")]
+    for mod in pre:
+        await conn.execute_script(await mod.upgrade(conn))
+    await conn.execute_script(
+        f"INSERT INTO {cq} ({_q(dialect,'id')}, {_q(dialect,'name')}, "
+        f"{_q(dialect,'email')}, {_q(dialect,'status')}) "
+        f"VALUES (1, 'seed', 'seed@example.com', 'active');"
+    )
+    for i, (yuan, _) in enumerate(AMOUNT_SEEDS, 1):
+        await conn.execute_script(
+            f"INSERT INTO {tq} ({_q(dialect,'title')}, {_q(dialect,'amount')}, "
+            f"{_q(dialect,'quantity')}, {_q(dialect,'status')}, {_q(dialect,'customer_id')}) "
+            f"VALUES ('o{i}', {yuan!r}, 1, 'pending', 1);"
+        )
+
+    mig3 = _load_dialect_migration(dialect, 3)
+    if not mig3:
+        problems.append("找不到 3_* 迁移（SPEC-005），数据场景无法验证")
+    else:
+        await conn.execute_script(await mig3[0].upgrade(conn))
+        rows = await conn.execute_query_dict(
+            f"SELECT {_q(dialect,'title')} AS t, {_q(dialect,'amount')} AS a FROM {tq} "
+            f"ORDER BY CAST(SUBSTR({_q(dialect,'title')}, 2) AS "
+            f"{'UNSIGNED' if dialect == 'mysql' else 'INTEGER'});"
+        )
+        if len(rows) != len(AMOUNT_SEEDS):
+            problems.append(f"换算后行数 {len(rows)} != 种子 {len(AMOUNT_SEEDS)}（有行被丢）")
+        for (yuan, exp), row in zip(AMOUNT_SEEDS, rows):
+            # **精确等于**：不是容差比较。容差 1e-3 只用于迁移内部的「能否换算」判定。
+            if row["a"] != exp:
+                problems.append(f"{yuan!r} 元换算为 {row['a']} 分，期望 {exp} 分")
+
+    await Tortoise.close_connections()
+
+    # ---- 场景 B：半分尾数必须中止且一行不写 ----
+    print(f"  [{dialect}][seed] 场景 B：{AMOUNT_INEXACT} 必须中止")
+    await _recreate_database(dialect, url)
+    await _ensure_database(dialect, url)
+    await Tortoise.init(db_url=_tortoise_url(dialect, url), modules={"models": []})
+    conn = Tortoise.get_connection("default")
+    for mod in pre:
+        await conn.execute_script(await mod.upgrade(conn))
+    await conn.execute_script(
+        f"INSERT INTO {cq} ({_q(dialect,'id')}, {_q(dialect,'name')}, "
+        f"{_q(dialect,'email')}, {_q(dialect,'status')}) "
+        f"VALUES (1, 'seed', 'seed@example.com', 'active');"
+    )
+    await conn.execute_script(
+        f"INSERT INTO {tq} ({_q(dialect,'title')}, {_q(dialect,'amount')}, "
+        f"{_q(dialect,'quantity')}, {_q(dialect,'status')}, {_q(dialect,'customer_id')}) "
+        f"VALUES ('bad', {AMOUNT_INEXACT!r}, 1, 'pending', 1);"
+    )
+    aborted = None
+    try:
+        await conn.execute_script(await mig3[0].upgrade(conn))
+    except Exception as exc:  # 预期路径
+        aborted = exc
+    if aborted is None:
+        problems.append(
+            f"{AMOUNT_INEXACT}（半分尾数）未触发迁移中止——「不精确即停」失效")
+    else:
+        # **顺序**：先断言失败原因正确，再查数据终态，最后由调用方 exit 非 0。
+        if "NOT NULL" not in str(aborted) and "null" not in str(aborted).lower():
+            problems.append(f"中止原因应是 NOT NULL 违反，实际：{aborted!r}")
+
+        # 数据终态断言（**方言无关的「可接受终态集合」**）：
+        # 三方言的多语句事务语义不同——
+        #   SQLite（executescript 逐语句自动提交）：RENAME/CREATE 残留，
+        #     终态 = orders(新,0行) + orders_old(1行原值)
+        #   PG（简单查询隐式单事务）：整脚本回滚，终态 = orders(旧,1行原值)，无 orders_old
+        #   MySQL（asyncmy 逐语句）：与 SQLite 同
+        # 所以不能断言「orders_old 必须存在」。方言无关的不变量是：
+        #   ① 原值 {INEXACT!r} 必须仍在（orders 或 orders_old 之一）——数据未丢；
+        #   ② 任何表里都不得出现它的换算形式（{TRUNC} 截断 / {ROUNDDOWN} ROUND静默 /
+        #      {ROUNDUP} 进位）——没有静默改值。
+        bad_forms = (12, 1234, 1235)  # trunc / round静默(1234.5→1234 on ties-to-even) / half-away
+        lost, mutated = True, []
+        for tbl in (tq, oq):
+            try:
+                vals = await conn.execute_query_dict(
+                    f"SELECT {_q(dialect, 'amount')} AS a FROM {tbl}")
+            except Exception:
+                continue  # 表不存在 = 全回滚语义下的合法终态
+            for r in vals:
+                lost = False
+                if r["a"] in bad_forms:
+                    mutated.append(f"{tbl}.amount={r['a']}")
+        if lost:
+            problems.append(f"原值 {AMOUNT_INEXACT} 在 orders/orders_old 中都找不到——数据丢了")
+        if mutated:
+            problems.append(f"发现被静默改值的行：{mutated}（截断/换算形式，裁定禁止）")
+    await Tortoise.close_connections()
+    return problems
+
+
+def _tortoise_url(dialect: str, url: str) -> str:
+    """把命令行传入的 DSN 转成 Tortoise 可用的 db_url。
+
+    mysql/postgres 原样返回（DSN 已是 tortoise 认的 scheme）。
+    sqlite 传的是文件路径，需补 ``sqlite://`` 前缀。
+    （注意：`--with-amount-seed` 不接受 sqlite——换库场景要有 DROP/CREATE DATABASE，
+    sqlite 无此语义；SQLite 侧覆盖在 tests/test_spec005_migration_data.py。）
+    """
+    if dialect in ("mysql", "postgres"):
+        return url
+    return url if url.startswith("sqlite://") else f"sqlite://{url}"
+
+
+async def run_amount_seed(dialect: str, url: str) -> int:
+    if dialect == "sqlite":
+        # `_recreate_database` 只实现了 mysql/postgres（sqlite 没有 DROP/CREATE DATABASE
+        # 语义，换库靠换文件）。本场景的 CI 目标是 mysql/postgres 两个真容器 job；
+        # SQLite 侧的等价覆盖在 tests/test_spec005_migration_data.py（内存库，四用例）。
+        print("!! --with-amount-seed 只支持 mysql/postgres；"
+              "SQLite 请跑 tests/test_spec005_migration_data.py", file=sys.stderr)
+        return 2
+    problems = await _amount_seed_scenario(dialect, url)
+    if problems:
+        print(f"!! {dialect} 数据换算断言失败：", file=sys.stderr)
+        for p in problems:
+            print(f"   - {p}", file=sys.stderr)
+        return 1
+    print(f"  OK {dialect}：非空 orders 表精确换算 {len(AMOUNT_SEEDS)} 条 + "
+          f"半分尾数中止验证，全部通过")
+    return 0
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     existing = "--existing" in argv
-    args = [a for a in argv if a != "--existing"]
+    with_seed = "--with-amount-seed" in argv
+    args = [a for a in argv if a not in ("--existing", "--with-amount-seed")]
     if not args:
         print(__doc__)
         return 2
@@ -369,6 +575,8 @@ def main(argv=None) -> int:
         return 2
 
     try:
+        if with_seed:
+            return asyncio.run(run_amount_seed(dialect, url))
         return asyncio.run(run(dialect, url, existing))
     except Exception as exc:  # 跑不通必须报错，不能静默通过
         print(f"!! 检查失败（脚本或数据库错误）: {exc!r}", file=sys.stderr)
