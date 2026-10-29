@@ -89,7 +89,7 @@ python -m tools.specgen check      # OK: 生成物与规格一致
 
 ---
 
-> **项目状态**：最新版本为 **[v0.4.2](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.2)**（2026-10-27，MCP 写入路径接入账户级 `spec:write` 权限），其前依次为 [v0.4.1](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.1)（时间字段 ISO 8601、AMIS 6.13.0）与 v0.4.0（规格生成器）；原始重构版本为 v0.2.0。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供；自 v0.3.4 起该值若强度不足，**生产环境拒绝启动**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+> **项目状态**：最新版本为 **[v0.4.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.3)**（2026-10-28，文档修正与测试防护补齐），其前依次为 [v0.4.2](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.2)（2026-10-27，MCP 写入路径接入账户级 `spec:write` 权限）、[v0.4.1](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.1)（时间字段 ISO 8601、AMIS 6.13.0）与 v0.4.0（规格生成器）；原始重构版本为 v0.2.0。当前基线**尚不可用于生产环境**。仓库内**不含任何默认口令或密钥**——初始管理员口令由启动时生成（仅开发环境）或通过 `INITIAL_ADMIN_PASSWORD` 提供；自 v0.3.4 起该值若强度不足，**生产环境拒绝启动**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
 >
 > **从 v0.3.1 及更早版本升级**需先运行 [v0.3.2 发布说明](docs/release/v0.3.2-release-notes.md) 中的迁移脚本（新增 `account.must_change_password`）；全新安装无需迁移。
 >
@@ -109,7 +109,7 @@ python -m tools.specgen check      # OK: 生成物与规格一致
 
 **已知限制**（详见英文版 README 与 [Release Notes](docs/release/v0.3.0-release-notes.md)）：注册接口存在账户枚举风险；**2FA 目前是全局开关（`REQUIRE_TWO_FACTOR`，由服务端配置决定、忽略客户端参数），尚不支持按账户开关**；**生产环境下自助注册默认关闭，账户改由管理员创建**——`ALLOW_SELF_REGISTRATION`（见 `app/config.py`）默认 `False`，关闭期间 `POST /auth/register` 返回 HTTP 403 与错误码 `REGISTRATION_DISABLED`（端点存在，但策略关闭）。账户通过 `POST /api/v1/accounts` 由持有 `account:create` 权限的调用方创建；在该接口上置 `verified=true` 还要求管理员身份（`is_admin`，或持有授予全部权限的角色），这样建出的账户可直接登录。非管理员仍可建号，但只能建未验证账户，且该判定发生在写库**之前**，被拒绝的请求不会留下孤儿账户。
 
-打开 `ALLOW_SELF_REGISTRATION` 则恢复改动前的行为：注册者拿到的账户为 `verified=False`，而仓库内没有任何链路把两步验证码送到注册者手上（验证码只在 `DEBUG` 时进入响应体，全仓唯一的 `deliver(...)` 属于密码重置路径），因此这类账户无法登录。把验证码投递给注册者留作**可插拔扩展**——实现 `app/services/delivery.py` 的 `Backend` 并把注册验证码接进去——在该接缝接通之前，打开开关只会产生无人可用的账户。开关打开但未配置投递后端时，服务启动会打一条 warning。测试覆盖率 52% 仍不足（见下方「当前测试状态」）；登录页缺独立的 login-CSRF token（`TRUSTED_PROXIES` 已支持环境变量接线，见 `app/config.py`）。v0.2.x 遗留的 value 长度与请求体上限问题已在 v0.3.0 修复（value ≤ 8192、`REQUEST_MAX_SIZE` 16MB 真实生效）。
+打开 `ALLOW_SELF_REGISTRATION` 则恢复改动前的行为：注册者拿到的账户为 `verified=False`，而仓库内没有任何链路把两步验证码送到注册者手上（验证码只在 `DEBUG` 时进入响应体，全仓唯一的 `deliver(...)` 属于密码重置路径），因此这类账户无法登录。把验证码投递给注册者留作**可插拔扩展**——实现 `app/services/delivery.py` 的 `Backend` 并把注册验证码接进去——在该接缝接通之前，打开开关只会产生无人可用的账户。开关打开但未配置投递后端时，服务启动会打一条 warning。测试覆盖率仍然不足（当前数字请自行运行得出，见下方「当前测试状态」）；登录页缺独立的 login-CSRF token（`TRUSTED_PROXIES` 已支持环境变量接线，见 `app/config.py`）。v0.2.x 遗留的 value 长度与请求体上限问题已在 v0.3.0 修复（value ≤ 8192、`REQUEST_MAX_SIZE` 16MB 真实生效）。
 
 ---
 
@@ -237,7 +237,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **当前测试状态**：`pytest` 报 **`171 passed`，0 失败，0 错误**（收集 171 个用例，约 65 秒；加 `--cov` 约 80 秒）。`app/` 的覆盖率为 **52%**，用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
+> **当前测试状态**：本文件不写死用例数与覆盖率——这两个数字随每次提交漂移。运行 `pytest tests/ -q` 即得当前用例数与耗时；`pytest --cov=app tests/ --cov-report=html` 生成 HTML 覆盖率报告。用例集中在认证、鉴权、账户与角色 CRUD、上传路径穿越、SQL 只读约束与生产环境 fail-closed 门禁。`ruff check . --select E9,F63,F7,F82` 通过，且在 CI 中是硬门禁。
 
 ---
 
