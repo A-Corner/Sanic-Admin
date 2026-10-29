@@ -88,12 +88,10 @@ echo "总数=$TOTAL 命中=$HIT $([ "$TOTAL" = "$HIT" ] && echo OK || echo 不�
 │   ├── __init__.py             # create_app()：蓝图/中间件/监听器注册 + /health
 │   ├── config.py               # 多环境配置（development/testing/production）
 │   ├── api/
-│   │   ├── __init__.py         # api_bp(Blueprint.group) + v1_bp，⚠ 当前导入即失败
+│   │   ├── __init__.py         # 导出 api_bp(Blueprint.group(v1_bp, database_bp, compression_bp)) 与 v1_bp
 │   │   ├── base.py             # BaseResource / CRUDResource
 │   │   ├── responses.py        # APIResponse / APIError 统一响应
 │   │   ├── validators.py       # 参数校验规则
-│   │   ├── routes.py           # 另一套 api_bp（历史遗留，未被 create_app 使用）
-│   │   ├── example.py          # 文档装饰器用法示例（同样受 ⚠ 影响）
 │   │   └── resources/          # account/role/profile/log/setting/upload/cache/
 │   │                           # dashboard*/database/compression
 │   ├── auth/                   # authentication / authorization / verification / routes
@@ -108,11 +106,26 @@ echo "总数=$TOTAL 命中=$HIT $([ "$TOTAL" = "$HIT" ] && echo OK || echo 不�
 │   └── web/                    # Jinja2 页面路由（login/index），⚠ 未被 create_app 注册
 ├── tests/
 │   ├── conftest.py             # app/client/auth_headers 等 fixture
-│   ├── test_account_api.py  test_auth.py  test_cache.py
-│   ├── test_db_optimizer.py  test_integration.py  test_performance.py
-│   ├── test_docs/{test_decorators,test_openapi,test_swagger}.py
-│   ├── utils/{__init__,data_generator,helpers}.py
-│   └── generate_coverage_report.py
+│   ├── test_auth.py  test_authorization.py  test_login_ratelimit.py
+│   │   # ↑ 认证与授权（另含 password_reset / verify_account /
+│   │   #   must_change_password / self_registration 等）
+│   ├── test_account_crud.py  test_role_crud.py  test_profile_and_log_api.py
+│   │   # ↑ 账户 / 角色 / 档案与日志 API
+│   ├── test_cache_*.py  test_memory_cache_and_base_units.py
+│   │   # ↑ 缓存 / 数据库分析 / 压缩（test_cache_database_compression_api.py 为合并入口）
+│   ├── test_dashboard_api.py   # 仪表盘 9 个只读聚合端点
+│   ├── test_mcp_*.py           # MCP 服务、写入路径与注册（5 个文件）
+│   ├── test_migrate_v0_3_2.py  test_migrations_aerich.py  test_gen_migrations.py
+│   │   # ↑ 迁移链路
+│   ├── test_specgen.py  test_spec005_migration_data.py   # 规格生成与数据迁移
+│   ├── test_csrf.py  test_upload_security.py  test_sql_readonly.py
+│   │   test_request_size.py  test_trusted_proxies_{config,e2e}.py
+│   │   # ↑ 安全（CSRF / 上传 / SQL 只读 / 请求体大小 / 可信代理）
+│   ├── test_amis_*.py          # AMIS 静态资源与 raw path 绕过
+│   ├── test_docs_openapi_units.py  test_openapi_excludes_405_fallback.py
+│   │   # ↑ OpenAPI 文档生成（单文件，不在 test_docs/ 目录下）
+│   ├── generated/              # 由 specgen 生成的用例（test_gen_{customer,order,ticket}.py）
+│   └── （其余按主题命名，用 `ls tests/` 看完整清单）
 ├── frontend/                   # Vue 3 + Element Plus（实验性前端，20 个受版本控制文件）
 │   ├── package.json  vue.config.js  .env.development  .env.production
 │   ├── public/index.html
@@ -282,9 +295,11 @@ cd amis && npm install               # 实测：added 147 packages in 21s
 npm start                           # 实测：服务起来，GET / → 200（server.js:46 映射到 index.html）
 ```
 
-> `frontend/` 的 `npm run lint` **当前必然失败**：仓库里没有跟踪 `.eslintrc*` 或
-> `babel.config.js`，ESLint 用默认 espree 解析器读 `.js`/`.vue`，报
-> `Parsing error: The keyword 'import' is reserved`。这不是你的改动引入的。
+> `frontend/` 的 `npm run lint` **当前必然失败**（核实于 2026-10-29）：仓库里没有跟踪
+> `.eslintrc*` 或 `babel.config.js`，ESLint 用默认 espree 解析器读 `.js`/`.vue`，报
+> `Parsing error: The keyword 'import' is reserved`。
+> **判据**：若你的报错就是 `Parsing error: The keyword 'import' is reserved` → 已知问题，不是你的改动引起的；
+> 若是其他错误 → 是你的改动引起的，需要处理。
 >
 > `amis/` 的 `npm start` 跑的是 `node server.js`——一个**零依赖**开发服务器（只用
 > Node 内置 `http`/`fs`/`path`，没有 express、没有 `sendFile`）。根路径 `/` 由
@@ -306,11 +321,11 @@ npm start                           # 实测：服务起来，GET / → 200（se
 # 全量
 .venv/bin/pytest -q
 
-# 单个测试文件
+# 单个测试文件（顶层测试模块）
 .venv/bin/pytest tests/test_auth.py -q
 
-# 单个文件
-.venv/bin/pytest tests/test_docs/test_decorators.py -q
+# 单个测试文件（文档/OpenAPI 单元测试，注意是单文件不是 test_docs/ 目录）
+.venv/bin/pytest tests/test_docs_openapi_units.py -q
 
 # CI 等价命令
 .venv/bin/pytest --cov=app tests/ --cov-report=xml
@@ -365,10 +380,14 @@ echo "HEAD=$(git rev-parse --short HEAD)" && \
 ### 3.3 覆盖率报告
 
 ```bash
-.venv/bin/python tests/generate_coverage_report.py
+# 终端摘要（本地查看用）
+.venv/bin/pytest --cov=app tests/ --cov-report=term -q
+
+# HTML 报告，生成到 htmlcov/ 后直接用浏览器打开 htmlcov/index.html
+.venv/bin/pytest --cov=app tests/ --cov-report=html
 ```
 
-**覆盖率数字请自行运行上面这条命令。** 本节不列具体百分比 —— 原因同 §3.2：
+**覆盖率数字请自行运行上面这两条命令。** 本节不列具体百分比 —— 原因同 §3.2：
 覆盖率随代码漂移，写死会变成假判据。历次版本的实测数字见各
 `docs/release/v*-release-notes.md`。
 
@@ -377,7 +396,15 @@ echo "HEAD=$(git rev-parse --short HEAD)" && \
 `.github/workflows/ci.yml`：push/PR 到 `main`、`master`、`develop`、`vj-mp3` 时，
 在 Python 3.10 / 3.11 / 3.12 三个版本上跑
 `ruff check . --select E9,F63,F7,F82` + `pytest --cov=app tests/ --cov-report=xml`。
-**按当前基线，pytest 这一步在 CI 上必然失败**（与本地一致，见 §3.2）。
+**若 `pytest` 在这三个版本上失败，先判断是不是你的改动引起的**：
+在 `origin/master` 上跑同一命令作对照 —— 失败项完全相同 → 与你的改动无关；
+出现**新的**失败项 → 是你的改动引起的。**不要假设「红是正常的」。**
+
+> **这里的原文曾写「按当前基线，pytest 这一步在 CI 上必然失败（与本地一致，见 §3.2）」——
+> 该结论在写下时即不成立**：`v0.2.0`（`a0a6b27`）的本文 §3.2 自述
+> `pytest -q` → **95 passed，exit 0**，同一次提交的 CI（run 39753525856）
+> 三个 Python 版本的 `Test with pytest` 也全部 success。
+> 保留这段记录是因为「写下的结论与自己文档矛盾」正是 §3.6 要防的失败形态。
 
 ### 3.5 浏览器 E2E 门禁（改 AMIS 页面必跑）
 
@@ -1525,7 +1552,7 @@ prod 抛 `ConfigError`（见 §5.2）。缓存键前缀 `CACHE_KEY_PREFIX = "san
 | 2 | `app.cache.backends` 模块缺失 | 已由 M1 补齐，实际结构 `app/cache/{base,memory,redis}.py` | 已解决 |
 | 3 | `BlueprintGroup.add_blueprint` 不存在 | M1 改用 `Blueprint.group(v1_bp, database_bp, compression_bp, url_prefix='/api')` | 已解决：`/api/v1` 正常挂载，OpenAPI 规范 66 条 path |
 | 4 | `create_app()` 未调用 `setup_docs()` | M1 已接线，由 `ENABLE_API_DOCS` 控制（开发开、生产关） | 已解决：`/swagger` 302→200、`/redoc` 200、`/swagger.json` 200 |
-| 5 | `tests/test_docs/` 两个同名 `Sanic("test_app")` fixture | 测试套件已重建 | 已解决 |
+| 5 | `tests/test_docs/` 两个同名 `Sanic("test_app")` fixture（**该目录已随测试套件重建删除**，现为单文件 `tests/test_docs_openapi_units.py`） | 测试套件已重建 | 已解决 |
 | 6 | `test_openapi_spec_generation` 尾斜杠断言 | 测试套件已重建 | 已解决 |
 | 7 | `two_step_bp` / `role_bp` / `account_bp` 无路由 | **仍未补齐**：三个蓝图只有定义（`app/auth/routes.py:38-40`）与注册（`app/__init__.py:278`），`grep -rn '@role_bp\|@account_bp\|@two_step_bp' app/` 命中 0 处。角色与账户 API 实际在 `/api/v1/roles`（`app/api/resources/role.py:598`）、`/api/v1/accounts`（`app/api/resources/account.py:476`） | `/roles`、`/account`、`/two-step` 仍 404 |
 | 8 | `app/web/routes.py` 的 `register_web_blueprints()` 从未调用 | 仍未调用；`frontend/templates/` 不存在 | `/login`、`/index` 仍 404。该模块是 Vue 实验线，AMIS 主线不依赖它 |
