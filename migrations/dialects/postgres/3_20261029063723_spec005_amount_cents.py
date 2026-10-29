@@ -38,10 +38,16 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
         INSERT INTO "orders" ("id", "created_at", "updated_at", "deleted", "title", "amount", "quantity", "status", "customer_id")
         SELECT "id", "created_at", "updated_at", "deleted", "title",
             CASE
+                -- 幂等防呆：**查源表 orders_old 的列类型**（RENAME 之后 orders 已被新表
+                -- 占用，查它得到 integer，守卫恒命中 → 换算分支成死代码。）
+                -- 不用值判定：浮点列里 100.00 元也是整数值，会被误判、缩水 100 倍。
                 WHEN EXISTS (SELECT 1 FROM information_schema.columns c
-                             WHERE c.table_name = 'orders' AND c.column_name = 'amount'
+                             WHERE c.table_name = 'orders_old' AND c.column_name = 'amount'
                                AND c.data_type <> 'double precision')
                     THEN "amount"
+                -- 断言右侧必须 ROUND（PG 这行原本就对）。注意 ROUND(double) 是
+                -- ties-to-even，但本场景 x*100 距整数要么 <1.19e-7 要么 =0.5，
+                -- 不会落在「恰好 .5 的浮点表示」上，两种舍入方向不触发。
                 WHEN ABS("amount" * 100 - ROUND("amount" * 100)) <= 1e-3
                     THEN CAST(ROUND("amount" * 100) AS BIGINT)
                 ELSE NULL

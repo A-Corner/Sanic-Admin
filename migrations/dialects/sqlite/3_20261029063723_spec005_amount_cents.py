@@ -24,11 +24,16 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
             --   浮点且 ×100 后在 1e-3 容差内是整数 → 精确换算（如 12.34 → 1234）
             --   否则 → NULL，违反 NOT NULL，整条 INSERT 原子失败，迁移中止、0 行写入
             -- 违例行定位（人工）：SELECT "id","amount" FROM "orders_old"
-            --   WHERE ABS("amount"*100 - CAST("amount"*100 AS INTEGER)) > 1e-3;
+            --   WHERE ABS("amount"*100 - ROUND("amount"*100)) > 1e-3;
+            -- **断言右侧必须用 ROUND，不能用 CAST**：CAST 是向零截断，
+            -- 1.14*100=113.99999999999999 会被截成 113，产生 1.0 的假残差，
+            -- 把合法金额判成「不精确」（实测：1.14/2.28/0.29/0.57/19.99 共 5/8 被判死）。
+            -- ROUND 后残差才有意义：精确值残差 ≤1.19e-7，半分尾数残差 =0.5。
+            -- 换算侧的 CAST 在断言通过后是无损的（此时 x*100 距整数 <1e-3）。
             CASE
                 WHEN typeof("amount") = 'integer' THEN "amount"
-                WHEN ABS("amount" * 100 - CAST("amount" * 100 AS INTEGER)) <= 1e-3
-                    THEN CAST("amount" * 100 AS INTEGER)
+                WHEN ABS("amount" * 100 - ROUND("amount" * 100)) <= 1e-3
+                    THEN CAST(ROUND("amount" * 100) AS INTEGER)
                 ELSE NULL
             END,
             "quantity", "status", "customer_id"

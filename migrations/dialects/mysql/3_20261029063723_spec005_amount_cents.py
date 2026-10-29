@@ -33,11 +33,19 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
         INSERT INTO `orders` (`id`, `created_at`, `updated_at`, `deleted`, `title`, `amount`, `quantity`, `status`, `customer_id`)
         SELECT `id`, `created_at`, `updated_at`, `deleted`, `title`,
             CASE
+                -- 幂等防呆：**查源表 orders_old 的列类型**（不是 orders——RENAME 之后
+                -- orders 已被新表占用，查它得到 int，守卫恒命中、换算分支成死代码，
+                -- 浮点值原样写进 INT 列被静默截断、金额缩水 100 倍）。
+                -- 不用「值是否为整数」判定：浮点列里 100.00 元也是整数值，会被误判为
+                -- 「已换算」，结果 100 分 = 1 元，同样缩水 100 倍。
                 WHEN EXISTS (SELECT 1 FROM information_schema.columns c
-                             WHERE c.table_schema = DATABASE() AND c.table_name = 'orders'
+                             WHERE c.table_schema = DATABASE() AND c.table_name = 'orders_old'
                                AND c.column_name = 'amount' AND c.data_type <> 'double')
                     THEN `amount`
-                WHEN ABS(`amount` * 100 - CAST(`amount` * 100 AS SIGNED)) <= 1e-3
+                -- 断言右侧必须 ROUND，不能 CAST：CAST 向零截断，
+                -- 1.14*100=113.99999999999999 会被截成 113，产生 1.0 的假残差，
+                -- 把合法金额判成不精确（实测 1.14/2.28/0.29/0.57/19.99 共 5/8 被判死）。
+                WHEN ABS(`amount` * 100 - ROUND(`amount` * 100)) <= 1e-3
                     THEN CAST(ROUND(`amount` * 100) AS SIGNED)
                 ELSE NULL
             END,
