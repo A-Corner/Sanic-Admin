@@ -107,7 +107,7 @@ The five tools are read-only: `list_resources`, `describe_resource`, `validate_s
 
 > **Project status — read this first**
 >
-> - The latest release is **[v0.4.2](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.2)** (2026-10-27), which puts the MCP write path behind account-level `spec:write` permission, on top of [v0.4.1](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.1) (ISO 8601 time fields, AMIS 6.13.0) and v0.4.0 (the spec generator). The original rebuild landed in **v0.2.0**. Everything below was verified by running it, and anything that could not be verified is listed under *Known limitations* in the per-release [release notes](docs/release/).
+> - The latest release is **[v0.4.3](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.3)** (2026-10-28, documentation corrections and test-guard backfill), after [v0.4.2](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.2) (2026-10-27), which puts the MCP write path behind account-level `spec:write` permission, itself on top of [v0.4.1](https://github.com/A-Corner/Sanic-Admin/releases/tag/v0.4.1) (ISO 8601 time fields, AMIS 6.13.0) and v0.4.0 (the spec generator). The original rebuild landed in **v0.2.0**. Everything below was verified by running it, and anything that could not be verified is listed under *Known limitations* in the per-release [release notes](docs/release/).
 > - **Upgrading from v0.3.1 or earlier** requires running the migration script described in the [v0.3.2 release notes](docs/release/v0.3.2-release-notes.md) — it adds `account.must_change_password`. Fresh installations need no migration.
 > - **Not production-ready yet.** Do not deploy this to a public environment.
 > - **No credentials are baked into the repository.** There is no default administrator password. The first-run administrator password is generated at startup (development only) or must be supplied via `INITIAL_ADMIN_PASSWORD`. Since v0.3.4 that value is held to the password strength rule and **production refuses to start** if it is too weak.
@@ -346,7 +346,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-> **Current test status:** `pytest` reports **`171 passed`, 0 failed, 0 errors** (collection: 171 tests, ~65 s; about 80 s with `--cov=app`). Coverage over `app/` is **52 %** — the suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
+> **Current test status:** this file does not pin a test count or a coverage percentage — both drift with every commit. Run `pytest tests/ -q` for the current number of tests and the elapsed time; `pytest --cov=app tests/ --cov-report=html` writes an HTML coverage report. The suite concentrates on authentication, authorisation, account and role CRUD, upload path traversal, SQL read-only enforcement and the production fail-closed gates. `ruff check . --select E9,F63,F7,F82` passes, and that is a hard gate in CI.
 
 **Browser E2E gate (console changes).** The API suite cannot see AMIS page behaviour. If you change
 anything under `amis/`, run the console gate before merging:
