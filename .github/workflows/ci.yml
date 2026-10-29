@@ -271,6 +271,15 @@ jobs:
         INITIAL_ADMIN_PASSWORD: ci-check-only
       run: python scripts/check_dialect_ddl.py ${{ matrix.dialect }} "${{ matrix.existing_url }}" --existing
 
+    # SPEC-005 数据换算场景（非空 orders 表）：空库时迁移 CASE 的分支一行都不命中，
+    # 「守卫查错表 / 断言用 CAST」两类缺陷在空库上必然全绿（PR #89 审核实测）。
+    # 必须在有数据的库上真跑：逐行断言 amount == round(原值*100)，另验半分尾数中止。
+    - name: "Amount seed conversion on non-empty orders (SPEC-005)"
+      env:
+        SANIC_ENV: development
+        INITIAL_ADMIN_PASSWORD: ci-check-only
+      run: python scripts/check_dialect_ddl.py ${{ matrix.dialect }} "${{ matrix.fresh_url }}" --with-amount-seed
+
     # 时区契约（v0.4.1）：naive 按 UTC 解释、+08:00 换算成 UTC、跨时区一致。
     # **必须在真方言上跑**：MySQL 的 DATETIME 本身不带时区，SQLite 上 Tortoise
     # 会自己归一，本地绿不代表这里也对。
