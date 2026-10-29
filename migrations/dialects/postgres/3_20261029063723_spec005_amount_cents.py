@@ -12,7 +12,7 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
         --   断言与换算都用 ROUND(REAL 数值)，语义与另两方言一致（half-away）。
         -- 断言实现：INSERT 的 CASE 里不精确行置 NULL，违反 NOT NULL → 语句原子失败
         -- → 迁移中止、0 行写入。违规行定位（人工）：
-        --   SELECT "id","amount" FROM "orders"
+        --   SELECT "id","amount" FROM "orders_old"
         --     WHERE ABS("amount"*100 - ROUND("amount"*100)) > 1e-3;
         -- 幂等防呆：amount 已非 double precision（库已按新模型建过）时等值搬运。
         ALTER TABLE "orders" RENAME TO "orders_old";

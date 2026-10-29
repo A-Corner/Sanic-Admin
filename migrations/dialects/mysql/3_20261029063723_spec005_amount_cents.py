@@ -11,8 +11,8 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
         -- 半分尾数残差 0.5，1e-3 两侧余量最大（4 / 2.6 个数量级）。
         -- 断言实现：INSERT 的 CASE 里不精确行置 NULL，违反 NOT NULL → 语句原子失败
         -- → 迁移中止、0 行写入。违规行定位（人工）：
-        --   SELECT `id`,`amount` FROM `orders`
-        --     WHERE ABS(`amount`*100 - CAST(`amount`*100 AS SIGNED)) > 1e-3;
+        --   SELECT `id`,`amount` FROM `orders_old`
+        --     WHERE ABS(`amount`*100 - ROUND(`amount`*100)) > 1e-3;
         -- 幂等防呆：amount 已非 DOUBLE（库已按新模型建过，如 CI --existing 分支）
         -- 时等值搬运，不错误 ×100。
         RENAME TABLE `orders` TO `orders_old`;
