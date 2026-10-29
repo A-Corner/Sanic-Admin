@@ -26,7 +26,7 @@ These tools are not bad — the difference is where the source of truth lives. H
 
 ```bash
 docker compose up -d
-# then open http://127.0.0.1:22222 — the compose path is exercised on every
+# then open http://127.0.0.1:22230 — the compose path is exercised on every
 # push by the Docker Acceptance workflow:
 # https://github.com/A-Corner/Sanic-Admin/actions/workflows/docker.yml
 ```

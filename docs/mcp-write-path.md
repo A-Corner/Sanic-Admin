@@ -49,7 +49,10 @@ AI 通过 MCP 提交规格变更，系统产出：
 
 - `resource` 必须匹配 `^[a-z][a-z0-9_]{0,40}$`（`_guard_resource_name`；上限 41 字符）
 - `spec_yaml` 上限 64 KB（复用 `_guard_spec_text`，含 YAML 锚点/别名与嵌套深度防护）
-- `note` 上限 200 字符，仅进 commit message 与返回值，**不进任何 shell 命令**
+- `note` 仅进 commit message 与返回值，**不进任何 shell 命令**。
+  **当前无长度校验**：`resource` 有 `_guard_resource_name`、`spec_yaml` 有 `_guard_spec_text`，
+  `note` 没有对应守卫。调用方若需限制请自行校验；
+  若 MCP 层要补，可在 `write_tools.py` 的 `propose_spec_change` 入口加 `_guard_note`。
 
 **处理步骤**
 
