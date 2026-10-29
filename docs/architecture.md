@@ -21,7 +21,7 @@ graph TD
     Client[浏览器 / AMIS / curl]
 
     subgraph Sanic["Sanic 23.6 应用进程"]
-        subgraph MW["中间件链 app/middleware"]
+        subgraph MW["中间件链 app/middleware（下列编号为注册序，非执行序）"]
             MW1["注册1 响应: CORS 头<br/>security_middleware.py:73-88"]
             MW2["注册2 请求: OPTIONS 预检短路<br/>security_middleware.py:90-94"]
             MW2B["注册2b 请求: CSRF 校验（enforce_csrf）<br/>security_middleware.py:96-126"]
@@ -83,16 +83,30 @@ graph TD
   1. `setup_error_handlers(app)`（`:58`）——注册异常处理器，不是中间件
   2. `setup_security_middleware(app)`（`:59`）——注册 **CORS 响应中间件** + **OPTIONS 请求中间件** + **`enforce_csrf` CSRF 请求中间件**
   3. `_setup_request_logging(app)`（`:60`）——注册 **请求日志** + **响应日志**中间件
-  4. `AuthMiddleware()`（`:64`）——注册认证请求中间件
+  4. `AuthMiddleware()`（`:64`）——注册认证请求中间件，显式 `priority=AUTH_MIDDLEWARE_PRIORITY`（100）
 
-  随后 `app/__init__.py:186` 再注册 gzip 响应压缩中间件（`configure_compression`）。
+  随后 `app/__init__.py:186` 再注册 gzip 响应压缩中间件（`configure_compression`），
+  `app/__init__.py:193` 用 `@app.on_request`（等价 `@app.middleware('request')`）注册
+  `reject_null_byte_path`。`app/api/__init__.py:80` 另在 `/api` 蓝图组上挂
+  `_require_api_authentication`。
+
+  ```text
+  执行顺序（finalize 后实测，详见 §1.2）：
+    请求: AuthMiddleware(100) → handle_preflight → enforce_csrf → log_request
+          → reject_null_byte_path → [仅 /api] _require_api_authentication
+    响应: compression_middleware → log_response → add_cors_headers
+  ```
+
+  **注册次序 ≠ 执行次序**：`AuthMiddleware` 是第 4 个注册的，却因 priority=100 排在最前。
 
   **【已实测】** M1 已移除 `FileDownloadCounterMiddleware`（原 `:49-56`，包在 try/except 里
   做 development/testing 降级、production fail-closed）。上传目录不再静态托管，下载计数改由
   `app/api/resources/upload.py:380` 在资源内部原子自增——因此中间件链少了一环。
 
-- **Sanic 的中间件执行顺序**（实测，见 §1.2）：请求中间件按注册顺序执行；
-  响应中间件按**注册逆序**执行。
+- **Sanic 的中间件执行顺序**（实测，见 §1.2）：**执行顺序由 priority 决定，不是注册顺序**。
+  同为 priority=0 时，请求中间件按注册顺序执行、响应中间件按注册逆序执行；
+  但 `AuthMiddleware` 以 priority=100 注册，因此它在请求阶段**最先**执行。
+  最终顺序须以 `finalize_middleware()` 之后的 deque 为准。
 
 - **压缩与 CORS 的先后**：`configure_compression` 在 `register_all_middlewares` **之后**调用，
   所以压缩中间件后注册 ⇒ 在响应阶段**先于** CORS 执行。
@@ -103,30 +117,54 @@ graph TD
 
 ### 1.2 中间件顺序实测
 
-**【实测】** 用 Sanic 23.6.0 起一个最小应用注册 3 个请求 + 3 个响应中间件：
+**【实测】** 用 Sanic 25.12.1 起一个最小应用注册 3 个请求 + 3 个响应中间件（全部 priority=0）：
 
 ```
 请求中间件: req1 → req2 → req3 → handler      （注册顺序）
 响应中间件: resp3 → resp2 → resp1              （注册逆序）
 ```
 
-Sanic 源码印证：`register_middleware()` 对 REQUEST 用 `append`、对 RESPONSE 用 `appendleft`
-插入 deque（`sanic/app.py` 的 `register_middleware`），因此后注册的响应中间件排在队首；
-`_run_response_middleware` 按 deque 顺序遍历，**任一中间件返回非 None 的响应就会 break**。
+Sanic（本项目 `requirements.txt` 固定 `sanic==25.12.1`）源码印证：注册时所有中间件先进
+`_future_middleware`，`finalize_middleware()` 再按 `Middleware.order == (priority, -definition)`
+排序——请求侧**降序**、响应侧降序后**反转**，于是请求侧 priority 大者先跑、同优先级按注册
+先后，响应侧则相反（后注册的先跑）。`_run_response_middleware` 按 deque 顺序遍历，
+**任一中间件返回非 None 的响应就会被替换并 break**。
 
-**【实测】** 在本项目真实应用上 dump 两个 deque（`app.request_middleware` / `app.response_middleware`）：
+> 注意：`app.request_middleware` 在 `finalize_middleware()` 之前只是插入顺序，
+> 不是执行顺序；dump 时若绕开 Sanic 的 finalize（直接 `create_app()` 后读 deque）
+> 会得到与运行时相反的结论。
+
+**【实测】** 在本项目真实应用上先 `create_app("testing")`，再 `app.finalize_middleware()`
+（必须先 finalize：finalize 前 deque 只是插入顺序，不是执行顺序），然后 dump
+`app.request_middleware` / `app.response_middleware`，以及一条 `/api` 路由的
+`route.extra.request_middleware`（含蓝图组中间件）：
 
 ```
-REQUEST  执行顺序: 1. handle_preflight  2. log_request  3. AuthMiddleware
-RESPONSE 执行顺序: 1. compression_middleware  2. log_response  3. add_cors_headers
+REQUEST  执行顺序（/api/* 路由，含蓝图组中间件）:
+  1. AuthMiddleware              priority=100
+  2. handle_preflight            priority=0   （OPTIONS 预检短路）
+  3. enforce_csrf                priority=0
+  4. log_request                 priority=0
+  5. reject_null_byte_path       priority=0
+  6. _require_api_authentication priority=0   （仅 /api 蓝图组，见 app/api/__init__.py:80）
+
+RESPONSE 执行顺序:
+  1. compression_middleware  2. log_response  3. add_cors_headers
 ```
 
 即：
 
-- **请求阶段**：`OPTIONS 预检短路 → 请求日志 → 认证中间件`。
+- **请求阶段**：`认证中间件 → OPTIONS 预检短路 → CSRF 校验 → 请求日志 → 空字节路径拦截`，
+  `/api/*` 末尾再叠一层蓝图组认证。
 - **响应阶段**：`gzip 压缩 → 耗时日志 → CORS 头`。
   压缩最早执行、且必须原地修改响应并返回 `None`，
   否则后面的 CORS 头会被跳过（`compression.py:251` 注释已说明此约束）。
+
+`AuthMiddleware` 排在最先不是笔误：`app/middleware/__init__.py` 以
+`priority=AUTH_MIDDLEWARE_PRIORITY`（100）注册它，而 `Middleware.order` 是
+`(priority, -definition)`、finalize 时按该键**降序**排序，故 priority 大的先跑，
+其余 priority=0 的中间件之间才按注册先后排序。**注册顺序 ≠ 执行顺序**，
+仅按 `register_all_middlewares` 的调用次序推断会得到相反结论。
 
 ### 1.3 蓝图层级
 
@@ -306,7 +344,7 @@ production 下（`ENABLE_API_DOCS=False`，实测）：
 | 文件 | 职责 |
 |---|---|
 | `app/middleware/__init__.py` | `register_all_middlewares(app)`——集中注册全部中间件 |
-| `app/middleware/error_handler.py` | 三级异常处理：`BaseError`（业务异常，返回 `exception.to_dict()`）→ `SanicException` → 兜底 `Exception`（DEBUG 时附 traceback） |
+| `app/middleware/error_handler.py` | 三级异常处理：`BaseError`（业务异常，由 `_error_body()` 构造 `{success, message, error}` 响应体）→ `SanicException` → 兜底 `Exception`（DEBUG 时附 traceback） |
 | `app/middleware/security_middleware.py` | CORS 响应中间件、OPTIONS 预检短路、`enforce_csrf` **全局 CSRF 请求中间件**（双提交 cookie，`:96-126`）、`issue_csrf_token` 下发 token——**不是**按路由挂的装饰器 |
 | `app/middleware/auth_middleware.py` | `AuthMiddleware`——从 `Authorization: Bearer` 或 Cookie 提取令牌，查有效会话并挂到 `request.ctx.authentication_session`；**失败不中断请求** |
 | `app/middleware/compression.py` | gzip 响应压缩：阈值 / 可压缩类型 / 排除路径 / 压缩统计 |
@@ -339,7 +377,7 @@ production 下（`ENABLE_API_DOCS=False`，实测）：
 | 文件 | 职责 |
 |---|---|
 | `app/services/utils.py` | `get_ip`（`X-Forwarded-For` → `X-Real-IP` → `request.ip`）、`get_code`（secrets 随机验证码）、`get_request_value`（表单优先于 JSON）、`utcnow` / `ensure_aware` / `get_expiration_date`、统一响应 `json(message, data, status)` |
-| `app/services/exceptions.py` | 全部业务异常类型，继承 `BaseError`，携带 `status_code` / `error_code` / `message`；`to_dict()` 直接转 JSON 响应体 |
+| `app/services/exceptions.py` | 全部业务异常类型，继承 `BaseError`，携带 `status_code` / `error_code` / `message`；`to_dict()` 返回 `{error, message, status}`，但**不在错误响应路径上**（错误响应由 `app/middleware/error_handler.py` 的 `_error_body()` 构造，详见 §2.7 与 §3 末尾说明） |
 
 ### 2.10 `app/web` —— Web 页面渲染
 
@@ -475,7 +513,13 @@ curl -X POST /auth/associated -H "Authorization: Bearer <JWT>" # 200
 | `@requires_permission("system:database:query")` | `:213` | `"资源:操作"` 字符串形式；最后一个冒号之后是操作，之前是资源（如 `system:database` 的 `query`）；不含冒号时按资源的 `all` 判定 |
 
 未认证 → 401（`AuthenticationError`）；已认证但权限不足 → 403（`InsufficientPermissionsError`）。
-两者都经 `app/services/exceptions.py` 的 `BaseError.to_dict()` 变成统一 JSON 响应体。
+两者都由 `app/middleware/error_handler.py:20-22` 的 `_error_body()` 构造统一 JSON 响应体
+（`{success: false, message, error}`）——**不是** `BaseError.to_dict()`。
+
+`BaseError.to_dict()`（`app/services/exceptions.py:23-29`）返回
+`{error, message, status}`，与 `_error_body()` 的 `{success, message, error}` **键名不同、不兼容**。
+它的唯一调用方是 `SecurityError.json` 属性（`app/services/exceptions.py:39-41`），
+而该属性本身在仓库内（含 `tests/`）无任何调用点，因此 `to_dict()` 当前不在任何错误响应路径上。
 
 **【读码确认】受保护管理员的判定（`app/api/resources/role.py:160-200`）**
 
@@ -1085,7 +1129,7 @@ main.py  requirements.txt  SECURITY.md  .github/workflows/ci.yml  tests/conftest
 | OPTIONS 预检 | ✅ 204 + CORS 头 |
 | gzip（3 KB 响应 + `Accept-Encoding: gzip`） | ✅ `Content-Encoding: gzip` + `Vary: Accept-Encoding`，且 CORS 头仍在 |
 | 小响应（< 1 KB） | ✅ 不压缩 |
-| 中间件顺序（dump `app.request_middleware` / `app.response_middleware`） | 请求：`handle_preflight → log_request → AuthMiddleware`；响应：`compression_middleware → log_response → add_cors_headers` |
+| 中间件顺序（`finalize_middleware()` 后 dump `app.request_middleware` / `app.response_middleware`） | 请求：`AuthMiddleware(priority=100) → handle_preflight → enforce_csrf → log_request → reject_null_byte_path`（`/api/*` 末尾再加 `_require_api_authentication`）；响应：`compression_middleware → log_response → add_cors_headers` |
 | `pytest` | 171 passed, 0 failed, 0 errors（`app/` 覆盖率 52%） |
 
 **未能实测**：production 下 Redis 不可达的 `ConfigError` 路径、MySQL / PostgreSQL 真实连接。
