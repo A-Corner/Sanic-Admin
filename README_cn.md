@@ -26,7 +26,7 @@
 ```bash
 # 1) 起服务（compose 路径由 CI 的 Docker Acceptance 每次 push 实跑验证：
 #    https://github.com/A-Corner/Sanic-Admin/actions/workflows/docker.yml ）
-docker compose up -d        # 打开 http://127.0.0.1:22222
+docker compose up -d        # 打开 http://127.0.0.1:22230
 
 # 2) 一份规格生成一个模块（输出为 2026-10-25 在 v0.4.1 基线上的实跑结果）
 cat > specs/asset.yaml <<'YAML'
