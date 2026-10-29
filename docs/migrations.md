@@ -2,7 +2,19 @@
 
 迁移工具：aerich 0.7.2（已写入 `requirements.txt`），配置见 `app/aerich_config.py`（`TORTOISE_ORM`）与 `pyproject.toml` 的 `[tool.aerich]`。
 
-`TORTOISE_ORM` 的数据库地址直接取 `app.config.settings.DATABASE_URL`，与 `app.models.init_db` 同源，受 `SANIC_ENV` 和 `DATABASE_URL` 环境变量控制，没有第二份连接配置。迁移文件在 `migrations/models/`，当前 1 条基线（`0_*`）+ 2 条增量（`1_*`、`2_*`）。
+`TORTOISE_ORM` 的数据库地址直接取 `app.config.settings.DATABASE_URL`，与 `app.models.init_db` 同源，受 `SANIC_ENV` 和 `DATABASE_URL` 环境变量控制，没有第二份连接配置。迁移文件在 `migrations/models/`。**具体有几条不要看本文档**——它随每次新增迁移而变，
+写死的数字迟早失准（本文档此前写「1 条基线 + 2 条增量」，加第 3 条后就错了）。
+
+以命令结果为准：
+
+```bash
+ls migrations/models/            # 文件总数
+ls migrations/models/0_*         # 基线（每个方言一份，见 migrations/dialects/）
+ls migrations/models/[1-9]_*     # 增量
+```
+
+方言基线在 `migrations/dialects/{sqlite,mysql,postgres}/0_*`，切换方言用
+`scripts/migrations/select_dialect_baseline.py <dialect>`（见本文档 §2b）。
 
 以下命令均在仓库根目录执行，已按目标环境设置好 `SANIC_ENV` / `DATABASE_URL`。
 
