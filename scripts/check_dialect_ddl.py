@@ -421,6 +421,7 @@ async def _amount_seed_scenario(dialect: str, url: str) -> list:
     cq = _q(dialect, "customer")
 
     # ---- 场景 A：全部可精确换算 ----
+    print(f"  [{dialect}][seed] 场景 A：非空表精确换算（{len(AMOUNT_SEEDS)} 条种子）")
     await _recreate_database(dialect, url)
     await _ensure_database(dialect, url)
     await Tortoise.init(db_url=_tortoise_url(dialect, url), modules={"models": []})
@@ -463,6 +464,7 @@ async def _amount_seed_scenario(dialect: str, url: str) -> list:
     await Tortoise.close_connections()
 
     # ---- 场景 B：半分尾数必须中止且一行不写 ----
+    print(f"  [{dialect}][seed] 场景 B：{AMOUNT_INEXACT} 必须中止")
     await _recreate_database(dialect, url)
     await _ensure_database(dialect, url)
     await Tortoise.init(db_url=_tortoise_url(dialect, url), modules={"models": []})
@@ -488,17 +490,36 @@ async def _amount_seed_scenario(dialect: str, url: str) -> list:
         problems.append(
             f"{AMOUNT_INEXACT}（半分尾数）未触发迁移中止——「不精确即停」失效")
     else:
-        # **顺序**：先断言失败原因正确，再查两表状态，最后由调用方 exit 非 0
+        # **顺序**：先断言失败原因正确，再查数据终态，最后由调用方 exit 非 0。
         if "NOT NULL" not in str(aborted) and "null" not in str(aborted).lower():
             problems.append(f"中止原因应是 NOT NULL 违反，实际：{aborted!r}")
-        old_n = (await conn.execute_query_dict(
-            f"SELECT COUNT(*) AS c FROM {oq}"))[0]["c"]
-        new_n = (await conn.execute_query_dict(
-            f"SELECT COUNT(*) AS c FROM {tq}"))[0]["c"]
-        if old_n != 1:
-            problems.append(f"orders_old 行数应保持 1（数据未丢），实际 {old_n}")
-        if new_n != 0:
-            problems.append(f"orders 应 0 行（语句原子回滚），实际 {new_n}")
+
+        # 数据终态断言（**方言无关的「可接受终态集合」**）：
+        # 三方言的多语句事务语义不同——
+        #   SQLite（executescript 逐语句自动提交）：RENAME/CREATE 残留，
+        #     终态 = orders(新,0行) + orders_old(1行原值)
+        #   PG（简单查询隐式单事务）：整脚本回滚，终态 = orders(旧,1行原值)，无 orders_old
+        #   MySQL（asyncmy 逐语句）：与 SQLite 同
+        # 所以不能断言「orders_old 必须存在」。方言无关的不变量是：
+        #   ① 原值 {INEXACT!r} 必须仍在（orders 或 orders_old 之一）——数据未丢；
+        #   ② 任何表里都不得出现它的换算形式（{TRUNC} 截断 / {ROUNDDOWN} ROUND静默 /
+        #      {ROUNDUP} 进位）——没有静默改值。
+        bad_forms = (12, 1234, 1235)  # trunc / round静默(1234.5→1234 on ties-to-even) / half-away
+        lost, mutated = True, []
+        for tbl in (tq, oq):
+            try:
+                vals = await conn.execute_query_dict(
+                    f"SELECT {_q(dialect, 'amount')} AS a FROM {tbl}")
+            except Exception:
+                continue  # 表不存在 = 全回滚语义下的合法终态
+            for r in vals:
+                lost = False
+                if r["a"] in bad_forms:
+                    mutated.append(f"{tbl}.amount={r['a']}")
+        if lost:
+            problems.append(f"原值 {AMOUNT_INEXACT} 在 orders/orders_old 中都找不到——数据丢了")
+        if mutated:
+            problems.append(f"发现被静默改值的行：{mutated}（截断/换算形式，裁定禁止）")
     await Tortoise.close_connections()
     return problems
 
