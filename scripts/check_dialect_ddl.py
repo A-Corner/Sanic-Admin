@@ -44,7 +44,7 @@ EXPECTED_TYPES = {
             "notes": "longtext",         # TextField 在 MySQL 是 LONGTEXT
         },
         "orders": {
-            "amount": "double",
+            "amount": "int",          # SPEC-005：金额改最小单位整数（分）
             "quantity": "int",
             "customer_id": "int",
         },
@@ -59,7 +59,7 @@ EXPECTED_TYPES = {
             "notes": "text",
         },
         "orders": {
-            "amount": "double precision",
+            "amount": "integer",      # SPEC-005：金额改最小单位整数（分）
             "quantity": "integer",
             "customer_id": "integer",
         },

@@ -185,7 +185,10 @@ async def _seed_all(client, auth_headers) -> None:
     if customer_id:
         await client.post("/api/v1/orders", headers=auth_headers, json={
             "customer_id": customer_id, "title": f"seed-order-{tag}",
-            "amount": 10.0, "status": "pending",
+            # SPEC-005：amount 是最小单位整数（分），10.00 元 = 1000 分。
+            # 不能写 10.0——float 会被 API 的 `type(v) is int` 规则拒收
+            # （这正是「小数金额必须被拒」的预期行为，不是测试 bug）。
+            "amount": 1000, "status": "pending",
         })
         await client.post("/api/v1/tickets", headers=auth_headers, json={
             "title": f"seed-{tag}", "status": "open", "priority": "normal",
